@@ -55,9 +55,22 @@
 
 <!-- CORTEX:SETUP:START -->
 ## Setup (Erstinstallation)
+
+Cortex zu einem bestehenden Projekt hinzufügen:
+```bash
+git clone --depth 1 https://github.com/NabilW1995/claude-cortex.git .cortex-temp && node .cortex-temp/scripts/template/install.js . && rm -rf .cortex-temp
+```
+
+Nach der Installation:
 ```bash
 npm install                                    # Dependencies
-browser-use install && browser-use doctor      # Browser Use CLI
+npm run db:init                                # Learning-Datenbank
+browser-use install && browser-use doctor      # Browser Use CLI (optional)
+```
+
+Cortex updaten:
+```bash
+npm run cortex:update
 ```
 <!-- CORTEX:SETUP:END -->
 
