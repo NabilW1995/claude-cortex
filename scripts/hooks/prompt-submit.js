@@ -79,6 +79,21 @@ async function processPrompt(prompt) {
       console.error('[Learning-DB] ✅ Erfolg erkannt — prüfe ob Learnings extrahiert werden können');
     }
 
+    // ==================== UNSTICKER: Correction Streak ====================
+    const streakFile = path.join(projectDir, '.claude', 'logs', '.correction-streak');
+    if (isCorrection) {
+      const currentStreak = fs.existsSync(streakFile) ? parseInt(fs.readFileSync(streakFile, 'utf-8').trim()) || 0 : 0;
+      const newStreak = currentStreak + 1;
+      fs.writeFileSync(streakFile, String(newStreak));
+      if (newStreak >= 5) {
+        console.error(`\n[Unsticker] ⚠️ ${newStreak} Korrekturen hintereinander — Root-Cause-Analyse empfohlen!`);
+        console.error('[Unsticker] Empfehlung: Nutze den unsticker Agent oder /unstick für Hilfe.\n');
+      }
+    } else if (isSuccess || !isCorrection) {
+      // Reset streak on success or neutral prompt
+      if (fs.existsSync(streakFile)) fs.writeFileSync(streakFile, '0');
+    }
+
     // ==================== TASK-RELEVANT LEARNING SEARCH ====================
     const stopWords = new Set([
       'der', 'die', 'das', 'ein', 'eine', 'und', 'oder', 'aber', 'ist', 'sind',

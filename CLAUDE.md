@@ -76,6 +76,7 @@ npm run cortex:update
 
 <!-- CORTEX:REFS:START -->
 ## Reference Documents (Detail-Regeln)
+@.claude/rules/agent-routing.md — Wann welcher Agent automatisch laufen MUSS
 @.claude/rules/design-flow.md — Design-Workflow: Stitch vs Lokal, Schritt-für-Schritt
 @.claude/rules/browser-use.md — Browser Use CLI Commands & Regeln
 @.claude/rules/testing.md — Testing-Pyramide, TDD, E2E mit Browser Use
