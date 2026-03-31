@@ -31,4 +31,36 @@ const projectName = path.basename(projectDir);
   } catch (e) {
     if (e.message) console.error(`[Learning-DB] Session-End Error: ${e.message}`);
   }
+
+  // Auto-push learnings at session end
+  try {
+    const { execSync } = require('child_process');
+
+    // Check if there are changes to push
+    const hasChanges = execSync(
+      'git diff --name-only .claude/team-learnings.json .claude/knowledge-base.md 2>/dev/null || echo ""',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+
+    const hasUntracked = execSync(
+      'git ls-files --others --exclude-standard .claude/team-learnings.json .claude/knowledge-base.md 2>/dev/null || echo ""',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+
+    if (hasChanges || hasUntracked) {
+      execSync('git add .claude/team-learnings.json .claude/knowledge-base.md 2>/dev/null', {
+        cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe']
+      });
+      execSync('git commit -m "chore: sync learnings" --no-verify 2>/dev/null', {
+        cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe']
+      });
+      // Push async (don't block session end)
+      const { spawn } = require('child_process');
+      const push = spawn('git', ['push'], { cwd: projectDir, detached: true, stdio: 'ignore' });
+      push.unref();
+      console.error('[Learning-Sync] Learnings committed and push started');
+    }
+  } catch (e) {
+    // Silent fail — don't block session end
+  }
 })();

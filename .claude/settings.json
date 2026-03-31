@@ -168,6 +168,11 @@
           {
             "type": "command",
             "command": "node scripts/hooks/session-end.js"
+          },
+          {
+            "type": "command",
+            "command": "node scripts/hooks/auto-push-learnings.js",
+            "async": true
           }
         ]
       }
