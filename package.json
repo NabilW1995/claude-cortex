@@ -1,7 +1,7 @@
 {
-  "name": "claude-starter-template",
+  "name": "claude-cortex",
   "version": "1.0.0",
-  "description": "Claude Code Starter Team Template — Meta-Template mit Lernsystem, Discovery, Scaffolding und Enterprise Testing",
+  "description": "The collective brain for Claude Code — shared learnings, rules, hooks, and skills across all your projects",
   "private": true,
   "scripts": {
     "db:init": "node scripts/db/init-db.js",
@@ -11,6 +11,10 @@
     "team:export": "node scripts/hooks/sync-team-learnings.js export",
     "team:import": "node scripts/hooks/sync-team-learnings.js import",
     "team:stats": "node scripts/hooks/sync-team-learnings.js stats",
+    "cortex:install": "node scripts/template/install.js",
+    "cortex:update": "node scripts/template/update.js",
+    "cortex:sync-check": "node scripts/template/sync-check.js",
+    "cortex:version": "node -e \"console.log(require('./.claude-template.json').version)\"",
     "postinstall": "npm run db:init"
   },
   "dependencies": {
