@@ -1,0 +1,28 @@
+{
+  "name": "claude-cortex",
+  "version": "1.0.0",
+  "repo": "NabilW1995/claude-cortex",
+  "installedAt": "2026-04-01T00:00:00Z",
+  "lastUpdated": "2026-04-01T00:00:00Z",
+  "lastSyncCheck": null,
+  "templateOwned": [
+    ".claude/rules/",
+    ".claude/agents/",
+    ".claude/commands/",
+    ".claude/skills/",
+    "scripts/hooks/",
+    "scripts/db/"
+  ],
+  "projectOwned": [
+    "CLAUDE.local.md",
+    ".claude/knowledge-base.md",
+    ".claude/knowledge-nominations.md",
+    ".claude/settings.local.json",
+    ".mcp.json"
+  ],
+  "mergeFiles": [
+    "CLAUDE.md",
+    ".claude/settings.json",
+    ".claude/team-learnings.json"
+  ]
+}

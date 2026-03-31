@@ -72,6 +72,11 @@
           {
             "type": "command",
             "command": "node scripts/hooks/sync-team-learnings.js export"
+          },
+          {
+            "type": "command",
+            "command": "node scripts/template/sync-check.js",
+            "async": true
           }
         ]
       },
@@ -144,6 +149,10 @@
           },
           {
             "type": "command",
+            "command": "node scripts/template/sync-check.js"
+          },
+          {
+            "type": "command",
             "command": "node scripts/hooks/sync-team-learnings.js import"
           },
           {
@@ -159,6 +168,11 @@
           {
             "type": "command",
             "command": "node scripts/hooks/session-end.js"
+          },
+          {
+            "type": "command",
+            "command": "node scripts/hooks/auto-push-learnings.js",
+            "async": true
           }
         ]
       }
