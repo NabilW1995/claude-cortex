@@ -1,0 +1,23 @@
+{
+  "name": "claude-starter-template",
+  "version": "1.0.0",
+  "description": "Claude Code Starter Team Template — Meta-Template mit Lernsystem, Discovery, Scaffolding und Enterprise Testing",
+  "private": true,
+  "scripts": {
+    "db:init": "node scripts/db/init-db.js",
+    "db:reset": "node scripts/db/init-db.js --reset",
+    "learn:search": "node scripts/db/store.js --search",
+    "learn:stats": "node scripts/db/store.js --stats",
+    "team:export": "node scripts/hooks/sync-team-learnings.js export",
+    "team:import": "node scripts/hooks/sync-team-learnings.js import",
+    "team:stats": "node scripts/hooks/sync-team-learnings.js stats",
+    "postinstall": "npm run db:init"
+  },
+  "dependencies": {
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

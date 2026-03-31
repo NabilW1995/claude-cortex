@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "description": "Shared team learnings — auto-synced via git commits. DO NOT edit manually.",
+  "learnings": [
+    {
+      "fingerprint": "9e8c09d896ab",
+      "category": "Security",
+      "rule": "NEVER accept mkfs commands — mkfs formatiert Festplatten und löscht alles",
+      "rule_en": "NEVER accept mkfs commands — mkfs formats hard drives and deletes everything",
+      "mistake": "mkfs mit mkdir verwechselt und akzeptiert",
+      "mistake_en": "Confused mkfs with mkdir and accepted it",
+      "correction": "mkdir = Ordner erstellen (harmlos). mkfs = Festplatte formatieren (zerstörend)",
+      "correction_en": "mkdir = create folder (harmless). mkfs = format hard drive (destructive)",
+      "confidence": 0.95,
+      "project": null,
+      "shared_by": "Nabil",
+      "shared_at": "2026-03-30T22:35:21.371Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "4e154fdb212e",
+      "category": "workflow",
+      "rule": "IMMER frontend-design + ui-ux-guide Skills aktivieren BEVOR UI/Design-Arbeit gemacht wird. Keine Ausnahmen, auch nicht im Execution-Modus.",
+      "rule_en": "ALWAYS activate frontend-design + ui-ux-guide skills BEFORE any UI/design work. No exceptions, not even in execution mode.",
+      "mistake": "Bei Mindbank wurden Bank-Templates (Revolut, N26) und die Landing Page gebaut ohne die frontend-design und ui-ux-guide Skills zu aktivieren. Geschwindigkeit wurde über den Design-Approval-Prozess gestellt.",
+      "mistake_en": "In Mindbank, bank templates (Revolut, N26) and landing page were built without activating frontend-design and ui-ux-guide skills. Speed was prioritized over the design approval process.",
+      "correction": "Vor JEDER UI-Aufgabe: (1) frontend-design + ui-ux-guide Skills aktivieren, (2) User nach Design-Präferenzen fragen, (3) 2-3 Optionen zeigen, (4) Auf Genehmigung warten, (5) DANN erst Code schreiben. Diese Regel gilt auch im subagent-driven development und plan execution Modus.",
+      "correction_en": "Before EVERY UI task: (1) activate frontend-design + ui-ux-guide skills, (2) ask user for design preferences, (3) show 2-3 options, (4) wait for approval, (5) THEN write code. This rule applies even in subagent-driven development and plan execution mode.",
+      "confidence": 0.9,
+      "project": "mindbank",
+      "shared_by": "Nabil",
+      "shared_at": "2026-03-31T17:39:52.620Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "ca4bb7b2b3e5",
+      "category": "CSS",
+      "rule": "Bei Zentrierung: Container braucht max-width und margin: 0 auto",
+      "rule_en": "For centering: Container needs max-width and margin: 0 auto",
+      "mistake": "Nur flexbox benutzt ohne feste Breite am Parent",
+      "mistake_en": "Only used flexbox without fixed width on parent",
+      "correction": "Container max-width setzen, dann margin: 0 auto",
+      "correction_en": "Set container max-width, then margin: 0 auto",
+      "confidence": 0.8,
+      "project": "test-projekt",
+      "shared_by": "Nabil",
+      "shared_at": "2026-03-30T21:43:19.817Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "3865d3d277c6",
+      "category": "Auth",
+      "rule": "Login-Token muss HttpOnly Cookie sein, nicht localStorage",
+      "rule_en": "Login token must be HttpOnly cookie, not localStorage",
+      "mistake": "Token in localStorage gespeichert — XSS-Risiko",
+      "mistake_en": "Token stored in localStorage — XSS vulnerability",
+      "correction": "express-session mit cookie:{httpOnly:true,secure:true}",
+      "correction_en": "express-session with cookie:{httpOnly:true,secure:true}",
+      "confidence": 0.8,
+      "project": "webshop",
+      "shared_by": "Nabil",
+      "shared_at": "2026-03-30T22:03:32.772Z",
+      "times_applied": 0
+    }
+  ]
+}
