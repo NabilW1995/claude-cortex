@@ -14,7 +14,7 @@ MUST: Bei JEDER Design/UI-Aufgabe ZUERST den User fragen:
 
 **Option B: Lokales Design** (für schnelle Komponenten & kleine Änderungen)
 - Claude designt direkt im Code
-- Nutzt frontend-design + ui-ux-guide Skills
+- Nutzt frontend-design + ui-ux-pro-max Skills
 - Ergebnis: Code-first, schneller bei kleinen Aufgaben
 
 ## Schritt 2A: Google Stitch Workflow (wenn Option A gewählt)
@@ -31,7 +31,7 @@ MUST: Bei JEDER Design/UI-Aufgabe ZUERST den User fragen:
 
 ## Schritt 2B: Lokaler Design Workflow (wenn Option B gewählt)
 1. `frontend-design` Skill aktivieren — Design-Philosophie laden
-2. `ui-ux-guide` Skill aktivieren — Style-Empfehlungen, Paletten, Fonts
+2. `ui-ux-pro-max` Skill aktivieren — 67 Styles, 96 Paletten, 57 Font-Pairings
 3. User nach Präferenzen fragen (Style, Farben, Stimmung)
 4. 2-3 Optionen zeigen (nie einfach eine aufzwingen)
 5. Auf Genehmigung warten
