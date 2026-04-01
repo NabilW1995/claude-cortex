@@ -19,13 +19,21 @@ description: Automatic agent routing - when to trigger which agent based on cont
 - FORMAT: Was wurde gemacht, Warum, Änderungen, Test-Anleitung, Checkliste
 - MUST: PR-Beschreibung vom Agent schreiben lassen, nicht selbst formulieren
 
+### rubber-duck — Nach 3 aufeinanderfolgenden Korrekturen
+- TRIGGER: Wenn der User 3x hintereinander korrigiert (prompt-submit.js zählt streak)
+- TRIGGER: Wenn der User sagt "Ich weiß nicht wie", "Hilf mir denken"
+- TRIGGER: Wenn der unsticker nach 2 Runden keine Lösung findet
+- AKTION: Sokratisches Debugging — Fragen stellen statt Antworten geben
+- Bei streak == 3: Meldung "[Rubber-Duck] 🦆 3 Korrekturen — Problem laut formulieren"
+- MUST: Niemals direkt die Lösung geben — der User soll sie selbst finden
+
 ### unsticker — Nach 5 aufeinanderfolgenden Korrekturen
-- TRIGGER: Wenn der User 5x hintereinander korrigiert ("nein", "falsch", "nicht so", "anders")
+- TRIGGER: Wenn der User 5x hintereinander korrigiert (prompt-submit.js zählt streak)
 - AKTION: Agent starten für Root-Cause-Analyse
 - FORMAT: Problem klassifizieren, Learnings-DB prüfen, einfachste Lösung zuerst
-- Der prompt-submit.js Hook zählt aufeinanderfolgende Korrekturen (corrections_streak)
-- Bei streak >= 5: Meldung "[Unsticker] 5 Korrekturen hintereinander — Root-Cause-Analyse empfohlen"
+- Bei streak >= 5: Meldung "[Unsticker] ⚠️ 5 Korrekturen — Root-Cause-Analyse empfohlen"
 - MUST: Claude MUSS dann den unsticker Agent starten
+- Eskalations-Kette: Rubber Duck (3) → Unsticker (5)
 
 ### yak-shave-detector — Periodisch + bei Komprimierung
 - TRIGGER: Vor Context-Komprimierung (PreCompact)
@@ -55,9 +63,9 @@ description: Automatic agent routing - when to trigger which agent based on cont
 - FORMAT: Archaeological Report mit Timeline, Sicherheits-Verdict (SAFE/CAUTION/DANGEROUS)
 - MUST: Immer Git-History lesen bevor Schlüsse gezogen werden
 
-### debt-collector — Bei /debt-map + periodisch
+### debt-collector — Bei /debt-map + automatisch bei steigender Debt
 - TRIGGER: Wenn User `/debt-map` aufruft
-- TRIGGER: Wenn viele TODOs/FIXMEs in geänderten Dateien erkannt werden
+- TRIGGER: Automatisch wenn TODO/FIXME-Zähler >=20 UND steigend (completeness-gate.sh Hook)
 - TRIGGER: Periodisch bei größeren Projekten (empfohlen: wöchentlich)
 - AKTION: Codebase scannen, Tech-Debt kategorisieren und priorisieren
 - FORMAT: Debt-Report mit Hotspots, Impact×Effort Matrix, Empfehlungen
