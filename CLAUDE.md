@@ -15,7 +15,7 @@
 |---|---|
 | UI/Design/Seite/Website bauen | → Design-Flow starten (@.claude/rules/design-flow.md) |
 | "Neues Projekt starten" | project-discovery → scaffolding |
-| "Welche Farben/Fonts/Style?" | ui-ux-guide |
+| "Welche Farben/Fonts/Style?" | ui-ux-pro-max |
 | Code schreiben/Feature bauen | → coder Agent dispatchen |
 | "Review"/"Prüfe den Code" | → code-review Agent dispatchen |
 | Fehler/Bug/Error | → error-whisperer + debug-investigator |

@@ -57,7 +57,7 @@ Du musst NICHT immer Commands nutzen. Sag einfach was du willst:
 
 | Du sagst... | Was passiert |
 |---|---|
-| "Bau mir eine Kontaktseite" | frontend-design + ui-ux-guide Skills aktivieren automatisch |
+| "Bau mir eine Kontaktseite" | frontend-design + ui-ux-pro-max Skills aktivieren automatisch |
 | "Der Login funktioniert nicht" | Unsticker-Agent hilft |
 | "Was bedeutet dieser Fehler?" | Error-Whisperer übersetzt |
 | "Ich komme nicht weiter" | `/unstick` oder sag es einfach |
