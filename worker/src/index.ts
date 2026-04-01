@@ -470,6 +470,9 @@ async function sendOrEditDashboard(
     inline_keyboard: [
       [
         { text: "\u{1F504} Refresh", callback_data: "refresh" },
+        { text: "\u{1F465} Active", callback_data: "active" },
+      ],
+      [
         { text: "\u{1F4CB} Claim Tasks", callback_data: "claim" },
         { text: "\u{2705} Done", callback_data: "done" },
       ],
@@ -596,6 +599,59 @@ async function handleTelegram(
 
     if (cbData === "refresh") {
       await sendOrEditDashboard(env, projectId, project);
+      return new Response("OK");
+    }
+
+    if (cbData === "active") {
+      const members = await getTeamMembers(env.PROJECTS);
+      const sessions = await getActiveSessions(env.PROJECTS, projectId);
+      const dashState = await getDashboardState(env.PROJECTS, projectId);
+
+      if (sessions.length === 0) {
+        await sendTelegram(
+          project.botToken,
+          project.chatId,
+          "\u{1F465} Nobody is currently working on this project.",
+          project.threadId
+        );
+        return new Response("OK");
+      }
+
+      const lines: string[] = [];
+      lines.push("\u{1F465} <b>Currently active:</b>");
+      lines.push("");
+
+      for (const s of sessions) {
+        const color = getUserColorByName(members, s.user);
+        const userDash = dashState.activeSessions.find(
+          (ds) => ds.user === s.user
+        );
+        const tasks = userDash?.tasks || [];
+
+        lines.push(`${color} <b>${s.user}</b> (since ${s.since})`);
+
+        if (tasks.length > 0) {
+          lines.push(
+            `   \u{1F4CB} Working on: ${tasks.map((t) => "#" + t).join(", ")}`
+          );
+        }
+
+        // Try to find what branch this user might be on
+        // (from their session start event or git info)
+        const member = members.find(
+          (m) => m.name === s.user || m.github === s.user
+        );
+        if (member) {
+          lines.push(`   \u{1F517} GitHub: ${member.github}`);
+        }
+      }
+
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        lines.join("\n"),
+        project.threadId
+      );
       return new Response("OK");
     }
 
