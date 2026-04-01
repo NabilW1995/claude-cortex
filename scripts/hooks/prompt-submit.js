@@ -23,6 +23,46 @@ async function processPrompt(prompt) {
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const projectName = path.basename(projectDir);
 
+  // ==================== INACTIVITY CHECK ====================
+  // If 3+ hours since last prompt → suggest /start
+  // If new session (no timestamp file) → suggest /start
+  const lastPromptFile = path.join(projectDir, '.claude', 'logs', '.last-prompt-time');
+  const now = Date.now();
+
+  if (fs.existsSync(lastPromptFile)) {
+    const lastTime = parseInt(fs.readFileSync(lastPromptFile, 'utf-8').trim()) || 0;
+    const hoursInactive = (now - lastTime) / (1000 * 60 * 60);
+    if (hoursInactive >= 3) {
+      console.error(`\n[Cortex] ☀️ ${Math.floor(hoursInactive)} Stunden seit dem letzten Prompt — empfehle /start um den Stand zu laden.`);
+      console.error('[Cortex] 🔄 Empfehle auch /template-update um neue Learnings vom Team zu holen.\n');
+      // Auto-push any unsaved learnings from before the break
+      try {
+        const { execSync } = require('child_process');
+        const status = execSync('git status --porcelain .claude/team-learnings.json .claude/knowledge-base.md 2>/dev/null', {
+          cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']
+        }).trim();
+        if (status) {
+          execSync('git add .claude/team-learnings.json .claude/knowledge-base.md 2>/dev/null', { cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'] });
+          execSync('git commit -m "chore: sync learnings (auto-push after inactivity)" --no-verify 2>/dev/null', { cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'] });
+          const { spawn } = require('child_process');
+          const push = spawn('git', ['push'], { cwd: projectDir, detached: true, stdio: 'ignore' });
+          push.unref();
+          console.error('[Cortex] 📤 Unsaved Learnings von vor der Pause wurden gepusht.\n');
+        }
+      } catch {}
+    }
+  } else {
+    // First prompt of this session
+    const stateDir = path.join(projectDir, '.claude', 'logs');
+    if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true });
+    console.error('\n[Cortex] ☀️ Neue Session erkannt — empfehle /start um den Stand zu laden.\n');
+  }
+
+  // Update last prompt timestamp
+  const stateDir = path.join(projectDir, '.claude', 'logs');
+  if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(lastPromptFile, String(now));
+
   // ==================== CORRECTION DETECTION ====================
   const correctionPatternsDE = [
     /\bnein\b/i, /\bfalsch\b/i, /\bstimmt nicht\b/i, /\bpasst nicht\b/i,

@@ -103,15 +103,54 @@ Alle 22 Commands im Detail: `.claude/command-index.md`
 
 ## 5. Learnings — Wie das System lernt
 
-### Automatisch
-1. Claude macht einen Fehler → Du korrigierst → Claude fixt es → Du sagst "perfekt"
-2. Claude extrahiert das Learning: Was war falsch? Was ist richtig?
-3. Claude fragt dich sofort: "Soll das eine feste Regel werden?"
-4. Bei Genehmigung → Learning wird zur festen Regel in `knowledge-base.md`
+### Deine Aufgabe: Nur 2 Klicks
+
+Das Learning-System läuft fast komplett automatisch. Du musst nur **zwei Dinge** tun:
+
+**Schritt 1: Korrigieren wenn etwas falsch ist**
+Sag einfach was falsch ist — in deinen eigenen Worten:
+- "Nein, das soll blau sein, nicht rot"
+- "Das funktioniert nicht, der Button macht nichts"
+- "Falsch, ich wollte das anders"
+
+**Schritt 2: Bestätigen wenn es funktioniert**
+Wenn Claude es gefixt hat, sag dass es passt:
+- "Perfekt, genau so"
+- "Ja, funktioniert jetzt"
+- "Super, passt"
+
+**Was dann automatisch passiert:**
+```
+Du sagst "Nein, falsch"     → Claude erkennt: Korrektur
+  ↓
+Claude fixt es              → Du sagst "Perfekt"
+  ↓
+Claude zeigt dir:           "📝 Learning gespeichert:
+                             Regel: Buttons müssen immer blau sein
+                             Fehler: Button war rot
+                             Korrektur: Button-Farbe auf blau geändert"
+  ↓
+Claude fragt:               "Soll das eine feste Regel werden?"
+  ↓
+Du sagst "Ja"               → Wird zur festen Regel
+Du sagst "Nein"             → Wird nur als Notiz gespeichert
+```
+
+Das ist alles. Du musst keinen Code schreiben, keine Datenbank pflegen, nichts konfigurieren. Einfach korrigieren und bestätigen.
+
+### Was im Hintergrund passiert (automatisch)
+
+| Was | Wann | Wie |
+|-----|------|-----|
+| Learning in DB speichern | Nach deiner Bestätigung | SQLite Datenbank |
+| An Team teilen | Bei Session-Ende oder nach 3h Pause | Git push von team-learnings.json |
+| Relevante Learnings laden | Bei jedem neuen Prompt | Hook durchsucht die DB |
+| Von Teammates importieren | Bei Session-Start | Git pull von team-learnings.json |
+| Alte Learnings vergessen | Nach 6 Monaten ohne Nutzung | Confidence-Decay |
 
 ### Über Projekte hinweg
-- Alle Learnings werden in einer **globalen SQLite-Datenbank** gespeichert (`~/.claude-learnings/learnings.db`)
-- Auf DEINEM Rechner: Projekt A lernt → Projekt B weiß es sofort
+- Alle Learnings werden in einer **globalen SQLite-Datenbank** gespeichert
+- Auf DEINEM Rechner: Projekt A lernt → Projekt B weiß es sofort (gleiche DB)
 - Für Teammates: `team-learnings.json` wird automatisch committed und gepusht
 
 ### Über das Template
