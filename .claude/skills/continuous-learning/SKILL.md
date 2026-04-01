@@ -1,83 +1,206 @@
 ---
 name: continuous-learning
-description: Automatic learning system that detects corrections, extracts lessons, and builds a persistent knowledge base via SQLite
-trigger: Runs via hooks on every session (session-start, prompt-submit, session-end)
+description: >
+  Automatic learning system that detects corrections, extracts lessons, and builds a persistent
+  knowledge base via SQLite. Use this skill whenever: the user corrects Claude ("nein", "falsch",
+  "das stimmt nicht", "wrong", "not what I meant"), the user confirms a fix worked ("perfekt",
+  "genau", "funktioniert", "works"), when Claude makes the same mistake twice, when the user asks
+  "warum machst du den gleichen Fehler?", when learnings need to be saved or searched, or when
+  the learning system needs to be explained. Also triggers on /learn, /audit, and correction
+  patterns in any language.
 ---
 
 # Continuous Learning System
 
-## Übersicht
-Ein dreistufiges Lernsystem das automatisch aus dem Gesprächsverlauf lernt. Keine manuellen Tags nötig — das System erkennt natürliche Konversationsmuster in Deutsch und Englisch.
+## How It Works
 
-## Stufe 1: Erkennung
+This system learns from every conversation. When you make a mistake and the user corrects you, the system captures what went wrong and what the right approach is. Next time a similar situation comes up, the system reminds you of the lesson — so the same mistake never happens twice.
 
-### Korrektur-Patterns (prompt-submit.js)
+Think of it as a team notebook: every correction becomes a lesson, every lesson helps everyone on the team.
 
-**Deutsch — Korrekturen:**
-nein, falsch, stimmt nicht, passt nicht, immer noch nicht, nicht richtig, anders, mach das nicht, stop, warte, rückgängig, zurück, funktioniert nicht, geht nicht, klappt nicht
+## The Learning Cycle
 
-**Englisch — Korrekturen:**
+```
+User gives task → Claude tries → User corrects → Claude fixes → User confirms
+                                      ↓                              ↓
+                              Correction detected              Learning extracted
+                              (Hook + Claude)                  (saved to SQLite DB)
+                                                                     ↓
+                                                              User asked: "Soll das
+                                                              eine feste Regel werden?"
+                                                                  ↓           ↓
+                                                              Approved    Rejected
+                                                                  ↓
+                                                          knowledge-base.md
+                                                          (permanent rule)
+```
+
+## Stage 1: Detection
+
+### How Corrections Are Detected
+
+Two systems work together — hooks provide signals, Claude provides understanding:
+
+**Hook-based detection** (prompt-submit.js, runs automatically):
+The hook scans every user message for correction patterns and success patterns. It tracks a correction streak — 3 in a row triggers the rubber-duck agent, 5 triggers the unsticker.
+
+**Claude-based detection** (inline, in the conversation):
+Claude recognizes corrections that go beyond simple keywords:
+- User describes a problem with what Claude just did
+- User shows how it should be done instead
+- User's tone shifts from positive to frustrated
+- User repeats a request with different wording (sign that the first attempt failed)
+
+### Correction Patterns
+
+**German — Corrections:**
+nein, falsch, stimmt nicht, passt nicht, immer noch nicht, nicht richtig, anders, mach das nicht, stop, warte, rückgängig, zurück, funktioniert nicht, geht nicht, klappt nicht, hat nicht geklappt
+
+**English — Corrections:**
 no, wrong, that's not right, incorrect, undo, revert, don't do that, stop, not working, still broken, try again, that didn't work
 
-**Deutsch — Erfolg:**
-perfekt, genau, funktioniert, super, passt, endlich, ja genau so, toll, sieht gut aus, stimmt jetzt, richtig so, jetzt geht's
+**German — Success:**
+perfekt, genau, funktioniert, super, passt, endlich, ja genau so, toll, sieht gut aus, stimmt jetzt, richtig so, jetzt geht's, klasse, wunderbar, prima
 
-**Englisch — Erfolg:**
-perfect, exactly, works, great, nice, that's it, looks good, finally, correct, awesome
+**English — Success:**
+perfect, exactly, works, great, nice, that's it, looks good, finally, correct, awesome, yes, nailed it
 
-### Konversations-Analyse (session-end.js)
-Am Ende jeder Session:
-1. Finde Muster: Aufgabe → Fehlversuch(e) → Korrektur(en) → Lösung → Erfolg
-2. Für jedes Muster extrahiere: Problem, Fehlversuche, finale Lösung
-3. Kategorisiere: UI, Backend, Database, Auth, Styling, Testing, Git, etc.
+### Task-Relevant Learning Search (prompt-submit.js)
 
-### Task-relevante Learnings (prompt-submit.js)
-Bei JEDEM neuen Prompt:
-1. Keywords extrahieren (Stopwörter filtern)
-2. FTS5-Suche in SQLite DB
-3. Top 3-5 relevante Learnings an Claude übergeben
+On every new prompt, the hook:
+1. Extracts keywords (filters out common stop words in DE + EN)
+2. Searches the SQLite DB using LIKE-based pattern matching
+3. Returns the top 3-5 most relevant learnings based on confidence and times_applied
+4. Marks each returned learning as "applied" (incrementing times_applied)
 
-## Stufe 2: Speicherung (SQLite)
+This means Claude gets reminded of relevant past lessons before starting any new task.
 
-Datenbank: ~/.claude-learnings/learnings.db
+## Stage 2: Extraction & Storage
 
-**Tabelle: learnings**
-- id, created_at, project, category
-- rule (Was ist die Lektion?)
-- mistake (Was wurde falsch gemacht?)
-- correction (Was ist die richtige Lösung?)
-- confidence (0.3 = unsicher, 0.9 = bestätigt)
-- times_applied (Nutzungszähler)
+### When to Extract a Learning
 
-**Tabelle: sessions**
-- id, project, started_at, ended_at
-- corrections_count, prompts_count
+Extract a learning when ALL of these are true:
+1. Claude made an attempt that was wrong or suboptimal
+2. The user corrected it (explicitly or by showing the right way)
+3. The correction was applied and confirmed to work
 
-**Tabelle: nominations**
-- id, learning_id, status (pending/approved/rejected)
+Do NOT extract learnings from:
+- Simple misunderstandings about requirements (not a pattern)
+- One-time project-specific decisions (not generalizable)
+- User preferences that change frequently
 
-**FTS5 Index** für Volltextsuche mit BM25-Ranking
+### How to Extract
 
-## Stufe 3: Knowledge Promotion
+When a correction→success cycle is detected, Claude extracts:
 
-### Nominations-Pipeline
-1. Neues Learning → Status: pending
-2. Auditor-Agent reviewed:
-   - Korrekt? Allgemein genug? Widerspricht bestehenden Regeln?
-3. Approved → knowledge-base.md mit [Source:] Tag
-4. Rejected → confidence -= 0.1
+| Field | What to capture | Example |
+|-------|----------------|---------|
+| `rule` | The lesson in one sentence | "Login-Token muss HttpOnly Cookie sein, nicht localStorage" |
+| `mistake` | What was done wrong | "Token in localStorage gespeichert — XSS-Risiko" |
+| `correction` | The right approach | "express-session mit cookie:{httpOnly:true, secure:true}" |
+| `category` | Topic area | Auth, CSS, Security, Git, Testing, UI, Backend, etc. |
+| `project` | Current project name | "webshop" or null for global lessons |
+| `confidence` | How certain (0.0-1.0) | 0.8 for first occurrence |
+
+### Bilingual Storage (Team Feature)
+
+Every learning is stored in BOTH German and English:
+- `rule` + `rule_en`
+- `mistake` + `mistake_en`
+- `correction` + `correction_en`
+
+The original language goes in the main field, the translation in the `_en` field. This way teammates in different countries can read the learnings in their language.
+
+### SQLite Database
+
+Location: `~/.claude-learnings/learnings.db` (global, shared across all projects on this machine)
+
+**Save a learning via Python:**
+```python
+import sqlite3, os
+db_path = os.path.join(os.path.expanduser('~'), '.claude-learnings', 'learnings.db')
+conn = sqlite3.connect(db_path)
+c = conn.cursor()
+c.execute("""INSERT INTO learnings 
+  (project, category, rule, rule_en, mistake, mistake_en, correction, correction_en, confidence)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+  [project, category, rule, rule_en, mistake, mistake_en, correction, correction_en, 0.8])
+learning_id = c.lastrowid
+c.execute("INSERT INTO nominations (learning_id, status) VALUES (?, 'pending')", [learning_id])
+conn.commit()
+conn.close()
+```
+
+### Inline Approval Flow
+
+After saving a learning, immediately ask the user:
+
+```
+📝 Learning gespeichert:
+  Regel: [rule]
+  Fehler: [mistake]  
+  Korrektur: [correction]
+
+Soll das eine feste Regel werden? (Genehmigen / Ablehnen)
+```
+
+- **Approved** → Add to `.claude/knowledge-base.md` with `[Source: learning-db #ID]` tag, set nomination to 'approved', increase confidence by 0.2
+- **Rejected** → Set nomination to 'rejected', decrease confidence by 0.1, ask for reason
+
+This replaces the old workflow where learnings sat in a queue until someone ran `/audit`. The `/audit` command still exists as a fallback for reviewing older pending nominations.
+
+## Stage 3: Knowledge Promotion
+
+### Confidence System
+
+| Confidence | Meaning | How it changes |
+|-----------|---------|---------------|
+| 0.8 | New learning (default) | Set on creation |
+| +0.2 | User approved it | Via inline approval or /audit |
+| -0.1 | User rejected it | Via inline approval or /audit |
+| -0.1 | Not applied for 6+ months | Automatic decay (session-start.js) |
+| 1.0 | Maximum — proven rule | After multiple approvals |
+| <0.1 | Archived — no longer relevant | Automatic cleanup |
 
 ### Cross-Project Promotion
-- Learning in 2+ Projekten → confidence = 0.9 → Kandidat für globale Regel
 
-### Confidence Decay
-- >6 Monate nicht angewendet → confidence -= 0.1
-- Unter 0.1 → automatisch archiviert
-- Widerlegt → confidence = 0 → archiviert
+When the same lesson appears in 2+ different projects (matched by similar rule text), its confidence is boosted to 0.9 — it's a candidate for a global rule that applies everywhere.
 
-## Regeln
-- MUST: Learnings in einfacher Sprache speichern
-- MUST: Immer Problem UND Lösung speichern
-- MUST: Projekt-Tag für Cross-Projekt-Analyse
-- NEVER: Sensitive Daten in Learnings
-- NEVER: Mehr als 10 Learnings pro Session erzwingen
+### Team Sync
+
+Learnings are shared with teammates via `team-learnings.json`:
+- **Export:** High-confidence learnings (≥0.7) are exported to `.claude/team-learnings.json` with a unique fingerprint
+- **Import:** At session start, new learnings from teammates are imported into the local DB
+- **Auto-push:** At session end, changes are committed and pushed to the project repo
+- **Deduplication:** Fingerprints prevent the same learning from being imported twice
+
+## Commands
+
+| Command | What it does |
+|---------|-------------|
+| `/learn` | Show recent learnings and statistics |
+| `/learn <keyword>` | Search learnings by topic |
+| `/audit` | Review and approve/reject pending nominations |
+| `/template-update` | Sync learnings with the Cortex template repo |
+
+## Escalation Chain
+
+When corrections pile up, the system escalates:
+
+```
+Correction 1-2:  Normal — Claude tries again
+Correction 3:    🦆 Rubber Duck agent — helps articulate the real problem
+Correction 4:    (Rubber Duck continues)
+Correction 5+:   🔧 Unsticker agent — root-cause analysis
+```
+
+## Rules
+
+- Extract learnings in simple, non-technical language — the user is not a programmer
+- Always capture BOTH the problem AND the solution — one without the other is useless
+- Always tag with project name for cross-project analysis
+- Always store bilingually (German + English) for team sharing
+- Never store sensitive data (API keys, passwords, personal info) in learnings
+- Don't force more than 10 learnings per session — quality over quantity
+- Ask for approval immediately — don't defer to a separate audit step
+- When a learning is surfaced during a task, acknowledge it briefly: "Basierend auf einem früheren Learning: [rule]"

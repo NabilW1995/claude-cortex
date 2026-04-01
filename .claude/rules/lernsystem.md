@@ -22,9 +22,9 @@ Wenn der User nach einer Korrektur bestätigt dass es jetzt funktioniert:
 
 ## Python-Code zum Speichern
 ```python
-import sqlite3
-from datetime import datetime
-conn = sqlite3.connect(r'HOMEDIR/.claude-learnings/learnings.db')
+import sqlite3, os
+db_path = os.path.join(os.path.expanduser('~'), '.claude-learnings', 'learnings.db')
+conn = sqlite3.connect(db_path)
 c = conn.cursor()
 c.execute("""INSERT INTO learnings (project, category, rule, rule_en, mistake, mistake_en, correction, correction_en, confidence)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", [project, category, rule, rule_en, mistake, mistake_en, correction, correction_en, 0.8])
@@ -33,7 +33,6 @@ c.execute("INSERT INTO nominations (learning_id, status) VALUES (?, 'pending')",
 conn.commit()
 conn.close()
 ```
-HOMEDIR auf Windows: C:\Users\Nabil — auf Mac/Linux: ~/
 
 ## Relevante Learnings laden
 - Hooks laden automatisch relevante Learnings bei jedem Prompt (prompt-submit.js)
@@ -49,3 +48,6 @@ HOMEDIR auf Windows: C:\Users\Nabil — auf Mac/Linux: ~/
 - Wenn der User auf Englisch arbeitet: rule = Englisch, rule_en = kann leer bleiben
 - WARUM: Team-Learnings werden via Git geteilt — Teammates in anderen Ländern
   müssen die Learnings in ihrer Sprache lesen können
+
+## Vollständige Dokumentation
+Für Details siehe: @.claude/skills/continuous-learning/SKILL.md
