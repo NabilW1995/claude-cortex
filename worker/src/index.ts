@@ -351,6 +351,95 @@ async function saveThreadMessageId(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for webhook batching (bulk operations like labeling 20 issues)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape of a batch buffer entry stored in KV.
+ * Accumulates multiple events of the same type from the same actor
+ * so they can be sent as a single Telegram message.
+ */
+interface BatchBuffer {
+  items: string[];
+  firstSeen: number;
+}
+
+/**
+ * Check whether an event should be sent immediately or batched.
+ *
+ * When the same actor performs the same action type repeatedly (e.g. labeling
+ * 20 issues at once), this function accumulates events in a KV buffer and
+ * returns them as a single summary message once the buffer is old enough
+ * (>10 seconds) or large enough (>=10 items).
+ *
+ * Flow:
+ * 1. First event  -> send normally, but also start a batch buffer in KV
+ * 2. Second event -> append to buffer, suppress sending (shouldSend = false)
+ * 3. Nth event    -> if buffer age > 10s OR items >= 10, flush as batch summary
+ *
+ * The KV entry auto-expires after 30 seconds (TTL) as a safety net so
+ * stale buffers don't linger if no more events arrive.
+ */
+async function checkAndBatch(
+  kv: KVNamespace,
+  projectId: string,
+  eventType: string,
+  actor: string,
+  detail: string
+): Promise<{ shouldSend: boolean; batchMessage: string | null }> {
+  const key = `batch:${projectId}:${eventType}:${actor}`;
+  const existing = await kv.get(key);
+
+  if (existing) {
+    // There is already a buffer — append this event to it
+    let batch: BatchBuffer;
+    try {
+      batch = JSON.parse(existing) as BatchBuffer;
+    } catch {
+      // Corrupted buffer — start fresh
+      batch = { items: [], firstSeen: Date.now() };
+    }
+
+    batch.items.push(detail);
+
+    // Flush condition: buffer is older than 10 seconds OR has 10+ items
+    const ageMs = Date.now() - batch.firstSeen;
+    if (ageMs > 10_000 || batch.items.length >= 10) {
+      // Flush: delete the buffer and return a summary message
+      await kv.delete(key);
+
+      // Show up to 5 items in the summary, then "...and N more"
+      const preview = batch.items.slice(0, 5).join("\n");
+      const overflow =
+        batch.items.length > 5
+          ? `\n...and ${batch.items.length - 5} more`
+          : "";
+
+      return {
+        shouldSend: true,
+        batchMessage:
+          `@${actor} ${eventType.replace(".", " ")} ${batch.items.length} items:\n` +
+          preview +
+          overflow,
+      };
+    }
+
+    // Keep accumulating — don't send yet
+    await kv.put(key, JSON.stringify(batch), { expirationTtl: 30 });
+    return { shouldSend: false, batchMessage: null };
+  }
+
+  // First event of this type from this actor — send normally,
+  // but also start a batch buffer in case more events follow quickly.
+  await kv.put(
+    key,
+    JSON.stringify({ items: [detail], firstSeen: Date.now() } as BatchBuffer),
+    { expirationTtl: 30 }
+  );
+  return { shouldSend: true, batchMessage: null };
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers for session tracking
 // ---------------------------------------------------------------------------
 
@@ -2162,6 +2251,11 @@ async function handleRegisterMember(
  * Handle GitHub "issues" events.
  * Sends Telegram notifications for opened, closed, assigned, and
  * labeled (only "urgent" or "blocked") actions.
+ *
+ * "labeled" and "assigned" actions support batching: when someone does
+ * bulk operations on GitHub (e.g. labeling 20 issues at once), the bot
+ * accumulates them in a KV buffer and sends a single summary message
+ * instead of flooding the chat with 20 separate notifications.
  */
 async function handleGitHubIssues(
   rawBody: string,
@@ -2193,24 +2287,57 @@ async function handleGitHubIssues(
       eventType = "issues.closed";
       break;
 
-    case "assigned":
+    case "assigned": {
+      // Batching: bulk assigning many issues at once gets collapsed into one message
       if (issue.assignee) {
-        message = `\u{1F464} Issue #${issue.number} assigned to @${issue.assignee.login}`;
+        const detail = `#${issue.number} "${issue.title}" \u{2192} @${issue.assignee.login}`;
+        const batch = await checkAndBatch(
+          env.PROJECTS,
+          projectId,
+          "assigned",
+          sender.login,
+          detail
+        );
+
+        if (batch.shouldSend && batch.batchMessage) {
+          // Buffer flushed — send the batch summary
+          message = `\u{1F464} ${batch.batchMessage}`;
+        } else if (batch.shouldSend) {
+          // First event — send normally (no batch yet)
+          message = `\u{1F464} Issue #${issue.number} assigned to @${issue.assignee.login}`;
+        }
+        // else: shouldSend is false — event is buffered, don't send
         eventType = "issues.assigned";
       }
       break;
+    }
 
     case "labeled": {
-      // Only notify for high-signal labels — ignore the rest to reduce noise
       const labelName = payload.label?.name?.toLowerCase() || "";
       const importantLabels = ["urgent", "blocked"];
+
       if (importantLabels.includes(labelName)) {
+        // Important labels always send immediately — no batching
         message = `\u{1F3F7} Issue #${issue.number} labeled: ${payload.label!.name}`;
-        eventType = "issues.labeled";
       } else {
-        // Still log to D1 for reports, but don't send a Telegram message
-        eventType = "issues.labeled";
+        // Non-important labels: use batching for bulk operations
+        const detail = `#${issue.number} \u{2192} ${payload.label?.name || "unknown"}`;
+        const batch = await checkAndBatch(
+          env.PROJECTS,
+          projectId,
+          "labeled",
+          sender.login,
+          detail
+        );
+
+        if (batch.shouldSend && batch.batchMessage) {
+          // Buffer flushed — send the batch summary
+          message = `\u{1F3F7} ${batch.batchMessage}`;
+        }
+        // else: either first event (no notification for non-important labels)
+        //       or still accumulating in buffer
       }
+      eventType = "issues.labeled";
       break;
     }
 
