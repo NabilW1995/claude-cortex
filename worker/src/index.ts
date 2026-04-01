@@ -206,7 +206,8 @@ async function setActiveSessions(
   projectId: string,
   sessions: ActiveSession[]
 ): Promise<void> {
-  await kv.put(`${projectId}:sessions`, JSON.stringify(sessions));
+  // Sessions auto-expire after 2 hours (7200 seconds) — no explicit "end" needed
+  await kv.put(`${projectId}:sessions`, JSON.stringify(sessions), { expirationTtl: 7200 });
 }
 
 // ---------------------------------------------------------------------------
@@ -1438,17 +1439,15 @@ async function handleSession(
     // Note: Telegram notifications are sent by notify.js, not here
     // The dashboard is triggered separately via POST /dashboard/:projectId
   } else if (update.type === "end") {
-    // Remove user from active sessions
-    const filtered = sessions.filter((s) => s.user !== update.user);
-    await setActiveSessions(env.PROJECTS, projectId, filtered);
-
-    // Clear the user's tasks from dashboard state
+    // Don't remove session immediately — it auto-expires via KV TTL (2 hours).
+    // This prevents context compressions from falsely showing users as offline.
+    // Sessions get refreshed on every session-start, so active users stay active.
+    // Only clear claimed tasks from dashboard state.
     const dashState = await getDashboardState(env.PROJECTS, projectId);
     dashState.activeSessions = dashState.activeSessions.filter(
       (s) => s.user !== update.user
     );
     await saveDashboardState(env.PROJECTS, projectId, dashState);
-    // Note: Telegram notifications are sent by notify.js, not here
   } else {
     return new Response("Invalid session type", { status: 400 });
   }

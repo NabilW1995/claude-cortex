@@ -505,8 +505,9 @@ async function notifySessionEnd(projectDir, stats) {
     }
   }
 
-  // Unregister session with Worker + update dashboard
-  await workerSessionEnd(config, user);
+  // Don't unregister session — sessions auto-expire via KV TTL (2 hours).
+  // This prevents context compressions from falsely showing users as offline.
+  // Just update the dashboard.
   if (config.workerUrl && config.projectId) {
     try {
       await workerRequest(config.workerUrl, config.projectId, 'POST',
