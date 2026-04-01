@@ -17,9 +17,17 @@ interface ProjectConfig {
   botToken: string;
   chatId: string;
   threadId?: number;
+  loginThreadId?: number | null;
   githubRepo: string;
   githubToken?: string;
   members: Array<{ name: string; github: string; telegram: string }>;
+}
+
+interface TeamMember {
+  telegram_id: number;
+  telegram_username: string;
+  github: string;
+  name: string;
 }
 
 interface ActiveSession {
@@ -32,7 +40,7 @@ interface TelegramUpdate {
     text?: string;
     chat: { id: number };
     message_thread_id?: number;
-    from?: { first_name?: string; username?: string };
+    from?: { id?: number; first_name?: string; username?: string };
   };
 }
 
@@ -57,6 +65,7 @@ interface RegisterPayload {
   botToken: string;
   chatId: string;
   threadId?: number;
+  loginThreadId?: number | null;
   githubRepo: string;
   githubToken?: string;
   members: Array<{ name: string; github: string; telegram: string }>;
@@ -155,6 +164,49 @@ async function setActiveSessions(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for central team-members registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the central team-members list from KV.
+ * Stored under the key "team-members" as a JSON array.
+ */
+async function getTeamMembers(kv: KVNamespace): Promise<TeamMember[]> {
+  const raw = await kv.get("team-members");
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as TeamMember[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Add or update a team member in the central registry.
+ * Deduplicates by telegram_id — updates the entry if it already exists.
+ */
+async function upsertTeamMember(
+  kv: KVNamespace,
+  member: TeamMember
+): Promise<void> {
+  const members = await getTeamMembers(kv);
+
+  const existingIndex = members.findIndex(
+    (m) => m.telegram_id === member.telegram_id
+  );
+
+  if (existingIndex >= 0) {
+    // Update existing entry
+    members[existingIndex] = member;
+  } else {
+    // Add new entry
+    members.push(member);
+  }
+
+  await kv.put("team-members", JSON.stringify(members));
+}
+
+// ---------------------------------------------------------------------------
 // Project config from KV
 // ---------------------------------------------------------------------------
 
@@ -231,6 +283,10 @@ async function handleTelegram(
 
       case "/done":
         await handleDoneCommand(project, args);
+        break;
+
+      case "/register":
+        await handleRegisterCommand(env, project, args, update);
         break;
 
       default:
@@ -560,6 +616,100 @@ async function handleDoneCommand(
   );
 }
 
+/**
+ * /register <github-username> — Register the sender as a team member.
+ * Stores their telegram_id, telegram_username, and github username
+ * in the central team-members registry in KV.
+ */
+async function handleRegisterCommand(
+  env: Env,
+  project: ProjectConfig,
+  githubUsername: string,
+  update: TelegramUpdate
+): Promise<void> {
+  if (!githubUsername) {
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "Nutzung: /register <github-username>",
+      project.threadId
+    );
+    return;
+  }
+
+  const from = update.message?.from;
+  if (!from || !from.id) {
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "Fehler: Telegram-User konnte nicht erkannt werden.",
+      project.threadId
+    );
+    return;
+  }
+
+  const member: TeamMember = {
+    telegram_id: from.id,
+    telegram_username: from.username || from.first_name || "unknown",
+    github: githubUsername.replace(/^@/, ""),
+    name: from.first_name || from.username || "unknown",
+  };
+
+  await upsertTeamMember(env.PROJECTS, member);
+
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `Registriert: @${member.telegram_username} = ${member.github}`,
+    project.threadId
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Route: POST /register-member
+// ---------------------------------------------------------------------------
+
+/**
+ * HTTP endpoint to register a team member directly.
+ * Stores in KV key "team-members" as a JSON array.
+ */
+async function handleRegisterMember(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  let payload: TeamMember;
+  try {
+    payload = (await request.json()) as TeamMember;
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
+  }
+
+  if (!payload.telegram_id || !payload.github) {
+    return new Response(
+      "Missing required fields: telegram_id, github",
+      { status: 400 }
+    );
+  }
+
+  // Ensure defaults for optional fields
+  const member: TeamMember = {
+    telegram_id: payload.telegram_id,
+    telegram_username: payload.telegram_username || "unknown",
+    github: payload.github,
+    name: payload.name || payload.telegram_username || "unknown",
+  };
+
+  await upsertTeamMember(env.PROJECTS, member);
+
+  return new Response(
+    JSON.stringify({ ok: true, member }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Route: POST /github/:projectId
 // ---------------------------------------------------------------------------
@@ -660,6 +810,17 @@ async function handleSession(
       await setActiveSessions(env.PROJECTS, projectId, sessions);
     }
 
+    // Send to Login topic (short message) if configured
+    if (project.loginThreadId) {
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        `${update.user} ist online -- arbeitet an ${projectId}`,
+        project.loginThreadId
+      );
+    }
+
+    // Send to project topic (full message)
     await sendTelegram(
       project.botToken,
       project.chatId,
@@ -671,6 +832,17 @@ async function handleSession(
     const filtered = sessions.filter((s) => s.user !== update.user);
     await setActiveSessions(env.PROJECTS, projectId, filtered);
 
+    // Send to Login topic (short message) if configured
+    if (project.loginThreadId) {
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        `${update.user} hat die Session beendet (${projectId})`,
+        project.loginThreadId
+      );
+    }
+
+    // Send to project topic (full message)
     await sendTelegram(
       project.botToken,
       project.chatId,
@@ -710,6 +882,7 @@ async function handleRegister(
     botToken: payload.botToken,
     chatId: payload.chatId,
     threadId: payload.threadId,
+    loginThreadId: payload.loginThreadId || null,
     githubRepo: payload.githubRepo,
     githubToken: payload.githubToken,
     members: payload.members || [],
@@ -741,7 +914,7 @@ async function handleRegister(
 /**
  * Simple path-based router.
  * Matches: GET /, POST /telegram/:id, POST /github/:id,
- *          POST /session/:id, POST /register
+ *          POST /session/:id, POST /register, POST /register-member
  */
 function matchRoute(
   method: string,
@@ -753,6 +926,10 @@ function matchRoute(
 
   if (method === "POST" && pathname === "/register") {
     return { handler: "register" };
+  }
+
+  if (method === "POST" && pathname === "/register-member") {
+    return { handler: "register-member" };
   }
 
   // Match /:handler/:projectId patterns
@@ -785,6 +962,9 @@ export default {
 
       case "register":
         return handleRegister(request, env);
+
+      case "register-member":
+        return handleRegisterMember(request, env);
 
       case "telegram":
         return handleTelegram(request, env, route.projectId!);

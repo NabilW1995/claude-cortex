@@ -60,7 +60,7 @@ function parseEnvFile(filePath) {
 
 /**
  * Load Telegram bot configuration from the project's .env file.
- * Returns { token, chatId, threadId } or null if token/chatId are missing.
+ * Returns { token, chatId, threadId, loginThreadId } or null if token/chatId are missing.
  */
 function loadBotConfig(projectDir) {
   try {
@@ -70,11 +70,17 @@ function loadBotConfig(projectDir) {
     const token = vars.TELEGRAM_BOT_TOKEN || '';
     const chatId = vars.TELEGRAM_CHAT_ID || '';
     const threadId = vars.TELEGRAM_THREAD_ID || '';
+    const loginThreadId = vars.TELEGRAM_LOGIN_THREAD_ID || '';
 
     // Both token and chatId are required
     if (!token || !chatId) return null;
 
-    return { token, chatId, threadId: threadId || null };
+    return {
+      token,
+      chatId,
+      threadId: threadId || null,
+      loginThreadId: loginThreadId || null
+    };
   } catch {
     return null;
   }
@@ -245,7 +251,10 @@ function sendTelegram(token, chatId, text, threadId) {
 
 /**
  * Send a "session started" notification to Telegram.
- * Includes the user name, project name, and open GitHub issues.
+ * Sends TWO messages when loginThreadId is configured:
+ *   1. Login topic: short "{user} ist online" message
+ *   2. Project topic: full message with open tasks
+ * If loginThreadId is not set, only the project topic message is sent.
  */
 async function notifySessionStart(projectDir) {
   const config = loadBotConfig(projectDir);
@@ -254,7 +263,18 @@ async function notifySessionStart(projectDir) {
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
 
-  // Build message
+  // --- Login topic: short message ---
+  if (config.loginThreadId) {
+    const loginText = `<b>${escapeHtml(user)}</b> ist online -- arbeitet an <b>${escapeHtml(projectName)}</b>`;
+    try {
+      await sendTelegram(config.token, config.chatId, loginText, config.loginThreadId);
+      console.error('[Notify] Login-Topic Nachricht gesendet');
+    } catch (e) {
+      console.error(`[Notify] Login-Topic fehlgeschlagen: ${e.message}`);
+    }
+  }
+
+  // --- Project topic: full message with open tasks ---
   const lines = [];
   lines.push(`<b>${escapeHtml(user)}</b> ist online -- arbeitet an <b>${escapeHtml(projectName)}</b>`);
 
@@ -275,10 +295,10 @@ async function notifySessionStart(projectDir) {
     lines.push(`(${error})`);
   }
 
-  const text = lines.join('\n');
+  const projectText = lines.join('\n');
 
   try {
-    await sendTelegram(config.token, config.chatId, text, config.threadId);
+    await sendTelegram(config.token, config.chatId, projectText, config.threadId);
     console.error('[Notify] Session-Start Nachricht gesendet');
   } catch (e) {
     console.error(`[Notify] Session-Start fehlgeschlagen: ${e.message}`);
@@ -287,7 +307,10 @@ async function notifySessionStart(projectDir) {
 
 /**
  * Send a "session ended" notification to Telegram.
- * Includes session stats (prompts, corrections) and recent commits.
+ * Sends TWO messages when loginThreadId is configured:
+ *   1. Login topic: short "{user} hat die Session beendet" message
+ *   2. Project topic: full message with stats + commits
+ * If loginThreadId is not set, only the project topic message is sent.
  *
  * @param {string} projectDir - Project root directory
  * @param {object} stats      - Optional session stats { prompts_count, corrections_count }
@@ -299,7 +322,18 @@ async function notifySessionEnd(projectDir, stats) {
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
 
-  // Build message
+  // --- Login topic: short message ---
+  if (config.loginThreadId) {
+    const loginText = `<b>${escapeHtml(user)}</b> hat die Session beendet (<b>${escapeHtml(projectName)}</b>)`;
+    try {
+      await sendTelegram(config.token, config.chatId, loginText, config.loginThreadId);
+      console.error('[Notify] Login-Topic End-Nachricht gesendet');
+    } catch (e) {
+      console.error(`[Notify] Login-Topic End fehlgeschlagen: ${e.message}`);
+    }
+  }
+
+  // --- Project topic: full message with stats + commits ---
   const lines = [];
   lines.push(`<b>${escapeHtml(user)}</b> hat die Session beendet (<b>${escapeHtml(projectName)}</b>)`);
 
@@ -321,10 +355,10 @@ async function notifySessionEnd(projectDir, stats) {
     }
   }
 
-  const text = lines.join('\n');
+  const projectText = lines.join('\n');
 
   try {
-    await sendTelegram(config.token, config.chatId, text, config.threadId);
+    await sendTelegram(config.token, config.chatId, projectText, config.threadId);
     console.error('[Notify] Session-End Nachricht gesendet');
   } catch (e) {
     console.error(`[Notify] Session-End fehlgeschlagen: ${e.message}`);
