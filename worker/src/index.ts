@@ -1427,15 +1427,13 @@ async function handleSession(
   const sessions = await getActiveSessions(env.PROJECTS, projectId);
 
   if (update.type === "start") {
-    // Add session if user is not already tracked
-    const alreadyActive = sessions.some((s) => s.user === update.user);
-    if (!alreadyActive) {
-      sessions.push({
-        user: update.user,
-        since: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
-      });
-      await setActiveSessions(env.PROJECTS, projectId, sessions);
-    }
+    // Remove old entry if exists, then add fresh (refreshes time + TTL)
+    const filtered = sessions.filter((s) => s.user !== update.user);
+    filtered.push({
+      user: update.user,
+      since: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
+    });
+    await setActiveSessions(env.PROJECTS, projectId, filtered);
     // Note: Telegram notifications are sent by notify.js, not here
     // The dashboard is triggered separately via POST /dashboard/:projectId
   } else if (update.type === "end") {
