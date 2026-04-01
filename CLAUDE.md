@@ -16,6 +16,15 @@
 | UI/Design/Seite/Website bauen | → Design-Flow starten (@.claude/rules/design-flow.md) |
 | "Neues Projekt starten" | project-discovery → scaffolding |
 | "Welche Farben/Fonts/Style?" | ui-ux-guide |
+| Code schreiben/Feature bauen | → coder Agent dispatchen |
+| "Review"/"Prüfe den Code" | → code-review Agent dispatchen |
+| Fehler/Bug/Error | → error-whisperer + debug-investigator |
+
+## Agent-System (15 Agents — MUST use)
+MUST: Agents werden als Subagents dispatcht — siehe @.claude/rules/agent-routing.md
+MUST: Coding-Aufgaben gehen IMMER durch den coder Agent
+MUST: Mehrere coder-Agents KÖNNEN parallel für unabhängige Tasks laufen
+NEVER: Agent-Logik selbst ausführen statt den Agent zu dispatchen
 <!-- CORTEX:ROUTING:END -->
 
 ## Commands
