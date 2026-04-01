@@ -180,9 +180,23 @@ function getOpenIssues(projectDir, limit = 100) {
 }
 
 /**
+ * Get the GitHub repo URL (e.g. "https://github.com/user/repo").
+ * Returns empty string if not a GitHub repo.
+ */
+function getGitHubRepoUrl(projectDir) {
+  try {
+    const remote = execSync('git remote get-url origin',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    // Convert SSH or HTTPS to web URL
+    const match = remote.match(/github\.com[:/]([^/]+\/[^/.]+)/);
+    if (match) return `https://github.com/${match[1]}`;
+    return '';
+  } catch { return ''; }
+}
+
+/**
  * Parse recent git commits (last 8 hours) and categorize them by type.
- * Returns { features: [], fixes: [], other: [] } with the commit message
- * (prefix stripped) in each array.
+ * Each entry has { msg, hash } so we can link to GitHub.
  */
 function getCategorizedCommits(projectDir) {
   try {
@@ -197,13 +211,14 @@ function getCategorizedCommits(projectDir) {
     const other = [];
 
     for (const line of output.split('\n')) {
-      const msg = line.substring(8).trim(); // skip hash
+      const hash = line.substring(0, 7);
+      const msg = line.substring(8).trim();
       if (msg.startsWith('feat:') || msg.startsWith('feat(')) {
-        features.push(msg.replace(/^feat(\([^)]*\))?:\s*/, ''));
+        features.push({ msg: msg.replace(/^feat(\([^)]*\))?:\s*/, ''), hash });
       } else if (msg.startsWith('fix:') || msg.startsWith('fix(')) {
-        fixes.push(msg.replace(/^fix(\([^)]*\))?:\s*/, ''));
+        fixes.push({ msg: msg.replace(/^fix(\([^)]*\))?:\s*/, ''), hash });
       } else if (!msg.startsWith('chore:') && !msg.startsWith('Merge')) {
-        other.push(msg);
+        other.push({ msg, hash });
       }
     }
     return { features, fixes, other };
@@ -275,7 +290,8 @@ function sendTelegram(token, chatId, text, threadId) {
     const payload = {
       chat_id: chatId,
       text: text,
-      parse_mode: 'HTML'
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
     };
 
     // Include thread ID for forum topics (supergroup threads)
@@ -350,7 +366,7 @@ async function notifySessionStart(projectDir) {
   const loginChatId = config.loginChatId || config.chatId;
   const loginThreadId = config.loginChatId ? null : config.loginThreadId;
   if (config.loginChatId || config.loginThreadId) {
-    const loginText = `<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`;
+    const loginText = `\uD83D\uDFE2 <b>${escapeHtml(user)}</b> is online \u2014 working on <b>${escapeHtml(projectName)}</b>`;
     try {
       await sendTelegram(config.token, loginChatId, loginText, loginThreadId);
       console.error('[Notify] Login message sent');
@@ -360,14 +376,15 @@ async function notifySessionStart(projectDir) {
   }
 
   // --- Project group/topic: full message with open tasks + branch status ---
+  const repoUrl = getGitHubRepoUrl(projectDir);
   const lines = [];
-  lines.push(`<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`);
+  lines.push(`\uD83D\uDC4B <b>${escapeHtml(user)}</b> is online \u2014 working on <b>${escapeHtml(projectName)}</b>`);
 
   // Show unmerged branches as pending review items
   const pendingBranches = getPendingBranches(projectDir);
   if (pendingBranches.length > 0) {
     lines.push('');
-    lines.push('<b>Branches pending review:</b>');
+    lines.push(`\u26A0\uFE0F <b>Branches pending review:</b>`);
     for (const branchName of pendingBranches) {
       // Get ahead count for each pending branch
       let detail = 'not merged';
@@ -379,7 +396,8 @@ async function notifySessionStart(projectDir) {
         const count = parseInt(ahead) || 0;
         if (count > 0) detail = `not merged, ${count} commits ahead`;
       } catch {}
-      lines.push(`- ${escapeHtml(branchName)} (${detail})`);
+      const branchLink = repoUrl ? `<a href="${repoUrl}/tree/${branchName}">${escapeHtml(branchName)}</a>` : escapeHtml(branchName);
+      lines.push(`\u2022 ${branchLink} (${detail})`);
     }
   }
 
@@ -404,7 +422,7 @@ async function notifySessionStart(projectDir) {
     }
 
     lines.push('');
-    lines.push(`<b>Open Tasks</b> (${issues.length}):`);
+    lines.push(`\uD83D\uDCCB <b>Open Tasks</b> (${issues.length}):`);
 
     // Show grouped by label with counts
     const labelKeys = Object.keys(grouped).sort();
@@ -415,7 +433,8 @@ async function notifySessionStart(projectDir) {
       for (const issue of labelIssues) {
         const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
         const assigneeLabel = assigneeNames ? assigneeNames : 'open';
-        lines.push(`- #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
+        const issueLink = repoUrl ? `<a href="${repoUrl}/issues/${issue.number}">#${issue.number}</a>` : `#${issue.number}`;
+        lines.push(`\u2022 ${issueLink} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
       }
     }
 
@@ -426,7 +445,8 @@ async function notifySessionStart(projectDir) {
       for (const issue of unlabeled) {
         const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
         const assigneeLabel = assigneeNames ? assigneeNames : 'open';
-        lines.push(`- #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
+        const issueLink = repoUrl ? `<a href="${repoUrl}/issues/${issue.number}">#${issue.number}</a>` : `#${issue.number}`;
+        lines.push(`\u2022 ${issueLink} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
       }
     }
   } else if (error) {
@@ -465,7 +485,7 @@ async function notifySessionEnd(projectDir, stats) {
   const loginChatId = config.loginChatId || config.chatId;
   const loginThreadId = config.loginChatId ? null : config.loginThreadId;
   if (config.loginChatId || config.loginThreadId) {
-    const loginText = `<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`;
+    const loginText = `\uD83D\uDD34 <b>${escapeHtml(user)}</b> has ended the session \u2014 <b>${escapeHtml(projectName)}</b>`;
     try {
       await sendTelegram(config.token, loginChatId, loginText, loginThreadId);
       console.error('[Notify] Login end message sent');
@@ -475,42 +495,46 @@ async function notifySessionEnd(projectDir, stats) {
   }
 
   // --- Project group/topic: full message with stats + categorized commits ---
+  const repoUrl = getGitHubRepoUrl(projectDir);
   const lines = [];
-  lines.push(`<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
+  lines.push(`\u2705 <b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
 
   // Session stats (if available)
   if (stats && (stats.prompts_count || stats.corrections_count)) {
     lines.push('');
     const prompts = stats.prompts_count || 0;
     const corrections = stats.corrections_count || 0;
-    lines.push(`<b>Stats:</b> ${prompts} prompts | ${corrections} corrections`);
+    lines.push(`\uD83D\uDCCA <b>Stats:</b> ${prompts} prompts | ${corrections} corrections`);
   }
 
   // Categorized commits from the last 8 hours
   const { features, fixes, other } = getCategorizedCommits(projectDir);
 
+  // Helper to format a commit entry with optional GitHub link
+  const fmtCommit = (entry) => {
+    const linkText = escapeHtml(entry.msg);
+    if (repoUrl && entry.hash) {
+      return `\u2022 <a href="${repoUrl}/commit/${entry.hash}">${linkText}</a>`;
+    }
+    return `\u2022 ${linkText}`;
+  };
+
   if (features.length > 0) {
     lines.push('');
-    lines.push('<b>Features added:</b>');
-    for (const f of features) {
-      lines.push(`- ${escapeHtml(f)}`);
-    }
+    lines.push(`\uD83D\uDE80 <b>Features added:</b>`);
+    for (const f of features) lines.push(fmtCommit(f));
   }
 
   if (fixes.length > 0) {
     lines.push('');
-    lines.push('<b>Fixes:</b>');
-    for (const f of fixes) {
-      lines.push(`- ${escapeHtml(f)}`);
-    }
+    lines.push(`\uD83D\uDD27 <b>Fixes:</b>`);
+    for (const f of fixes) lines.push(fmtCommit(f));
   }
 
   if (other.length > 0) {
     lines.push('');
-    lines.push('<b>Other changes:</b>');
-    for (const o of other) {
-      lines.push(`- ${escapeHtml(o)}`);
-    }
+    lines.push(`\uD83D\uDCDD <b>Other changes:</b>`);
+    for (const o of other) lines.push(fmtCommit(o));
   }
 
   // Branch status
@@ -518,11 +542,12 @@ async function notifySessionEnd(projectDir, stats) {
   if (branchInfo.branch !== 'unknown') {
     lines.push('');
     if (branchInfo.isMain) {
-      lines.push(`<b>Branch:</b> ${escapeHtml(branchInfo.branch)}`);
+      lines.push(`\uD83C\uDF3F <b>Branch:</b> ${escapeHtml(branchInfo.branch)} \u2014 merged`);
     } else {
       const aheadText = branchInfo.commitsAhead > 0
-        ? `${branchInfo.commitsAhead} commits ahead of master, ` : '';
-      lines.push(`<b>Branch:</b> ${escapeHtml(branchInfo.branch)} (${aheadText}not merged)`);
+        ? `${branchInfo.commitsAhead} commits ahead, ` : '';
+      const branchLink = repoUrl ? `<a href="${repoUrl}/tree/${branchInfo.branch}">${escapeHtml(branchInfo.branch)}</a>` : escapeHtml(branchInfo.branch);
+      lines.push(`\uD83D\uDCCB <b>Branch:</b> ${branchLink} (${aheadText}not merged)`);
     }
   }
 
