@@ -1345,27 +1345,8 @@ async function handleSession(
       });
       await setActiveSessions(env.PROJECTS, projectId, sessions);
     }
-
-    // Send to Login topic (short message) if configured
-    if (project.loginThreadId) {
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        `${update.user} ist online -- arbeitet an ${projectId}`,
-        project.loginThreadId
-      );
-    }
-
-    // Send to project topic (full message)
-    await sendTelegram(
-      project.botToken,
-      project.chatId,
-      `${update.user} hat eine Session gestartet.`,
-      project.threadId
-    );
-
-    // Refresh the live dashboard to show the new online user
-    await sendOrEditDashboard(env, projectId, project);
+    // Note: Telegram notifications are sent by notify.js, not here
+    // The dashboard is triggered separately via POST /dashboard/:projectId
   } else if (update.type === "end") {
     // Remove user from active sessions
     const filtered = sessions.filter((s) => s.user !== update.user);
@@ -1377,32 +1358,12 @@ async function handleSession(
       (s) => s.user !== update.user
     );
     await saveDashboardState(env.PROJECTS, projectId, dashState);
-
-    // Send to Login topic (short message) if configured
-    if (project.loginThreadId) {
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        `${update.user} hat die Session beendet (${projectId})`,
-        project.loginThreadId
-      );
-    }
-
-    // Send to project topic (full message)
-    await sendTelegram(
-      project.botToken,
-      project.chatId,
-      `${update.user} hat die Session beendet.`,
-      project.threadId
-    );
-
-    // Refresh the live dashboard to remove the offline user
-    await sendOrEditDashboard(env, projectId, project);
+    // Note: Telegram notifications are sent by notify.js, not here
   } else {
     return new Response("Invalid session type", { status: 400 });
   }
 
-  return new Response("OK");
+  return Response.json({ ok: true, type: update.type, user: update.user });
 }
 
 // ---------------------------------------------------------------------------

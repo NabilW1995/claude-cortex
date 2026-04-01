@@ -277,8 +277,8 @@ function workerRequest(workerUrl, projectId, method, path, body) {
         try { resolve(JSON.parse(result)); } catch { resolve(null); }
       });
     });
-    req.on('error', () => resolve(null));
-    req.setTimeout(8000, () => { req.destroy(); resolve(null); });
+    req.on('error', (e) => { console.error(`[Worker] Request error: ${e.message}`); resolve(null); });
+    req.setTimeout(8000, () => { req.destroy(); console.error('[Worker] Request timed out'); resolve(null); });
     if (data) req.write(data);
     req.end();
   });
@@ -289,10 +289,15 @@ function workerRequest(workerUrl, projectId, method, path, body) {
  * Returns array of { user, since } for active sessions.
  */
 async function workerSessionStart(config, user) {
-  if (!config.workerUrl || !config.projectId) return [];
+  if (!config.workerUrl || !config.projectId) {
+    console.error('[Worker] No workerUrl or projectId configured, skipping');
+    return [];
+  }
   // Register this session with the Worker
-  await workerRequest(config.workerUrl, config.projectId, 'POST',
+  console.error(`[Worker] Registering session start for ${user} at ${config.workerUrl}/session/${config.projectId}`);
+  const regResult = await workerRequest(config.workerUrl, config.projectId, 'POST',
     `/session/${config.projectId}`, { type: 'start', user, message: '' });
+  console.error(`[Worker] Session register result: ${JSON.stringify(regResult)}`);
   // Fetch all active sessions
   const data = await workerRequest(config.workerUrl, config.projectId, 'GET',
     `/sessions/${config.projectId}`, null);
