@@ -1160,9 +1160,11 @@ function createBot(
   // /start, /menu — activate the reply keyboard with quick actions
   bot.command(["start", "menu"], async (ctx: Context) => {
     const keyboard = new Keyboard()
-      .text("\u{1F4CA} Dashboard").text("\u{1F465} Active")
+      .text("\u{1F4CA} Dashboard").text("\u{1F465} Active").text("\u{1F4CC} My Tasks")
       .row()
-      .text("\u{1F4CB} Tasks").text("\u{2753} Who")
+      .text("\u{1F4CB} Board").text("\u{1F500} PRs").text("\u{1F440} Review")
+      .row()
+      .text("\u{1F525} Urgent").text("\u{1F4C8} Report")
       .resized()
       .persistent();
 
@@ -1573,12 +1575,34 @@ function createBot(
     await sendActiveInfo(env, project, projectId);
   });
 
-  bot.hears("\u{1F4CB} Tasks", async () => {
-    await handleTasksCommand(env, project, projectId);
+  bot.hears("\u{1F4CC} My Tasks", async (ctx) => {
+    const text = await handleProjectMyTasks(project, env, ctx.from?.id || 0, ctx.from?.first_name || "Unknown");
+    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
   });
 
-  bot.hears("\u{2753} Who", async () => {
-    await handleWerCommand(env, project, projectId);
+  bot.hears("\u{1F4CB} Board", async () => {
+    const text = await handleProjectBoard(project, projectId);
+    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
+  });
+
+  bot.hears("\u{1F500} PRs", async () => {
+    const text = await handleProjectPRs(project, projectId);
+    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
+  });
+
+  bot.hears("\u{1F440} Review", async () => {
+    await sendTelegram(project.botToken, project.chatId,
+      "\u{1F440} Review queue coming soon.\n\nUse /tasks to see open issues for now.", project.threadId);
+  });
+
+  bot.hears("\u{1F525} Urgent", async () => {
+    await sendTelegram(project.botToken, project.chatId,
+      "\u{1F525} Priority filter coming soon.\n\nUse /tasks to see all open issues for now.", project.threadId);
+  });
+
+  bot.hears("\u{1F4C8} Report", async () => {
+    await sendTelegram(project.botToken, project.chatId,
+      "\u{1F4C8} Weekly report coming soon.\n\nComing in Phase 4.", project.threadId);
   });
 
   return bot;
