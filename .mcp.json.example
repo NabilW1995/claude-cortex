@@ -6,6 +6,13 @@
       "headers": {
         "X-Goog-Api-Key": "YOUR_STITCH_API_KEY_HERE"
       }
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": ".claude/knowledge-graph.jsonl"
+      }
     }
   }
 }

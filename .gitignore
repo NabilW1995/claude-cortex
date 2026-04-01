@@ -10,6 +10,8 @@ CLAUDE.local.md
 .claude/backups/
 .claude/agent-memory/
 daily-notes/
+Daily Notes/
+.claude/knowledge-graph.jsonl
 *.db
 *.sqlite
 .DS_Store

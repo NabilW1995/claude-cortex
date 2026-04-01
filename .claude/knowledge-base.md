@@ -1,7 +1,16 @@
 # Knowledge Base — Bestätigte Regeln
 
-> Nur Auditor-geprüfte Learnings landen hier. Max 200 Zeilen.
-> Jeder Eintrag braucht einen [Source:] Tag.
+> System-weite Regeln. Werden von ALLEN Agents und Sessions beim Start gelesen.
+> Geschrieben NUR vom Auditor nach Bestätigung von Learnings.
+> Einträge sind verbindliche Regeln, keine Vorschläge.
+> Max 200 Zeilen.
+
+## Provenance Hierarchy
+Jeder Eintrag MUSS seine Quelle zitieren:
+- `[Source: user-korrektur MMDDYY]` — User hat explizit korrigiert
+- `[Source: empirisch MMDDYY]` — Durch Testen oder Daten verifiziert
+- `[Source: agent-beobachtung MMDDYY]` — Pattern von einem Agent erkannt, vom Auditor bestätigt
+- `[Source: learning-db #ID, approved DATE]` — Aus der SQLite Learning-DB genehmigt
 
 ## Hard Rules
 
@@ -14,6 +23,9 @@
 - Fehler: Bei Mindbank wurden Templates und Landing Page ohne Design-Approval gebaut
 - Korrektur: Vor JEDER UI-Aufgabe: (1) Skills aktivieren, (2) User fragen, (3) 2-3 Optionen zeigen, (4) Genehmigung abwarten, (5) dann Code schreiben
 - [Source: learning-db #4, approved 2026-03-31]
+
+## Platform & Tool Rules
+(none yet)
 
 ## Patterns
 
