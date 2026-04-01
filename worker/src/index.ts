@@ -748,16 +748,8 @@ async function handleTelegram(
       return new Response("OK");
     }
 
-    // /dashboard — send or refresh the live dashboard
-    // Also handle the reply keyboard button text
-    if (command === "/dashboard" || text === "\u{1F4CA} Dashboard") {
-      await sendOrEditDashboard(env, projectId, project);
-      return new Response("OK");
-    }
-
-    // Handle reply keyboard "Active" button
-    if (text === "\u{1F465} Active") {
-      // Reuse the same logic as the inline callback
+    // /active — show who is currently working (same as Active button)
+    if (command === "/active" || text === "\u{1F465} Active") {
       const members = await getTeamMembers(env.PROJECTS);
       const sessions = await getActiveSessions(env.PROJECTS, projectId);
       const dashState = await getDashboardState(env.PROJECTS, projectId);
@@ -781,6 +773,13 @@ async function handleTelegram(
         if (member) activeLines.push(`   \u{1F517} GitHub: ${member.github}`);
       }
       await sendTelegram(project.botToken, project.chatId, activeLines.join("\n"), project.threadId);
+      return new Response("OK");
+    }
+
+    // /dashboard — send or refresh the live dashboard
+    // Also handle the reply keyboard button text
+    if (command === "/dashboard" || text === "\u{1F4CA} Dashboard") {
+      await sendOrEditDashboard(env, projectId, project);
       return new Response("OK");
     }
 
