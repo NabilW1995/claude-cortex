@@ -1,25 +1,31 @@
 #!/bin/bash
-# Auto-backup files before they are modified
-# Reads tool input from stdin
+# PreToolUse hook — creates timestamped backups before Write|Edit.
+# Uses date-based subdirectories and auto-prunes backups older than 7 days.
+# Uses sed for JSON parsing (no jq dependency).
 
 read -r INPUT
 
 FILE_PATH=$(echo "$INPUT" | sed -n 's/.*"file_path"\s*:\s*"\([^"]*\)".*/\1/p' | head -1)
 
-if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
-  exit 0
-fi
+# Skip if no file path or file doesn't exist yet
+[ -z "$FILE_PATH" ] && exit 0
+[ ! -f "$FILE_PATH" ] && exit 0
 
-BACKUP_DIR="${CLAUDE_PROJECT_DIR:-.}/.claude/backups"
+# Anti-recursion guard: skip files inside .claude/logs/ and .claude/backups/
+case "$FILE_PATH" in
+  */.claude/logs/*|*/.claude/backups/*|*\\.claude\\logs\\*|*\\.claude\\backups\\*) exit 0 ;;
+esac
+
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+BACKUP_DIR="$PROJECT_DIR/.claude/backups/$(date +%Y-%m-%d)"
 mkdir -p "$BACKUP_DIR"
 
-FILENAME=$(basename "$FILE_PATH")
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP_PATH="$BACKUP_DIR/${FILENAME}.${TIMESTAMP}.bak"
+# Create backup with timestamp suffix
+BASENAME=$(basename "$FILE_PATH")
+TIMESTAMP=$(date +"%H%M%S")
+cp "$FILE_PATH" "$BACKUP_DIR/${BASENAME}.${TIMESTAMP}.bak" 2>/dev/null
 
-cp "$FILE_PATH" "$BACKUP_PATH" 2>/dev/null
-
-# Keep only last 10 backups per file
-ls -t "$BACKUP_DIR/${FILENAME}".*.bak 2>/dev/null | tail -n +11 | xargs -r rm
+# Prune backups older than 7 days (remove entire date directories)
+find "$PROJECT_DIR/.claude/backups" -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null
 
 exit 0

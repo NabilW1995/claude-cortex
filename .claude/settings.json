@@ -1,17 +1,14 @@
 {
+  "cleanupPeriodDays": 90,
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75",
     "BASH_MAX_OUTPUT_LENGTH": "150000",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-6"
   },
-  "cleanupPeriodDays": 90,
   "attribution": {
     "commit": "Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
     "pr": "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
-  },
-  "worktree": {
-    "symlinkDirectories": ["node_modules", ".cache", "dist"]
   },
   "permissions": {
     "allow": [
@@ -145,6 +142,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash scripts/hooks/session-reset.sh"
+          },
+          {
+            "type": "command",
             "command": "node scripts/hooks/session-start.js"
           },
           {
@@ -157,7 +158,7 @@
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/post-compact.sh"
+            "command": "bash scripts/hooks/post-compact-resume.sh"
           }
         ]
       }
@@ -171,11 +172,29 @@
           },
           {
             "type": "command",
+            "command": "bash scripts/hooks/log-stop-verdict.sh"
+          },
+          {
+            "type": "command",
             "command": "node scripts/hooks/auto-push-learnings.js",
             "async": true
           }
         ]
       }
     ]
+  },
+  "worktree": {
+    "symlinkDirectories": [
+      "node_modules",
+      ".cache",
+      "dist"
+    ]
+  },
+  "enabledPlugins": {
+    "code-review@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "claude-md-management@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true
   }
 }

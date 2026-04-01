@@ -1,18 +1,25 @@
 #!/bin/bash
-# Save state before context compaction
-# Ensures Claude doesn't lose track of what it was doing
+# PreCompact hook — saves state before auto-compaction.
+# Writes a .compaction-occurred marker file with timestamp
+# for post-compact-resume.sh to detect and act on.
+# Also backs up memory.md for safety.
 
-STATE_DIR="${CLAUDE_PROJECT_DIR:-.}/.claude/logs"
-mkdir -p "$STATE_DIR"
-
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+LOG_DIR="$PROJECT_DIR/.claude/logs"
+INCIDENT_LOG="$LOG_DIR/incident-log.md"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
-# Save compaction marker
-echo "[$TIMESTAMP] Pre-compact: saving state" >> "$STATE_DIR/compaction.log"
+mkdir -p "$LOG_DIR"
 
-# Copy memory.md as pre-compact backup
-if [ -f "${CLAUDE_PROJECT_DIR:-.}/.claude/memory.md" ]; then
-  cp "${CLAUDE_PROJECT_DIR:-.}/.claude/memory.md" "$STATE_DIR/memory-pre-compact.md"
+# Write compaction marker with timestamp (post-compact-resume.sh reads this)
+echo "$TIMESTAMP" > "$LOG_DIR/.compaction-occurred"
+
+# Backup memory.md as pre-compact safety copy
+if [ -f "$PROJECT_DIR/.claude/memory.md" ]; then
+  cp "$PROJECT_DIR/.claude/memory.md" "$LOG_DIR/memory-pre-compact.md" 2>/dev/null
 fi
+
+# Log the compaction event
+echo "- \`$TIMESTAMP\` | COMPACTION | INFO | Auto-compaction triggered — state saved, marker written" >> "$INCIDENT_LOG"
 
 exit 0
