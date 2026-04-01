@@ -10,7 +10,7 @@
  * still use the direct sendTelegram helper.
  */
 
-import { Bot, webhookCallback, InlineKeyboard, Keyboard } from "grammy";
+import { Bot, webhookCallback, Keyboard } from "grammy";
 import type { Context } from "grammy";
 
 // ---------------------------------------------------------------------------
