@@ -433,101 +433,40 @@ async function notifySessionStart(projectDir) {
     }
   }
 
-  // --- Project group/topic: full message with open tasks + branch status ---
-  const repoUrl = getGitHubRepoUrl(projectDir);
-  const lines = [];
-  lines.push(`\uD83D\uDC4B <b>${escapeHtml(user)}</b> is online \u2014 working on <b>${escapeHtml(projectName)}</b>`);
+  // --- Register session with Worker + trigger live dashboard ---
+  await workerSessionStart(config, user);
 
-  // Register with Worker and fetch who else is active
-  const activeSessions = await workerSessionStart(config, user);
-  if (activeSessions.length > 0) {
-    lines.push('');
-    lines.push(`\uD83D\uDC65 <b>Currently active:</b>`);
-    for (const s of activeSessions) {
-      lines.push(`\u2022 ${escapeHtml(s.user)} (since ${escapeHtml(s.since)})`);
+  // Trigger the Worker to send/update the live dashboard (with buttons)
+  if (config.workerUrl && config.projectId) {
+    try {
+      await workerRequest(config.workerUrl, config.projectId, 'POST',
+        `/dashboard/${config.projectId}`, {});
+      console.error('[Notify] Dashboard updated');
+    } catch (e) {
+      console.error(`[Notify] Dashboard update failed: ${e.message}`);
     }
-  }
-
-  // Show unmerged branches as ready-to-test items
-  const pendingBranches = getPendingBranches(projectDir);
-  if (pendingBranches.length > 0) {
-    lines.push('');
-    lines.push(`\uD83D\uDD00 <b>Branches ready to test:</b>`);
-    for (const branchName of pendingBranches) {
-      let detail = 'not merged \u2014 ready to test';
-      try {
-        const mainRef = execSync('git rev-parse --verify main 2>/dev/null || git rev-parse --verify master 2>/dev/null',
-          { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() ? 'main' : 'master';
-        const ahead = execSync(`git rev-list --count ${mainRef}..${branchName}`,
-          { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        const count = parseInt(ahead) || 0;
-        if (count > 0) detail = `${count} commits, not merged \u2014 ready to test`;
-      } catch {}
-      const branchLink = repoUrl ? `<a href="${repoUrl}/tree/${branchName}">${escapeHtml(branchName)}</a>` : escapeHtml(branchName);
-      lines.push(`\u2022 ${branchLink} (${detail})`);
-    }
-  }
-
-  // Try to load open GitHub issues
-  const { issues, error } = getOpenIssues(projectDir);
-
-  if (issues.length > 0) {
-    // Group issues by label
-    const grouped = {};
-    const unlabeled = [];
-
-    for (const issue of issues) {
-      const labelNames = (issue.labels || []).map(l => l.name);
-      if (labelNames.length === 0) {
-        unlabeled.push(issue);
-      } else {
-        for (const label of labelNames) {
-          if (!grouped[label]) grouped[label] = [];
-          grouped[label].push(issue);
-        }
-      }
-    }
-
-    lines.push('');
-    lines.push(`\uD83D\uDCCB <b>Open Tasks</b> (${issues.length}):`);
-
-    // Show grouped by label with counts
-    const labelKeys = Object.keys(grouped).sort();
-    for (const label of labelKeys) {
-      const labelIssues = grouped[label];
+  } else {
+    // Fallback: send plain text if Worker not configured
+    const lines = [];
+    lines.push(`\uD83D\uDC4B <b>${escapeHtml(user)}</b> is online \u2014 working on <b>${escapeHtml(projectName)}</b>`);
+    const { issues, error } = getOpenIssues(projectDir);
+    if (issues.length > 0) {
       lines.push('');
-      lines.push(`<b>${escapeHtml(label)}</b> (${labelIssues.length}):`);
-      for (const issue of labelIssues) {
+      lines.push(`\uD83D\uDCCB <b>Open Tasks</b> (${issues.length}):`);
+      for (const issue of issues) {
         const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
         const assigneeLabel = assigneeNames ? assigneeNames : 'open';
-        const issueLink = repoUrl ? `<a href="${repoUrl}/issues/${issue.number}">#${issue.number}</a>` : `#${issue.number}`;
-        lines.push(`\u2022 ${issueLink} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
+        lines.push(`\u2022 #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
       }
+    } else if (error) {
+      lines.push(`\n(${error})`);
     }
-
-    // Show unlabeled issues if any
-    if (unlabeled.length > 0) {
-      lines.push('');
-      lines.push(`<b>other</b> (${unlabeled.length}):`);
-      for (const issue of unlabeled) {
-        const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
-        const assigneeLabel = assigneeNames ? assigneeNames : 'open';
-        const issueLink = repoUrl ? `<a href="${repoUrl}/issues/${issue.number}">#${issue.number}</a>` : `#${issue.number}`;
-        lines.push(`\u2022 ${issueLink} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
-      }
+    try {
+      await sendTelegram(config.token, config.chatId, lines.join('\n'), config.threadId);
+      console.error('[Notify] Session start message sent (fallback)');
+    } catch (e) {
+      console.error(`[Notify] Session start failed: ${e.message}`);
     }
-  } else if (error) {
-    lines.push('');
-    lines.push(`(${error})`);
-  }
-
-  const projectText = lines.join('\n');
-
-  try {
-    await sendTelegram(config.token, config.chatId, projectText, config.threadId);
-    console.error('[Notify] Session start message sent');
-  } catch (e) {
-    console.error(`[Notify] Session start failed: ${e.message}`);
   }
 }
 
@@ -561,10 +500,16 @@ async function notifySessionEnd(projectDir, stats) {
     }
   }
 
-  // Unregister session with Worker
+  // Unregister session with Worker + update dashboard
   await workerSessionEnd(config, user);
+  if (config.workerUrl && config.projectId) {
+    try {
+      await workerRequest(config.workerUrl, config.projectId, 'POST',
+        `/dashboard/${config.projectId}`, {});
+    } catch {}
+  }
 
-  // --- Project group/topic: full message with stats + categorized commits ---
+  // --- Project group/topic: session summary message ---
   const repoUrl = getGitHubRepoUrl(projectDir);
   const lines = [];
   lines.push(`\u2705 <b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
