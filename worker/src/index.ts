@@ -1432,7 +1432,7 @@ async function handleSession(
     if (!alreadyActive) {
       sessions.push({
         user: update.user,
-        since: new Date().toISOString(),
+        since: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
       });
       await setActiveSessions(env.PROJECTS, projectId, sessions);
     }

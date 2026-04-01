@@ -492,20 +492,8 @@ async function notifySessionEnd(projectDir, stats) {
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
 
-  // --- Login channel/topic: short message ---
-  const loginChatId = config.loginChatId || config.chatId;
-  const loginThreadId = config.loginChatId ? null : config.loginThreadId;
-  if (config.loginChatId || config.loginThreadId) {
-    const loginText = `\uD83D\uDD34 <b>${escapeHtml(user)}</b> has ended the session \u2014 <b>${escapeHtml(projectName)}</b>`;
-    try {
-      await sendTelegram(config.token, loginChatId, loginText, loginThreadId);
-      console.error('[Notify] Login end message sent');
-    } catch (e) {
-      console.error(`[Notify] Login end message failed: ${e.message}`);
-    }
-  }
-
-  // Don't unregister session — sessions auto-expire via KV TTL (2 hours).
+  // No "ended" message to Login channel — sessions auto-expire via TTL.
+  // Context compressions trigger session-end hooks falsely, so we skip this.
   // This prevents context compressions from falsely showing users as offline.
   // Just update the dashboard.
   if (config.workerUrl && config.projectId) {
