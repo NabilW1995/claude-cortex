@@ -224,12 +224,14 @@ async function sendTelegramThreaded(
   chatId: string,
   text: string,
   threadId?: number,
-  replyToMessageId?: number | null
+  replyToMessageId?: number | null,
+  inlineKeyboard?: Array<Array<{ text: string; callback_data?: string; url?: string }>>
 ): Promise<number | null> {
   const body: Record<string, unknown> = { chat_id: chatId, text };
   if (threadId) body.message_thread_id = threadId;
   if (replyToMessageId) body.reply_to_message_id = replyToMessageId;
   body.allow_sending_without_reply = true;
+  if (inlineKeyboard) body.reply_markup = { inline_keyboard: inlineKeyboard };
 
   const res = await fetch(
     `https://api.telegram.org/bot${botToken}/sendMessage`,
@@ -1745,6 +1747,64 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // Contextual action callbacks — claim review, claim issue
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^claim_review:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const prNumber = parseInt(ctx.match![1], 10);
+    const fromUser = ctx.from?.first_name || "Unknown";
+    const members = await getTeamMembers(env.PROJECTS);
+    const member = members.find((m) => m.telegram_id === ctx.from?.id);
+    const githubUser = member?.github || fromUser;
+
+    if (project.githubToken) {
+      try {
+        await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls/${prNumber}/requested_reviewers`,
+          {
+            method: "POST",
+            headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken, "Content-Type": "application/json" },
+            body: JSON.stringify({ reviewers: [githubUser] }),
+          }
+        );
+        await sendTelegram(project.botToken, project.chatId,
+          `\u{2705} ${fromUser} assigned as reviewer on PR #${prNumber}`, project.threadId);
+      } catch {
+        await sendTelegram(project.botToken, project.chatId,
+          `\u{274C} Could not assign reviewer. Check GitHub permissions.`, project.threadId);
+      }
+    }
+  });
+
+  bot.callbackQuery(/^claim_issue:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const issueNumber = parseInt(ctx.match![1], 10);
+    const fromUser = ctx.from?.first_name || "Unknown";
+    const members = await getTeamMembers(env.PROJECTS);
+    const member = members.find((m) => m.telegram_id === ctx.from?.id);
+    const githubUser = member?.github || fromUser;
+
+    if (project.githubToken) {
+      try {
+        await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/issues/${issueNumber}/assignees`,
+          {
+            method: "POST",
+            headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken, "Content-Type": "application/json" },
+            body: JSON.stringify({ assignees: [githubUser] }),
+          }
+        );
+        await sendTelegram(project.botToken, project.chatId,
+          `\u{2705} ${fromUser} claimed Issue #${issueNumber}`, project.threadId);
+      } catch {
+        await sendTelegram(project.botToken, project.chatId,
+          `\u{274C} Could not assign issue. Check GitHub permissions.`, project.threadId);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------
   // New group member detection — auto-greet and prompt for registration
   // -------------------------------------------------------------------
 
@@ -2348,26 +2408,26 @@ async function handleGitHubIssues(
   }
 
   if (message) {
+    // Contextual buttons for issue events
+    const buttons: Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined =
+      action === "opened"
+        ? [[
+            { text: "\u{1F64B} I'll take this", callback_data: `claim_issue:${issue.number}` },
+            { text: "\u{1F517} Open on GitHub", url: issue.html_url },
+          ]]
+        : undefined;
+
     if (action === "opened") {
-      // First message about this issue — send and save the message_id for threading
       const sentId = await sendTelegramThreaded(
-        project.botToken,
-        project.chatId,
-        message,
-        project.threadId
+        project.botToken, project.chatId, message, project.threadId, null, buttons
       );
       if (sentId) {
         await saveThreadMessageId(env.PROJECTS, projectId, "issue", issue.number, sentId);
       }
     } else {
-      // Follow-up event — reply to the original message if it exists
       const replyTo = await getThreadMessageId(env.PROJECTS, projectId, "issue", issue.number);
       await sendTelegramThreaded(
-        project.botToken,
-        project.chatId,
-        message,
-        project.threadId,
-        replyTo
+        project.botToken, project.chatId, message, project.threadId, replyTo
       );
     }
   }
@@ -2445,29 +2505,31 @@ async function handleGitHubPR(
   }
 
   if (message) {
-    // "opened" (non-draft) and "ready_for_review" can start a thread
-    const isThreadStarter = action === "opened" || action === "ready_for_review";
+    // Contextual buttons for PR events
+    const needsReview = action === "opened" || action === "ready_for_review";
+    const prButtons: Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined =
+      needsReview
+        ? [[
+            { text: "\u{1F44B} I'll review this", callback_data: `claim_review:${pr.number}` },
+            { text: "\u{1F517} Open on GitHub", url: pr.html_url },
+          ]]
+        : action === "closed"
+          ? [[{ text: "\u{1F517} View on GitHub", url: pr.html_url }]]
+          : undefined;
+
+    const isThreadStarter = needsReview;
     const existingThread = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
 
     if (isThreadStarter && !existingThread) {
-      // First message about this PR — send and save the message_id for threading
       const sentId = await sendTelegramThreaded(
-        project.botToken,
-        project.chatId,
-        message,
-        project.threadId
+        project.botToken, project.chatId, message, project.threadId, null, prButtons
       );
       if (sentId) {
         await saveThreadMessageId(env.PROJECTS, projectId, "pr", pr.number, sentId);
       }
     } else {
-      // Follow-up event — reply to the original message if it exists
       await sendTelegramThreaded(
-        project.botToken,
-        project.chatId,
-        message,
-        project.threadId,
-        existingThread
+        project.botToken, project.chatId, message, project.threadId, existingThread
       );
     }
   }
