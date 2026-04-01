@@ -5,3 +5,8 @@ compatibility_date = "2024-01-01"
 [[kv_namespaces]]
 binding = "PROJECTS"
 id = "364a896975b14f2289be5cd20e182afc"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cortex-bot-db"
+database_id = "d252948e-7c2f-46f1-a12f-87a9259604ec"

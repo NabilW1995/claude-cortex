@@ -19,6 +19,7 @@ import type { Context } from "grammy";
 
 interface Env {
   PROJECTS: KVNamespace;
+  DB: D1Database;
 }
 
 interface ProjectConfig {
@@ -279,6 +280,114 @@ async function saveDashboardState(
   state: DashboardState
 ): Promise<void> {
   await kv.put(projectId + ":dashboard", JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// D1 helpers — event logging and session history
+// ---------------------------------------------------------------------------
+
+async function logEvent(
+  db: D1Database,
+  repo: string,
+  eventType: string,
+  actor: string,
+  target?: string,
+  metadata?: Record<string, unknown>
+): Promise<void> {
+  try {
+    await db.prepare(
+      "INSERT INTO events (repo, event_type, actor, target, metadata) VALUES (?, ?, ?, ?, ?)"
+    ).bind(repo, eventType, actor, target || null, metadata ? JSON.stringify(metadata) : null).run();
+  } catch {
+    // Best-effort logging — don't break main flow
+  }
+}
+
+async function logSessionStart(
+  db: D1Database,
+  userId: string,
+  project: string
+): Promise<void> {
+  try {
+    await db.prepare(
+      "INSERT INTO sessions (user_id, project) VALUES (?, ?)"
+    ).bind(userId, project).run();
+  } catch {}
+}
+
+async function logSessionEnd(
+  db: D1Database,
+  userId: string,
+  project: string
+): Promise<void> {
+  try {
+    await db.prepare(
+      `UPDATE sessions SET ended_at = CURRENT_TIMESTAMP,
+       duration_minutes = CAST((julianday(CURRENT_TIMESTAMP) - julianday(started_at)) * 1440 AS INTEGER)
+       WHERE user_id = ? AND project = ? AND ended_at IS NULL
+       ORDER BY started_at DESC LIMIT 1`
+    ).bind(userId, project).run();
+  } catch {}
+}
+
+async function getTodayStats(
+  db: D1Database,
+  repo?: string
+): Promise<{ issues_opened: number; issues_closed: number; prs_merged: number; prs_open: number; total_events: number }> {
+  try {
+    const repoFilter = repo ? "AND repo = ?" : "";
+    const binds = repo ? [repo] : [];
+
+    const opened = await db.prepare(
+      `SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.opened' AND date(created_at) = date('now') ${repoFilter}`
+    ).bind(...binds).first<{ c: number }>();
+
+    const closed = await db.prepare(
+      `SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND date(created_at) = date('now') ${repoFilter}`
+    ).bind(...binds).first<{ c: number }>();
+
+    const merged = await db.prepare(
+      `SELECT COUNT(*) as c FROM events WHERE event_type = 'pr.merged' AND date(created_at) = date('now') ${repoFilter}`
+    ).bind(...binds).first<{ c: number }>();
+
+    const prsOpen = await db.prepare(
+      `SELECT COUNT(*) as c FROM events WHERE event_type = 'pr.opened' AND date(created_at) = date('now') ${repoFilter}`
+    ).bind(...binds).first<{ c: number }>();
+
+    const total = await db.prepare(
+      `SELECT COUNT(*) as c FROM events WHERE date(created_at) = date('now') ${repoFilter}`
+    ).bind(...binds).first<{ c: number }>();
+
+    return {
+      issues_opened: opened?.c || 0,
+      issues_closed: closed?.c || 0,
+      prs_merged: merged?.c || 0,
+      prs_open: prsOpen?.c || 0,
+      total_events: total?.c || 0,
+    };
+  } catch {
+    return { issues_opened: 0, issues_closed: 0, prs_merged: 0, prs_open: 0, total_events: 0 };
+  }
+}
+
+async function getWorkHoursToday(
+  db: D1Database,
+  project?: string
+): Promise<Array<{ user_id: string; total_minutes: number }>> {
+  try {
+    const filter = project ? "AND project = ?" : "";
+    const binds = project ? [project] : [];
+    const result = await db.prepare(
+      `SELECT user_id, SUM(duration_minutes) as total_minutes
+       FROM sessions
+       WHERE date(started_at) = date('now') ${filter}
+       GROUP BY user_id ORDER BY total_minutes DESC`
+    ).bind(...binds).all<{ user_id: string; total_minutes: number }>();
+    return result.results || [];
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1255,34 +1364,37 @@ async function handleGitHub(
 
   const { action, issue, sender } = payload;
   let message: string | null = null;
+  let eventType: string | null = null;
 
   switch (action) {
     case "opened":
-      message = `Neuer Task: #${issue.number} ${issue.title} (von ${sender.login})`;
+      message = `\u{1F4DD} New Issue #${issue.number}: "${issue.title}" by ${sender.login}\n\u{1F517} ${issue.html_url}`;
+      eventType = "issues.opened";
       break;
 
     case "closed":
-      message = `Task erledigt: #${issue.number} ${issue.title} (von ${sender.login})`;
+      message = `\u{2705} Issue #${issue.number} closed: "${issue.title}" by ${sender.login}`;
+      eventType = "issues.closed";
       break;
 
     case "assigned":
       if (issue.assignee) {
-        message = `Task #${issue.number} zugewiesen an ${issue.assignee.login}`;
+        message = `\u{1F464} Issue #${issue.number} assigned to ${issue.assignee.login}`;
+        eventType = "issues.assigned";
       }
       break;
 
     default:
-      // Other issue actions (edited, labeled, etc.) — ignore
       break;
   }
 
   if (message) {
-    await sendTelegram(
-      project.botToken,
-      project.chatId,
-      message,
-      project.threadId
-    );
+    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+  }
+
+  // Log event to D1 for reports
+  if (eventType) {
+    await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(issue.number));
   }
 
   return new Response("OK");
@@ -1323,13 +1435,13 @@ async function handleSession(
       since: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
     });
     await setActiveSessions(env.PROJECTS, projectId, filtered);
-    // Note: Telegram notifications are sent by notify.js, not here
-    // The dashboard is triggered separately via POST /dashboard/:projectId
+    // Log session start to D1 for work hours tracking
+    await logSessionStart(env.DB, update.user, projectId);
   } else if (update.type === "end") {
-    // Don't remove session immediately — it auto-expires via KV TTL (2 hours).
-    // This prevents context compressions from falsely showing users as offline.
-    // Sessions get refreshed on every session-start, so active users stay active.
-    // Only clear claimed tasks from dashboard state.
+    // Don't remove from KV — auto-expires via TTL (prevents false offline from context compression)
+    // But DO log the end to D1 for work hours tracking
+    await logSessionEnd(env.DB, update.user, projectId);
+    // Clear claimed tasks from dashboard state
     const dashState = await getDashboardState(env.PROJECTS, projectId);
     dashState.activeSessions = dashState.activeSessions.filter(
       (s) => s.user !== update.user
