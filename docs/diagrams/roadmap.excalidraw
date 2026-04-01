@@ -1,0 +1,1186 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "excalidraw-cli",
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "title",
+      "x": 0,
+      "y": 0,
+      "width": 1500,
+      "height": 60,
+      "backgroundColor": "#1e1e2e",
+      "fillStyle": "solid",
+      "strokeColor": "transparent",
+      "boundElements": [
+        {
+          "id": "title_label",
+          "type": "text"
+        }
+      ],
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "title_label",
+      "x": 10,
+      "y": 10,
+      "width": 1480,
+      "height": 40,
+      "text": "CORTEX TEAM BOT v2 -- ROADMAP",
+      "fontSize": 28,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "title",
+      "strokeColor": "#e5e5e5"
+    },
+    {
+      "type": "rectangle",
+      "id": "p1bg",
+      "x": 0,
+      "y": 80,
+      "width": 450,
+      "height": 340,
+      "backgroundColor": "#dbe4ff",
+      "fillStyle": "solid",
+      "strokeColor": "#4a9eed",
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p1title",
+      "x": 100,
+      "y": 90,
+      "text": "PHASE 1: Foundation",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p1s1",
+      "x": 20,
+      "y": 130,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p1s1_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p1s1_label",
+      "x": 30,
+      "y": 140,
+      "width": 390,
+      "height": 20,
+      "text": "1. grammy Migration",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p1s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "p1s2",
+      "x": 20,
+      "y": 180,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p1s2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p1s2_label",
+      "x": 30,
+      "y": 190,
+      "width": 390,
+      "height": 20,
+      "text": "2. D1 SQLite Setup",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p1s2"
+    },
+    {
+      "type": "rectangle",
+      "id": "p1s3",
+      "x": 20,
+      "y": 230,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p1s3_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p1s3_label",
+      "x": 30,
+      "y": 240,
+      "width": 390,
+      "height": 20,
+      "text": "3. Webhook Signature Verification",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p1s3"
+    },
+    {
+      "type": "rectangle",
+      "id": "p1s4",
+      "x": 20,
+      "y": 280,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p1s4_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p1s4_label",
+      "x": 30,
+      "y": 290,
+      "width": 390,
+      "height": 20,
+      "text": "4. Onboarding Flow",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p1s4"
+    },
+    {
+      "type": "rectangle",
+      "id": "p1s5",
+      "x": 20,
+      "y": 330,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p1s5_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p1s5_label",
+      "x": 30,
+      "y": 340,
+      "width": 390,
+      "height": 20,
+      "text": "5. Full Button Set (pinned)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p1s5"
+    },
+    {
+      "type": "rectangle",
+      "id": "p2bg",
+      "x": 520,
+      "y": 80,
+      "width": 450,
+      "height": 340,
+      "backgroundColor": "#d3f9d8",
+      "fillStyle": "solid",
+      "strokeColor": "#22c55e",
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p2title",
+      "x": 590,
+      "y": 90,
+      "text": "PHASE 2: GitHub Events",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p2s1",
+      "x": 540,
+      "y": 130,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p2s1_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p2s1_label",
+      "x": 550,
+      "y": 140,
+      "width": 390,
+      "height": 20,
+      "text": "6. All Webhook Events + Filter",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p2s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "p2s2",
+      "x": 540,
+      "y": 180,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p2s2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p2s2_label",
+      "x": 550,
+      "y": 190,
+      "width": 390,
+      "height": 20,
+      "text": "7. Message Threading",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p2s2"
+    },
+    {
+      "type": "rectangle",
+      "id": "p2s3",
+      "x": 540,
+      "y": 230,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p2s3_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p2s3_label",
+      "x": 550,
+      "y": 240,
+      "width": 390,
+      "height": 20,
+      "text": "8. Webhook Batching (5s)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p2s3"
+    },
+    {
+      "type": "rectangle",
+      "id": "p2s4",
+      "x": 540,
+      "y": 280,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p2s4_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p2s4_label",
+      "x": 550,
+      "y": 290,
+      "width": 390,
+      "height": 20,
+      "text": "9. Contextual Buttons",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p2s4"
+    },
+    {
+      "type": "rectangle",
+      "id": "p2s5",
+      "x": 540,
+      "y": 330,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p2s5_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p2s5_label",
+      "x": 550,
+      "y": 340,
+      "width": 390,
+      "height": 20,
+      "text": "10. Deep Links to GitHub",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p2s5"
+    },
+    {
+      "type": "rectangle",
+      "id": "p3bg",
+      "x": 1040,
+      "y": 80,
+      "width": 450,
+      "height": 290,
+      "backgroundColor": "#e5dbff",
+      "fillStyle": "solid",
+      "strokeColor": "#8b5cf6",
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p3title",
+      "x": 1110,
+      "y": 90,
+      "text": "PHASE 3: Presence",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p3s1",
+      "x": 1060,
+      "y": 130,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p3s1_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p3s1_label",
+      "x": 1070,
+      "y": 140,
+      "width": 390,
+      "height": 20,
+      "text": "11. Heartbeat (15min ping)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p3s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "p3s2",
+      "x": 1060,
+      "y": 180,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p3s2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p3s2_label",
+      "x": 1070,
+      "y": 190,
+      "width": 390,
+      "height": 20,
+      "text": "12. Session Timeout (Cron)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p3s2"
+    },
+    {
+      "type": "rectangle",
+      "id": "p3s3",
+      "x": 1060,
+      "y": 230,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p3s3_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p3s3_label",
+      "x": 1070,
+      "y": 240,
+      "width": 390,
+      "height": 20,
+      "text": "13. Work Hours (D1)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p3s3"
+    },
+    {
+      "type": "rectangle",
+      "id": "p3s4",
+      "x": 1060,
+      "y": 280,
+      "width": 410,
+      "height": 40,
+      "backgroundColor": "#d0bfff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p3s4_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p3s4_label",
+      "x": 1070,
+      "y": 290,
+      "width": 390,
+      "height": 20,
+      "text": "14. Dashboard Improvements",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p3s4"
+    },
+    {
+      "type": "arrow",
+      "id": "a1",
+      "x": 450,
+      "y": 250,
+      "width": 70,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          70,
+          0
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "startBinding": {
+        "elementId": "p1bg",
+        "fixedPoint": [
+          1,
+          0.5
+        ]
+      },
+      "endBinding": {
+        "elementId": "p2bg",
+        "fixedPoint": [
+          0,
+          0.5
+        ]
+      },
+      "roughness": 2
+    },
+    {
+      "type": "arrow",
+      "id": "a1b",
+      "x": 450,
+      "y": 250,
+      "width": 590,
+      "height": 0,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          590,
+          0
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "startBinding": {
+        "elementId": "p1bg",
+        "fixedPoint": [
+          1,
+          0.5
+        ]
+      },
+      "endBinding": {
+        "elementId": "p3bg",
+        "fixedPoint": [
+          0,
+          0.5
+        ]
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "parallel",
+      "x": 680,
+      "y": 435,
+      "text": "Phase 2 + 3 run in parallel",
+      "fontSize": 16,
+      "strokeColor": "#757575",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p4bg",
+      "x": 0,
+      "y": 480,
+      "width": 700,
+      "height": 340,
+      "backgroundColor": "#fff3bf",
+      "fillStyle": "solid",
+      "strokeColor": "#f59e0b",
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p4title",
+      "x": 180,
+      "y": 490,
+      "text": "PHASE 4: Intelligence",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p4s1",
+      "x": 20,
+      "y": 530,
+      "width": 660,
+      "height": 40,
+      "backgroundColor": "#ffd8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p4s1_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p4s1_label",
+      "x": 30,
+      "y": 540,
+      "width": 640,
+      "height": 20,
+      "text": "15. Stale PR Detection + Reminders (Cron 2h)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p4s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "p4s2",
+      "x": 20,
+      "y": 580,
+      "width": 660,
+      "height": 40,
+      "backgroundColor": "#ffd8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p4s2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p4s2_label",
+      "x": 30,
+      "y": 590,
+      "width": 640,
+      "height": 20,
+      "text": "16. Merge Conflict Detection",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p4s2"
+    },
+    {
+      "type": "rectangle",
+      "id": "p4s3",
+      "x": 20,
+      "y": 630,
+      "width": 660,
+      "height": 40,
+      "backgroundColor": "#ffd8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p4s3_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p4s3_label",
+      "x": 30,
+      "y": 640,
+      "width": 640,
+      "height": 20,
+      "text": "17. Morning Digest + Evening Summary (Cron)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p4s3"
+    },
+    {
+      "type": "rectangle",
+      "id": "p4s4",
+      "x": 20,
+      "y": 680,
+      "width": 660,
+      "height": 40,
+      "backgroundColor": "#ffd8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p4s4_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p4s4_label",
+      "x": 30,
+      "y": 690,
+      "width": 640,
+      "height": 20,
+      "text": "18. Weekly Report (Friday 17:00)",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p4s4"
+    },
+    {
+      "type": "rectangle",
+      "id": "p4s5",
+      "x": 20,
+      "y": 730,
+      "width": 660,
+      "height": 40,
+      "backgroundColor": "#ffd8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p4s5_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p4s5_label",
+      "x": 30,
+      "y": 740,
+      "width": 640,
+      "height": 20,
+      "text": "19. CI/CD Failure Alerts",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p4s5"
+    },
+    {
+      "type": "rectangle",
+      "id": "p5bg",
+      "x": 770,
+      "y": 480,
+      "width": 350,
+      "height": 190,
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "strokeColor": "#06b6d4",
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p5title",
+      "x": 830,
+      "y": 490,
+      "text": "PHASE 5: Deploy",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p5s1",
+      "x": 790,
+      "y": 530,
+      "width": 310,
+      "height": 40,
+      "backgroundColor": "#99e9f2",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p5s1_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p5s1_label",
+      "x": 800,
+      "y": 540,
+      "width": 290,
+      "height": 20,
+      "text": "20. Coolify Webhooks",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p5s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "p5s2",
+      "x": 790,
+      "y": 580,
+      "width": 310,
+      "height": 40,
+      "backgroundColor": "#99e9f2",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p5s2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p5s2_label",
+      "x": 800,
+      "y": 590,
+      "width": 290,
+      "height": 20,
+      "text": "21. Preview + Live URLs",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p5s2"
+    },
+    {
+      "type": "rectangle",
+      "id": "p6bg",
+      "x": 770,
+      "y": 700,
+      "width": 350,
+      "height": 240,
+      "backgroundColor": "#ffc9c9",
+      "fillStyle": "solid",
+      "strokeColor": "#ef4444",
+      "roundness": {
+        "type": 3
+      },
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p6title",
+      "x": 850,
+      "y": 710,
+      "text": "PHASE 6: Polish",
+      "fontSize": 22,
+      "strokeColor": "#1e1e1e",
+      "fontFamily": 1
+    },
+    {
+      "type": "rectangle",
+      "id": "p6s1",
+      "x": 790,
+      "y": 750,
+      "width": 310,
+      "height": 40,
+      "backgroundColor": "#ffa8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p6s1_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p6s1_label",
+      "x": 800,
+      "y": 760,
+      "width": 290,
+      "height": 20,
+      "text": "22. Quiet Hours / DND",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p6s1"
+    },
+    {
+      "type": "rectangle",
+      "id": "p6s2",
+      "x": 790,
+      "y": 800,
+      "width": 310,
+      "height": 40,
+      "backgroundColor": "#ffa8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p6s2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p6s2_label",
+      "x": 800,
+      "y": 810,
+      "width": 290,
+      "height": 20,
+      "text": "23. Rate Limiting",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p6s2"
+    },
+    {
+      "type": "rectangle",
+      "id": "p6s3",
+      "x": 790,
+      "y": 850,
+      "width": 310,
+      "height": 40,
+      "backgroundColor": "#ffa8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p6s3_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p6s3_label",
+      "x": 800,
+      "y": 860,
+      "width": 290,
+      "height": 20,
+      "text": "24. Error Handling",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p6s3"
+    },
+    {
+      "type": "rectangle",
+      "id": "p6s4",
+      "x": 790,
+      "y": 900,
+      "width": 310,
+      "height": 40,
+      "backgroundColor": "#ffa8a8",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "p6s4_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "p6s4_label",
+      "x": 800,
+      "y": 910,
+      "width": 290,
+      "height": 20,
+      "text": "25. Self-Monitoring",
+      "fontSize": 16,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "p6s4"
+    },
+    {
+      "type": "arrow",
+      "id": "a2",
+      "x": 350,
+      "y": 420,
+      "width": 0,
+      "height": 60,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          60
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "boundElements": [
+        {
+          "id": "a2_label",
+          "type": "text"
+        }
+      ],
+      "roughness": 2
+    },
+    {
+      "type": "text",
+      "id": "a2_label",
+      "x": 360,
+      "y": 430,
+      "width": 80,
+      "height": 40,
+      "text": "needs Phase 2+3",
+      "fontSize": 20,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "a2"
+    },
+    {
+      "type": "arrow",
+      "id": "a3",
+      "x": 700,
+      "y": 650,
+      "width": 70,
+      "height": 170,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          70,
+          170
+        ]
+      ],
+      "endArrowhead": "arrow",
+      "roughness": 2
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "gridSize": null
+  },
+  "files": {}
+}
