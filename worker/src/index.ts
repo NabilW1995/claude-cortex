@@ -59,6 +59,57 @@ interface GitHubIssuesPayload {
     title: string;
     assignee?: { login: string } | null;
     html_url: string;
+    labels?: Array<{ name: string }>;
+  };
+  label?: { name: string };
+  sender: { login: string };
+}
+
+interface GitHubPRPayload {
+  action: string;
+  pull_request: {
+    number: number;
+    title: string;
+    html_url: string;
+    user: { login: string };
+    draft: boolean;
+    additions: number;
+    deletions: number;
+    changed_files: number;
+    merged: boolean;
+    base: { ref: string };
+    head: { ref: string };
+  };
+  sender: { login: string };
+}
+
+interface GitHubReviewPayload {
+  action: string;
+  review: {
+    state: string; // "approved", "changes_requested", "commented"
+    html_url: string;
+    user: { login: string };
+  };
+  pull_request: {
+    number: number;
+    title: string;
+  };
+  sender: { login: string };
+}
+
+interface GitHubPushPayload {
+  ref: string;
+  commits: Array<{ message: string }>;
+  pusher: { name: string };
+}
+
+interface GitHubWorkflowPayload {
+  action: string;
+  workflow_run: {
+    name: string;
+    conclusion: string; // "success", "failure", etc.
+    html_url: string;
+    head_branch: string;
   };
   sender: { login: string };
 }
@@ -2032,6 +2083,311 @@ async function handleRegisterMember(
 // Route: POST /github/:projectId
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// GitHub sub-handlers — one per event type
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle GitHub "issues" events.
+ * Sends Telegram notifications for opened, closed, assigned, and
+ * labeled (only "urgent" or "blocked") actions.
+ */
+async function handleGitHubIssues(
+  rawBody: string,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<Response> {
+  let payload: GitHubIssuesPayload;
+  try {
+    payload = JSON.parse(rawBody) as GitHubIssuesPayload;
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
+  }
+
+  const { action, issue, sender } = payload;
+  let message: string | null = null;
+  let eventType: string | null = null;
+
+  switch (action) {
+    case "opened":
+      message =
+        `\u{1F4DD} New Issue #${issue.number}: "${issue.title}" by @${sender.login}\n` +
+        `\u{1F517} ${issue.html_url}`;
+      eventType = "issues.opened";
+      break;
+
+    case "closed":
+      message = `\u{2705} Issue #${issue.number} closed by @${sender.login}`;
+      eventType = "issues.closed";
+      break;
+
+    case "assigned":
+      if (issue.assignee) {
+        message = `\u{1F464} Issue #${issue.number} assigned to @${issue.assignee.login}`;
+        eventType = "issues.assigned";
+      }
+      break;
+
+    case "labeled": {
+      // Only notify for high-signal labels — ignore the rest to reduce noise
+      const labelName = payload.label?.name?.toLowerCase() || "";
+      const importantLabels = ["urgent", "blocked"];
+      if (importantLabels.includes(labelName)) {
+        message = `\u{1F3F7} Issue #${issue.number} labeled: ${payload.label!.name}`;
+        eventType = "issues.labeled";
+      } else {
+        // Still log to D1 for reports, but don't send a Telegram message
+        eventType = "issues.labeled";
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  if (message) {
+    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+  }
+
+  // Log ALL events to D1 for reports (even filtered ones)
+  if (eventType) {
+    await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(issue.number));
+  }
+
+  return new Response("OK");
+}
+
+/**
+ * Handle GitHub "pull_request" events.
+ * Sends Telegram notifications for opened (non-draft), ready_for_review,
+ * and closed (merged vs. not merged) actions. Draft PR updates are ignored.
+ */
+async function handleGitHubPR(
+  rawBody: string,
+  project: ProjectConfig,
+  env: Env,
+  _projectId: string
+): Promise<Response> {
+  let payload: GitHubPRPayload;
+  try {
+    payload = JSON.parse(rawBody) as GitHubPRPayload;
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
+  }
+
+  const { action, pull_request: pr, sender } = payload;
+  let message: string | null = null;
+  let eventType: string | null = null;
+
+  switch (action) {
+    case "opened":
+      // Skip draft PRs — they are work-in-progress and create noise
+      if (pr.draft) {
+        eventType = "pr.opened.draft";
+        break;
+      }
+      message =
+        `\u{1F500} New PR #${pr.number}: "${pr.title}" by @${sender.login}\n` +
+        `\u{1F4CA} ${pr.changed_files} files | +${pr.additions}/-${pr.deletions} | ${pr.head.ref} \u{2192} ${pr.base.ref}\n` +
+        `\u{1F517} ${pr.html_url}`;
+      eventType = "pr.opened";
+      break;
+
+    case "ready_for_review":
+      message =
+        `\u{1F440} PR #${pr.number} is ready for review!\n` +
+        `\u{1F517} ${pr.html_url}`;
+      eventType = "pr.ready_for_review";
+      break;
+
+    case "closed":
+      if (pr.merged) {
+        message =
+          `\u{1F389} PR #${pr.number} merged! "${pr.title}" \u{2192} ${pr.base.ref}\n` +
+          `\u{1F517} ${pr.html_url}`;
+        eventType = "pr.merged";
+      } else {
+        message = `\u{274C} PR #${pr.number} closed without merge`;
+        eventType = "pr.closed";
+      }
+      break;
+
+    default:
+      // Ignore other PR actions (edited, synchronize, etc.) to reduce noise
+      // Still log if it is a known action on a draft PR
+      if (pr.draft) {
+        eventType = `pr.${action}.draft`;
+      }
+      break;
+  }
+
+  if (message) {
+    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+  }
+
+  // Log ALL events to D1 for reports (even filtered/draft ones)
+  if (eventType) {
+    await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(pr.number));
+  }
+
+  return new Response("OK");
+}
+
+/**
+ * Handle GitHub "pull_request_review" events.
+ * Sends Telegram notifications for approved and changes_requested reviews.
+ * Plain "commented" reviews are ignored to reduce noise.
+ */
+async function handleGitHubReview(
+  rawBody: string,
+  project: ProjectConfig,
+  env: Env,
+  _projectId: string
+): Promise<Response> {
+  let payload: GitHubReviewPayload;
+  try {
+    payload = JSON.parse(rawBody) as GitHubReviewPayload;
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
+  }
+
+  const { action, review, pull_request: pr, sender } = payload;
+  let message: string | null = null;
+  let eventType: string | null = null;
+
+  if (action === "submitted") {
+    switch (review.state) {
+      case "approved":
+        message = `\u{2705} @${review.user.login} approved PR #${pr.number}`;
+        eventType = "review.approved";
+        break;
+
+      case "changes_requested":
+        message = `\u{274C} @${review.user.login} requested changes on PR #${pr.number}`;
+        eventType = "review.changes_requested";
+        break;
+
+      case "commented":
+        // Plain comments are too noisy — log but don't notify
+        eventType = "review.commented";
+        break;
+
+      default:
+        eventType = `review.${review.state}`;
+        break;
+    }
+  }
+
+  if (message) {
+    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+  }
+
+  // Log ALL review events to D1 for reports
+  if (eventType) {
+    await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(pr.number));
+  }
+
+  return new Response("OK");
+}
+
+/**
+ * Handle GitHub "push" events.
+ * Only notifies for pushes to main/master — other branches are ignored
+ * to prevent notification overload from feature branch work.
+ */
+async function handleGitHubPush(
+  rawBody: string,
+  project: ProjectConfig,
+  env: Env,
+  _projectId: string
+): Promise<Response> {
+  let payload: GitHubPushPayload;
+  try {
+    payload = JSON.parse(rawBody) as GitHubPushPayload;
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
+  }
+
+  const { ref, commits, pusher } = payload;
+
+  // Extract the branch name from the full ref (e.g., "refs/heads/main" → "main")
+  const branch = ref.replace("refs/heads/", "");
+  const isMainBranch = branch === "main" || branch === "master";
+  const eventType = isMainBranch ? "push.main" : "push.branch";
+
+  if (isMainBranch && commits.length > 0) {
+    const message =
+      `\u{1F680} ${commits.length} new commit${commits.length === 1 ? "" : "s"} on ${branch} by @${pusher.name}`;
+    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+  }
+
+  // Log ALL push events to D1 (even non-main branches) for reports
+  await logEvent(env.DB, project.githubRepo, eventType, pusher.name, branch, {
+    commit_count: commits.length,
+  });
+
+  return new Response("OK");
+}
+
+/**
+ * Handle GitHub "workflow_run" events.
+ * Only notifies on failures — successful CI runs are silent to reduce noise.
+ */
+async function handleGitHubWorkflow(
+  rawBody: string,
+  project: ProjectConfig,
+  env: Env,
+  _projectId: string
+): Promise<Response> {
+  let payload: GitHubWorkflowPayload;
+  try {
+    payload = JSON.parse(rawBody) as GitHubWorkflowPayload;
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
+  }
+
+  const { action, workflow_run: run, sender } = payload;
+  let message: string | null = null;
+  let eventType: string | null = null;
+
+  if (action === "completed") {
+    if (run.conclusion === "failure") {
+      message =
+        `\u{274C} CI failed: ${run.name} on ${run.head_branch}\n` +
+        `\u{1F517} ${run.html_url}`;
+      eventType = "ci.failure";
+    } else {
+      // Success, cancelled, skipped, etc. — log but don't notify
+      eventType = `ci.${run.conclusion}`;
+    }
+  }
+
+  if (message) {
+    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+  }
+
+  // Log ALL workflow events to D1 for reports
+  if (eventType) {
+    await logEvent(env.DB, project.githubRepo, eventType, sender.login, run.name, {
+      conclusion: run.conclusion,
+      branch: run.head_branch,
+    });
+  }
+
+  return new Response("OK");
+}
+
+// ---------------------------------------------------------------------------
+// Route: POST /github/:projectId — main GitHub webhook entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Main GitHub webhook handler. Verifies the signature, reads the event type
+ * from the X-GitHub-Event header, and dispatches to the appropriate
+ * sub-handler. Unknown event types are acknowledged silently.
+ */
 async function handleGitHub(
   request: Request,
   env: Env,
@@ -2065,54 +2421,27 @@ async function handleGitHub(
   // When no secret is configured, all requests are accepted (development mode)
 
   const event = request.headers.get("X-GitHub-Event");
-  if (event !== "issues") {
-    // We only handle issue events — acknowledge others silently
-    return new Response("OK");
-  }
 
-  let payload: GitHubIssuesPayload;
-  try {
-    payload = JSON.parse(rawBody) as GitHubIssuesPayload;
-  } catch {
-    return new Response("Invalid JSON", { status: 400 });
-  }
+  switch (event) {
+    case "issues":
+      return handleGitHubIssues(rawBody, project, env, projectId);
 
-  const { action, issue, sender } = payload;
-  let message: string | null = null;
-  let eventType: string | null = null;
+    case "pull_request":
+      return handleGitHubPR(rawBody, project, env, projectId);
 
-  switch (action) {
-    case "opened":
-      message = `\u{1F4DD} New Issue #${issue.number}: "${issue.title}" by ${sender.login}\n\u{1F517} ${issue.html_url}`;
-      eventType = "issues.opened";
-      break;
+    case "pull_request_review":
+      return handleGitHubReview(rawBody, project, env, projectId);
 
-    case "closed":
-      message = `\u{2705} Issue #${issue.number} closed: "${issue.title}" by ${sender.login}`;
-      eventType = "issues.closed";
-      break;
+    case "push":
+      return handleGitHubPush(rawBody, project, env, projectId);
 
-    case "assigned":
-      if (issue.assignee) {
-        message = `\u{1F464} Issue #${issue.number} assigned to ${issue.assignee.login}`;
-        eventType = "issues.assigned";
-      }
-      break;
+    case "workflow_run":
+      return handleGitHubWorkflow(rawBody, project, env, projectId);
 
     default:
-      break;
+      // Acknowledge unknown events without processing
+      return new Response("OK");
   }
-
-  if (message) {
-    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
-  }
-
-  // Log event to D1 for reports
-  if (eventType) {
-    await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(issue.number));
-  }
-
-  return new Response("OK");
 }
 
 // ---------------------------------------------------------------------------
