@@ -2,8 +2,16 @@
  * Cortex Team Bot — Cloudflare Worker
  *
  * Central hub connecting Telegram, GitHub, and Claude sessions.
- * Handles bot commands via webhook, GitHub events, and session tracking.
+ * Handles bot commands via webhook (using grammy), GitHub events,
+ * and session tracking.
+ *
+ * grammy handles incoming Telegram webhooks with typed middleware.
+ * Outgoing messages from external triggers (hooks, GitHub, cron)
+ * still use the direct sendTelegram helper.
  */
+
+import { Bot, webhookCallback, InlineKeyboard, Keyboard } from "grammy";
+import type { Context } from "grammy";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,21 +49,6 @@ interface DashboardState {
   lastUpdated: string;
 }
 
-interface TelegramUpdate {
-  callback_query?: {
-    id: string;
-    data?: string;
-    from?: { id?: number; first_name?: string; username?: string };
-    message?: { chat: { id: number }; message_thread_id?: number };
-  };
-  message?: {
-    text?: string;
-    chat: { id: number };
-    message_thread_id?: number;
-    from?: { id?: number; first_name?: string; username?: string };
-  };
-}
-
 interface GitHubIssuesPayload {
   action: string;
   issue: {
@@ -84,12 +77,13 @@ interface RegisterPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Telegram helpers
+// Telegram helpers (for OUTGOING messages from hooks/GitHub/cron)
 // ---------------------------------------------------------------------------
 
 /**
  * Send a plain-text message to the project's Telegram chat/topic.
- * Uses plain text (no parse_mode) to avoid encoding issues.
+ * Used by external triggers (session hooks, GitHub webhooks) that
+ * operate outside the grammy middleware pipeline.
  */
 async function sendTelegram(
   botToken: string,
@@ -458,50 +452,10 @@ async function renderDashboard(
  * Send a new dashboard message or edit the existing one.
  * Stores the message_id in KV so subsequent calls edit the same message.
  * Includes inline buttons for Refresh, Claim Tasks, and Done.
+ *
+ * Uses raw fetch (not grammy) because this is also called from external
+ * triggers (POST /dashboard/:projectId) outside the bot middleware.
  */
-/**
- * Send a reply keyboard with quick-action buttons at the bottom of the chat.
- * These persist until removed — users tap them instead of typing commands.
- */
-async function sendReplyKeyboard(
-  project: ProjectConfig,
-  message: { chat: { id: number }; message_thread_id?: number }
-): Promise<void> {
-  const keyboard = {
-    keyboard: [
-      [
-        { text: "\u{1F4CA} Dashboard" },
-        { text: "\u{1F465} Active" },
-      ],
-      [
-        { text: "\u{1F4CB} Tasks" },
-        { text: "\u{2753} Who" },
-      ],
-    ],
-    resize_keyboard: true,
-    is_persistent: true,
-  };
-
-  const body: Record<string, unknown> = {
-    chat_id: message.chat.id,
-    text: "\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.",
-    reply_markup: keyboard,
-    parse_mode: "HTML",
-  };
-  if (message.message_thread_id) {
-    body.message_thread_id = message.message_thread_id;
-  }
-
-  await fetch(
-    `https://api.telegram.org/bot${project.botToken}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(body),
-    }
-  );
-}
-
 async function sendOrEditDashboard(
   env: Env,
   projectId: string,
@@ -597,347 +551,331 @@ async function sendOrEditDashboard(
 }
 
 // ---------------------------------------------------------------------------
-// Route: POST /telegram/:projectId
+// grammy bot factory — creates a bot instance with all handlers registered
 // ---------------------------------------------------------------------------
 
 /**
- * Strip the @BotName suffix from a command, e.g. "/tasks@ClaudeCortexBot" -> "/tasks"
+ * Create a grammy Bot instance with all command, callback, and keyboard
+ * handlers registered. Called once per incoming Telegram webhook request
+ * with the matching project configuration.
+ *
+ * We pass env and projectId via closure so handlers can access KV.
  */
-function stripBotSuffix(command: string): string {
-  return command.replace(/@\S+/, "");
-}
-
-async function handleTelegram(
-  request: Request,
+function createBot(
+  project: ProjectConfig,
   env: Env,
   projectId: string
-): Promise<Response> {
-  const project = await getProject(env.PROJECTS, projectId);
-  if (!project) {
-    return new Response("Project not found", { status: 404 });
-  }
+): Bot {
+  const bot = new Bot(project.botToken);
 
-  let update: TelegramUpdate;
-  try {
-    update = (await request.json()) as TelegramUpdate;
-  } catch {
-    return new Response("Invalid JSON", { status: 400 });
-  }
+  // -------------------------------------------------------------------
+  // Command handlers
+  // -------------------------------------------------------------------
 
-  // -----------------------------------------------------------------------
-  // Handle callback queries (inline button presses on the dashboard)
-  // -----------------------------------------------------------------------
-  if (update.callback_query) {
-    const cbData = update.callback_query.data;
-    const cbId = update.callback_query.id;
+  // /start, /menu — activate the reply keyboard with quick actions
+  bot.command(["start", "menu"], async (ctx: Context) => {
+    const keyboard = new Keyboard()
+      .text("\u{1F4CA} Dashboard").text("\u{1F465} Active")
+      .row()
+      .text("\u{1F4CB} Tasks").text("\u{2753} Who")
+      .resized()
+      .persistent();
 
-    // Answer the callback to remove loading state on the button
-    await fetch(
-      `https://api.telegram.org/bot${project.botToken}/answerCallbackQuery`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ callback_query_id: cbId }),
-      }
-    );
+    await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+      reply_markup: keyboard,
+      parse_mode: "HTML",
+    });
+  });
 
-    if (cbData === "refresh") {
-      await sendOrEditDashboard(env, projectId, project);
-      return new Response("OK");
+  // /dashboard — send or refresh the live dashboard
+  bot.command("dashboard", async () => {
+    await sendOrEditDashboard(env, projectId, project);
+  });
+
+  // /active — show who is currently working
+  bot.command("active", async () => {
+    await sendActiveInfo(env, project, projectId);
+  });
+
+  // /tasks — list open GitHub issues
+  bot.command("tasks", async () => {
+    await handleTasksCommand(env, project, projectId);
+  });
+
+  // /wer — show who is currently working (German alias)
+  bot.command("wer", async () => {
+    await handleWerCommand(env, project, projectId);
+  });
+
+  // /new <title> — create a new GitHub issue
+  bot.command("new", async (ctx: Context) => {
+    const title = ctx.match as string;
+    await handleNewCommand(project, title);
+  });
+
+  // /assign #N @name — assign a GitHub issue
+  bot.command("assign", async (ctx: Context) => {
+    const args = ctx.match as string;
+    await handleAssignCommand(project, args);
+  });
+
+  // /done #N — close a GitHub issue
+  bot.command("done", async (ctx: Context) => {
+    const args = ctx.match as string;
+    await handleDoneCommand(project, args);
+  });
+
+  // /grab #1 #2 #3 — claim tasks for yourself
+  bot.command("grab", async (ctx: Context) => {
+    const argsText = ctx.match as string;
+    const fromUser = ctx.from?.first_name || "Unknown";
+
+    const taskNumbers =
+      argsText.match(/#?(\d+)/g)?.map((n) => parseInt(n.replace("#", ""), 10)) || [];
+
+    if (taskNumbers.length === 0) {
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        "Usage: /grab #1 #2 #3",
+        project.threadId
+      );
+      return;
     }
 
-    if (cbData === "active") {
+    const state = await getDashboardState(env.PROJECTS, projectId);
+
+    // Find or create user's session in dashboard state
+    let userSession = state.activeSessions.find((s) => s.user === fromUser);
+    if (!userSession) {
+      userSession = {
+        user: fromUser,
+        since: new Date().toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }),
+        tasks: [],
+      };
+      state.activeSessions.push(userSession);
+    }
+
+    // Add new tasks (avoid duplicates)
+    for (const t of taskNumbers) {
+      if (!userSession.tasks.includes(t)) userSession.tasks.push(t);
+    }
+
+    // Also assign on GitHub if token available
+    if (project.githubToken) {
       const members = await getTeamMembers(env.PROJECTS);
-      const sessions = await getActiveSessions(env.PROJECTS, projectId);
-      const dashState = await getDashboardState(env.PROJECTS, projectId);
+      const member = members.find((m) => m.name === fromUser);
+      const githubUser = member?.github || fromUser;
 
-      if (sessions.length === 0) {
-        await sendTelegram(
-          project.botToken,
-          project.chatId,
-          "\u{1F465} Nobody is currently working on this project.",
-          project.threadId
-        );
-        return new Response("OK");
-      }
-
-      const lines: string[] = [];
-      lines.push("\u{1F465} <b>Currently active:</b>");
-      lines.push("");
-
-      for (const s of sessions) {
-        const color = getUserColorByName(members, s.user);
-        const userDash = dashState.activeSessions.find(
-          (ds) => ds.user === s.user
-        );
-        const tasks = userDash?.tasks || [];
-
-        lines.push(`${color} <b>${s.user}</b> (since ${s.since})`);
-
-        if (tasks.length > 0) {
-          lines.push(
-            `   \u{1F4CB} Working on: ${tasks.map((t) => "#" + t).join(", ")}`
+      for (const num of taskNumbers) {
+        try {
+          await fetch(
+            `https://api.github.com/repos/${project.githubRepo}/issues/${num}/assignees`,
+            {
+              method: "POST",
+              headers: {
+                "User-Agent": "CortexBot",
+                Authorization: "token " + project.githubToken,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ assignees: [githubUser] }),
+            }
           );
-        }
-
-        // Try to find what branch this user might be on
-        // (from their session start event or git info)
-        const member = members.find(
-          (m) => m.name === s.user || m.github === s.user
-        );
-        if (member) {
-          lines.push(`   \u{1F517} GitHub: ${member.github}`);
+        } catch {
+          // Best-effort — don't fail the whole command if GitHub is unreachable
         }
       }
-
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        lines.join("\n"),
-        project.threadId
-      );
-      return new Response("OK");
     }
 
-    if (cbData === "claim") {
-      const fromUser =
-        update.callback_query.from?.first_name || "Unknown";
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        `${fromUser}: To claim tasks, use /grab #1 #2 #3`,
-        project.threadId
-      );
-      return new Response("OK");
-    }
+    await saveDashboardState(env.PROJECTS, projectId, state);
 
-    if (cbData === "done") {
-      const fromUser =
-        update.callback_query.from?.first_name || "Unknown";
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        `${fromUser}: To mark tasks done, use /done #1`,
-        project.threadId
-      );
-      return new Response("OK");
-    }
+    // Update dashboard
+    await sendOrEditDashboard(env, projectId, project);
 
-    return new Response("OK");
-  }
-
-  // -----------------------------------------------------------------------
-  // Handle text messages / commands
-  // -----------------------------------------------------------------------
-  const message = update.message;
-  const text = message?.text?.trim();
-  if (!text) {
-    // Not a text message — ignore silently
-    return new Response("OK");
-  }
-
-  // Parse the command (first word) and arguments (rest)
-  const parts = text.split(/\s+/);
-  const rawCommand = parts[0].toLowerCase();
-  const command = stripBotSuffix(rawCommand);
-  const args = parts.slice(1).join(" ");
-
-  try {
-    // /menu — activate the reply keyboard with quick actions
-    if (command === "/menu" || command === "/start") {
-      await sendReplyKeyboard(project, message!);
-      return new Response("OK");
-    }
-
-    // /active — show who is currently working (same as Active button)
-    if (command === "/active" || text === "\u{1F465} Active") {
-      const members = await getTeamMembers(env.PROJECTS);
-      const sessions = await getActiveSessions(env.PROJECTS, projectId);
-      const dashState = await getDashboardState(env.PROJECTS, projectId);
-
-      if (sessions.length === 0) {
-        await sendTelegram(project.botToken, project.chatId,
-          "\u{1F465} Nobody is currently working on this project.", project.threadId);
-        return new Response("OK");
-      }
-
-      const activeLines: string[] = ["\u{1F465} <b>Currently active:</b>", ""];
-      for (const s of sessions) {
-        const color = getUserColorByName(members, s.user);
-        const userDash = dashState.activeSessions.find(ds => ds.user === s.user);
-        const tasks = userDash?.tasks || [];
-        activeLines.push(`${color} <b>${s.user}</b> (since ${s.since})`);
-        if (tasks.length > 0) {
-          activeLines.push(`   \u{1F4CB} Working on: ${tasks.map(t => "#" + t).join(", ")}`);
-        }
-        const member = members.find(m => m.name === s.user || m.github === s.user);
-        if (member) activeLines.push(`   \u{1F517} GitHub: ${member.github}`);
-      }
-      await sendTelegram(project.botToken, project.chatId, activeLines.join("\n"), project.threadId);
-      return new Response("OK");
-    }
-
-    // /dashboard — send or refresh the live dashboard
-    // Also handle the reply keyboard button text
-    if (command === "/dashboard" || text === "\u{1F4CA} Dashboard") {
-      await sendOrEditDashboard(env, projectId, project);
-      return new Response("OK");
-    }
-
-    // Handle reply keyboard "Tasks" button
-    if (text === "\u{1F4CB} Tasks") {
-      await handleTasksCommand(env, project, projectId);
-      return new Response("OK");
-    }
-
-    // Handle reply keyboard "Who" button
-    if (text === "\u{2753} Who") {
-      await handleWerCommand(env, project, projectId);
-      return new Response("OK");
-    }
-
-    // /grab #1 #2 #3 — claim tasks for yourself
-    const grabMatch = text.match(/^\/grab(?:@\w+)?\s+(.+)/);
-    if (grabMatch) {
-      await handleGrabCommand(env, project, projectId, grabMatch[1], message!);
-      return new Response("OK");
-    }
-
-    switch (command) {
-      case "/tasks":
-        await handleTasksCommand(project);
-        break;
-
-      case "/wer":
-        await handleWerCommand(env, project, projectId);
-        break;
-
-      case "/new":
-        await handleNewCommand(project, args);
-        break;
-
-      case "/assign":
-        await handleAssignCommand(project, args);
-        break;
-
-      case "/done":
-        await handleDoneCommand(project, args);
-        break;
-
-      case "/register":
-        await handleRegisterCommand(env, project, args, update);
-        break;
-
-      default:
-        // Unknown command — ignore silently
-        break;
-    }
-  } catch (err) {
-    const errMessage =
-      err instanceof Error ? err.message : "Unknown error";
+    const taskStr = taskNumbers.map((t) => "#" + t).join(", ");
     await sendTelegram(
       project.botToken,
       project.chatId,
-      `Error: ${errMessage}`,
+      `${fromUser} claimed ${taskStr}`,
       project.threadId
     );
-  }
+  });
 
-  return new Response("OK");
-}
+  // /register <github-username> — register sender as a team member
+  bot.command("register", async (ctx: Context) => {
+    const githubUsername = ctx.match as string;
 
-/**
- * /grab #1 #2 #3 — Claim GitHub issues for the sender.
- * Updates the dashboard state and optionally assigns on GitHub.
- */
-async function handleGrabCommand(
-  env: Env,
-  project: ProjectConfig,
-  projectId: string,
-  argsText: string,
-  message: NonNullable<TelegramUpdate["message"]>
-): Promise<void> {
-  const taskNumbers =
-    argsText.match(/#?(\d+)/g)?.map((n) => parseInt(n.replace("#", ""), 10)) ||
-    [];
+    if (!githubUsername) {
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        "Nutzung: /register <github-username>",
+        project.threadId
+      );
+      return;
+    }
 
-  if (taskNumbers.length === 0) {
+    const from = ctx.from;
+    if (!from || !from.id) {
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        "Fehler: Telegram-User konnte nicht erkannt werden.",
+        project.threadId
+      );
+      return;
+    }
+
+    const member: TeamMember = {
+      telegram_id: from.id,
+      telegram_username: from.username || from.first_name || "unknown",
+      github: githubUsername.replace(/^@/, ""),
+      name: from.first_name || from.username || "unknown",
+    };
+
+    await upsertTeamMember(env.PROJECTS, member);
+
     await sendTelegram(
       project.botToken,
       project.chatId,
-      "Usage: /grab #1 #2 #3",
+      `Registriert: @${member.telegram_username} = ${member.github}`,
+      project.threadId
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // Callback query handlers (inline button presses on the dashboard)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("refresh", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    await sendOrEditDashboard(env, projectId, project);
+  });
+
+  bot.callbackQuery("active", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    await sendActiveInfo(env, project, projectId);
+  });
+
+  bot.callbackQuery("claim", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const fromUser = ctx.from?.first_name || "Unknown";
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      `${fromUser}: To claim tasks, use /grab #1 #2 #3`,
+      project.threadId
+    );
+  });
+
+  bot.callbackQuery("done", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const fromUser = ctx.from?.first_name || "Unknown";
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      `${fromUser}: To mark tasks done, use /done #1`,
+      project.threadId
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // Reply keyboard button handlers (plain text messages)
+  // -------------------------------------------------------------------
+
+  bot.hears("\u{1F4CA} Dashboard", async () => {
+    await sendOrEditDashboard(env, projectId, project);
+  });
+
+  bot.hears("\u{1F465} Active", async () => {
+    await sendActiveInfo(env, project, projectId);
+  });
+
+  bot.hears("\u{1F4CB} Tasks", async () => {
+    await handleTasksCommand(env, project, projectId);
+  });
+
+  bot.hears("\u{2753} Who", async () => {
+    await handleWerCommand(env, project, projectId);
+  });
+
+  return bot;
+}
+
+// ---------------------------------------------------------------------------
+// Shared command logic (used by both grammy handlers and keyboard handlers)
+// ---------------------------------------------------------------------------
+
+/**
+ * Show detailed info about currently active sessions.
+ * Used by /active command and the "Active" callback/keyboard button.
+ */
+async function sendActiveInfo(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string
+): Promise<void> {
+  const members = await getTeamMembers(env.PROJECTS);
+  const sessions = await getActiveSessions(env.PROJECTS, projectId);
+  const dashState = await getDashboardState(env.PROJECTS, projectId);
+
+  if (sessions.length === 0) {
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "\u{1F465} Nobody is currently working on this project.",
       project.threadId
     );
     return;
   }
 
-  const fromUser = message.from?.first_name || "Unknown";
-  const state = await getDashboardState(env.PROJECTS, projectId);
+  const lines: string[] = ["\u{1F465} <b>Currently active:</b>", ""];
 
-  // Find or create user's session in dashboard state
-  let userSession = state.activeSessions.find((s) => s.user === fromUser);
-  if (!userSession) {
-    userSession = {
-      user: fromUser,
-      since: new Date().toLocaleTimeString("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }),
-      tasks: [],
-    };
-    state.activeSessions.push(userSession);
-  }
+  for (const s of sessions) {
+    const color = getUserColorByName(members, s.user);
+    const userDash = dashState.activeSessions.find(
+      (ds) => ds.user === s.user
+    );
+    const tasks = userDash?.tasks || [];
 
-  // Add new tasks (avoid duplicates)
-  for (const t of taskNumbers) {
-    if (!userSession.tasks.includes(t)) userSession.tasks.push(t);
-  }
+    lines.push(`${color} <b>${s.user}</b> (since ${s.since})`);
 
-  // Also assign on GitHub if token available
-  if (project.githubToken) {
-    const members = await getTeamMembers(env.PROJECTS);
-    const member = members.find((m) => m.name === fromUser);
-    const githubUser = member?.github || fromUser;
+    if (tasks.length > 0) {
+      lines.push(
+        `   \u{1F4CB} Working on: ${tasks.map((t) => "#" + t).join(", ")}`
+      );
+    }
 
-    for (const num of taskNumbers) {
-      try {
-        await fetch(
-          `https://api.github.com/repos/${project.githubRepo}/issues/${num}/assignees`,
-          {
-            method: "POST",
-            headers: {
-              "User-Agent": "CortexBot",
-              Authorization: "token " + project.githubToken,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ assignees: [githubUser] }),
-          }
-        );
-      } catch {
-        // Best-effort — don't fail the whole command if GitHub is unreachable
-      }
+    // Show GitHub link if available
+    const member = members.find(
+      (m) => m.name === s.user || m.github === s.user
+    );
+    if (member) {
+      lines.push(`   \u{1F517} GitHub: ${member.github}`);
     }
   }
 
-  await saveDashboardState(env.PROJECTS, projectId, state);
-
-  // Update dashboard
-  await sendOrEditDashboard(env, projectId, project);
-
-  const taskStr = taskNumbers.map((t) => "#" + t).join(", ");
   await sendTelegram(
     project.botToken,
     project.chatId,
-    `${fromUser} claimed ${taskStr}`,
+    lines.join("\n"),
     project.threadId
   );
 }
 
 /**
  * /tasks — List open GitHub issues for the project.
+ * Overloaded: can be called with only project (legacy) or with all params.
  */
-async function handleTasksCommand(project: ProjectConfig): Promise<void> {
+async function handleTasksCommand(
+  _env: Env,
+  project: ProjectConfig,
+  _projectId: string
+): Promise<void> {
   if (!project.githubToken) {
     await sendTelegram(
       project.botToken,
@@ -1243,55 +1181,6 @@ async function handleDoneCommand(
   );
 }
 
-/**
- * /register <github-username> — Register the sender as a team member.
- * Stores their telegram_id, telegram_username, and github username
- * in the central team-members registry in KV.
- */
-async function handleRegisterCommand(
-  env: Env,
-  project: ProjectConfig,
-  githubUsername: string,
-  update: TelegramUpdate
-): Promise<void> {
-  if (!githubUsername) {
-    await sendTelegram(
-      project.botToken,
-      project.chatId,
-      "Nutzung: /register <github-username>",
-      project.threadId
-    );
-    return;
-  }
-
-  const from = update.message?.from;
-  if (!from || !from.id) {
-    await sendTelegram(
-      project.botToken,
-      project.chatId,
-      "Fehler: Telegram-User konnte nicht erkannt werden.",
-      project.threadId
-    );
-    return;
-  }
-
-  const member: TeamMember = {
-    telegram_id: from.id,
-    telegram_username: from.username || from.first_name || "unknown",
-    github: githubUsername.replace(/^@/, ""),
-    name: from.first_name || from.username || "unknown",
-  };
-
-  await upsertTeamMember(env.PROJECTS, member);
-
-  await sendTelegram(
-    project.botToken,
-    project.chatId,
-    `Registriert: @${member.telegram_username} = ${member.github}`,
-    project.threadId
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Route: POST /register-member
 // ---------------------------------------------------------------------------
@@ -1505,13 +1394,12 @@ async function handleRegister(
 }
 
 // ---------------------------------------------------------------------------
-// Router
+// Router for non-Telegram routes
 // ---------------------------------------------------------------------------
 
 /**
- * Simple path-based router.
- * Matches: GET /, POST /telegram/:id, POST /github/:id,
- *          POST /session/:id, POST /register, POST /register-member
+ * Simple path-based router for API routes (GitHub, sessions, register, etc.).
+ * Telegram routes are handled separately via grammy webhookCallback.
  */
 function matchRoute(
   method: string,
@@ -1535,12 +1423,20 @@ function matchRoute(
     return { handler: "get-sessions", projectId: sessionsMatch[1] };
   }
 
-  // Match /:handler/:projectId patterns
+  // Match /:handler/:projectId patterns (excluding telegram — handled by grammy)
   const match = pathname.match(
-    /^\/(telegram|github|session|dashboard)\/([a-zA-Z0-9_-]+)\/?$/
+    /^\/(github|session|dashboard)\/([a-zA-Z0-9_-]+)\/?$/
   );
   if (match && method === "POST") {
     return { handler: match[1], projectId: match[2] };
+  }
+
+  // Telegram webhook: POST /telegram/:projectId
+  const telegramMatch = pathname.match(
+    /^\/telegram\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (telegramMatch && method === "POST") {
+    return { handler: "telegram", projectId: telegramMatch[1] };
   }
 
   return null;
@@ -1569,8 +1465,30 @@ export default {
       case "register-member":
         return handleRegisterMember(request, env);
 
-      case "telegram":
-        return handleTelegram(request, env, route.projectId!);
+      case "telegram": {
+        // grammy handles the Telegram webhook — create a bot per project
+        const project = await getProject(env.PROJECTS, route.projectId!);
+        if (!project) {
+          return new Response("Project not found", { status: 404 });
+        }
+
+        const bot = createBot(project, env, route.projectId!);
+
+        try {
+          const handler = webhookCallback(bot, "cloudflare-mod");
+          return await handler(request);
+        } catch (err) {
+          // If grammy throws, send a user-friendly error to the chat
+          const errMessage = err instanceof Error ? err.message : "Unknown error";
+          await sendTelegram(
+            project.botToken,
+            project.chatId,
+            `Error: ${errMessage}`,
+            project.threadId
+          );
+          return new Response("OK");
+        }
+      }
 
       case "github":
         return handleGitHub(request, env, route.projectId!);
