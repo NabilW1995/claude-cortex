@@ -179,6 +179,83 @@ function getOpenIssues(projectDir, limit = 100) {
   }
 }
 
+/**
+ * Parse recent git commits (last 8 hours) and categorize them by type.
+ * Returns { features: [], fixes: [], other: [] } with the commit message
+ * (prefix stripped) in each array.
+ */
+function getCategorizedCommits(projectDir) {
+  try {
+    const output = execSync(
+      'git log --oneline --since="8 hours ago"',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+    if (!output) return { features: [], fixes: [], other: [] };
+
+    const features = [];
+    const fixes = [];
+    const other = [];
+
+    for (const line of output.split('\n')) {
+      const msg = line.substring(8).trim(); // skip hash
+      if (msg.startsWith('feat:') || msg.startsWith('feat(')) {
+        features.push(msg.replace(/^feat(\([^)]*\))?:\s*/, ''));
+      } else if (msg.startsWith('fix:') || msg.startsWith('fix(')) {
+        fixes.push(msg.replace(/^fix(\([^)]*\))?:\s*/, ''));
+      } else if (!msg.startsWith('chore:') && !msg.startsWith('Merge')) {
+        other.push(msg);
+      }
+    }
+    return { features, fixes, other };
+  } catch { return { features: [], fixes: [], other: [] }; }
+}
+
+/**
+ * Get current branch name and how far ahead it is of main/master.
+ * Returns { branch, isMain, commitsAhead }.
+ */
+function getBranchInfo(projectDir) {
+  try {
+    const branch = execSync('git branch --show-current',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+
+    const isMain = ['main', 'master'].includes(branch);
+
+    let commitsAhead = 0;
+    if (!isMain) {
+      try {
+        // Detect whether the repo uses "main" or "master"
+        const mainBranch = execSync('git rev-parse --verify main 2>/dev/null || git rev-parse --verify master 2>/dev/null',
+          { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() ? 'main' : 'master';
+        const ahead = execSync(`git rev-list --count ${mainBranch}..HEAD`,
+          { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        commitsAhead = parseInt(ahead) || 0;
+      } catch {}
+    }
+
+    return { branch, isMain, commitsAhead };
+  } catch { return { branch: 'unknown', isMain: false, commitsAhead: 0 }; }
+}
+
+/**
+ * Get branches that have not been merged into main/master.
+ * Returns an array of branch name strings (excluding remote-only branches).
+ */
+function getPendingBranches(projectDir) {
+  try {
+    const output = execSync(
+      'git branch --no-merged main 2>/dev/null || git branch --no-merged master 2>/dev/null',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+    if (!output) return [];
+
+    return output.split('\n')
+      .map(b => b.replace(/^\*?\s+/, '').trim())
+      .filter(b => b && !b.startsWith('remotes/'));
+  } catch { return []; }
+}
+
 // ---------------------------------------------------------------------------
 // Telegram API
 // ---------------------------------------------------------------------------
@@ -282,9 +359,29 @@ async function notifySessionStart(projectDir) {
     }
   }
 
-  // --- Project group/topic: full message with open tasks ---
+  // --- Project group/topic: full message with open tasks + branch status ---
   const lines = [];
   lines.push(`<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`);
+
+  // Show unmerged branches as pending review items
+  const pendingBranches = getPendingBranches(projectDir);
+  if (pendingBranches.length > 0) {
+    lines.push('');
+    lines.push('<b>Branches pending review:</b>');
+    for (const branchName of pendingBranches) {
+      // Get ahead count for each pending branch
+      let detail = 'not merged';
+      try {
+        const mainRef = execSync('git rev-parse --verify main 2>/dev/null || git rev-parse --verify master 2>/dev/null',
+          { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() ? 'main' : 'master';
+        const ahead = execSync(`git rev-list --count ${mainRef}..${branchName}`,
+          { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        const count = parseInt(ahead) || 0;
+        if (count > 0) detail = `not merged, ${count} commits ahead`;
+      } catch {}
+      lines.push(`- ${escapeHtml(branchName)} (${detail})`);
+    }
+  }
 
   // Try to load open GitHub issues
   const { issues, error } = getOpenIssues(projectDir);
@@ -307,7 +404,7 @@ async function notifySessionStart(projectDir) {
     }
 
     lines.push('');
-    lines.push(`Open Tasks (${issues.length}):`);
+    lines.push(`<b>Open Tasks</b> (${issues.length}):`);
 
     // Show grouped by label with counts
     const labelKeys = Object.keys(grouped).sort();
@@ -377,25 +474,55 @@ async function notifySessionEnd(projectDir, stats) {
     }
   }
 
-  // --- Project group/topic: full message with stats + commits ---
+  // --- Project group/topic: full message with stats + categorized commits ---
   const lines = [];
   lines.push(`<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
 
   // Session stats (if available)
   if (stats && (stats.prompts_count || stats.corrections_count)) {
-    lines.push(`- Prompts: ${stats.prompts_count || 0}`);
-    lines.push(`- Corrections: ${stats.corrections_count || 0}`);
+    lines.push('');
+    const prompts = stats.prompts_count || 0;
+    const corrections = stats.corrections_count || 0;
+    lines.push(`<b>Stats:</b> ${prompts} prompts | ${corrections} corrections`);
   }
 
-  // Recent commits
-  const commits = getRecentCommits(projectDir);
-  if (commits) {
+  // Categorized commits from the last 8 hours
+  const { features, fixes, other } = getCategorizedCommits(projectDir);
+
+  if (features.length > 0) {
     lines.push('');
-    lines.push('Recent Commits:');
-    // Limit to 5 lines and escape HTML in commit messages
-    const commitLines = commits.split('\n').slice(0, 5);
-    for (const commitLine of commitLines) {
-      lines.push(escapeHtml(commitLine));
+    lines.push('<b>Features added:</b>');
+    for (const f of features) {
+      lines.push(`- ${escapeHtml(f)}`);
+    }
+  }
+
+  if (fixes.length > 0) {
+    lines.push('');
+    lines.push('<b>Fixes:</b>');
+    for (const f of fixes) {
+      lines.push(`- ${escapeHtml(f)}`);
+    }
+  }
+
+  if (other.length > 0) {
+    lines.push('');
+    lines.push('<b>Other changes:</b>');
+    for (const o of other) {
+      lines.push(`- ${escapeHtml(o)}`);
+    }
+  }
+
+  // Branch status
+  const branchInfo = getBranchInfo(projectDir);
+  if (branchInfo.branch !== 'unknown') {
+    lines.push('');
+    if (branchInfo.isMain) {
+      lines.push(`<b>Branch:</b> ${escapeHtml(branchInfo.branch)}`);
+    } else {
+      const aheadText = branchInfo.commitsAhead > 0
+        ? `${branchInfo.commitsAhead} commits ahead of master, ` : '';
+      lines.push(`<b>Branch:</b> ${escapeHtml(branchInfo.branch)} (${aheadText}not merged)`);
     }
   }
 
@@ -484,5 +611,8 @@ module.exports = {
   parseEnvFile,
   escapeHtml,
   getRecentCommits,
-  getOpenIssues
+  getOpenIssues,
+  getCategorizedCommits,
+  getBranchInfo,
+  getPendingBranches
 };
