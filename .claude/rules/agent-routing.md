@@ -65,11 +65,22 @@ Agents KÖNNEN parallel als mehrere Subagents dispatcht werden wenn die Aufgaben
 - MUST: Issues in einfacher Sprache erklären
 - MUST: Wiederkehrende Issues als Learning in der SQLite-DB speichern
 
+### test-runner — Nach JEDEM Coding-Task (PFLICHT)
+- TRIGGER: Nachdem der coder Agent fertig ist (Quality Gate)
+- TRIGGER: Nach jedem Bugfix (Regressions-Test)
+- TRIGGER: Wenn der User sagt "Teste das", "Laufen die Tests?"
+- TRIGGER: Im TDD-Modus: VOR der Implementierung (Tests zuerst schreiben)
+- AKTION: Unit Tests → Integration Tests → E2E Tests (Browser Use) → Coverage Report
+- FORMAT: Einfache Zusammenfassung mit Ampel (✅/⚠️/❌)
+- MUST: IMMER nach dem coder Agent laufen — kein Code ohne Tests
+- MUST: Browser Use CLI für E2E Tests, NICHT Playwright
+- PARALLEL: Kann gleichzeitig mit build-validator laufen
+
 ### build-validator — Nach Implementierung + vor Commit
 - TRIGGER: Wenn eine Implementierung abgeschlossen wurde
 - TRIGGER: Vor jedem Git-Commit
 - TRIGGER: Nach großen Refactorings oder Merges
-- AKTION: Build → Types → Lint → Tests → Visuelles Review (wenn UI)
+- AKTION: Build → Types → Lint (KEIN Testing — das macht test-runner)
 - FORMAT: Ampel-System (BESTANDEN / WARNUNG / FEHLGESCHLAGEN)
 
 ### error-whisperer — Bei JEDER Fehlermeldung
@@ -183,7 +194,8 @@ Die typische Reihenfolge bei einem neuen Feature:
 2. feature-dev Plugin  → Discovery + Architecture (bei komplexen Features)
    ODER deep-dive      → Analyse (bei Architektur-Fragen)
 3. coder               → Implementierung (ggf. mehrere parallel)
-4. build-validator     → Build + Types + Lint bestanden?
+4. test-runner         → Tests schreiben + laufen lassen (PFLICHT!)
+   + build-validator   → Build + Types + Lint (parallel zum test-runner)
 5. code-review Agent   → Lokales Code-Review
 6. code-simplifier     → Code vereinfachen (optional)
 7. pr-ghostwriter      → PR-Beschreibung schreiben
