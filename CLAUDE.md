@@ -21,10 +21,11 @@
 | Fehler/Bug/Error | → error-whisperer + debug-investigator |
 
 ## Agent-System (15 Agents — MUST use)
-MUST: Agents werden als Subagents dispatcht — siehe @.claude/rules/agent-routing.md
-MUST: Coding-Aufgaben gehen IMMER durch den coder Agent
-MUST: Mehrere coder-Agents KÖNNEN parallel für unabhängige Tasks laufen
-NEVER: Agent-Logik selbst ausführen statt den Agent zu dispatchen
+- Große Tasks (50+ Zeilen): MUST als Subagent dispatchen
+- Kleine Tasks (<10 Zeilen): Claude darf selbst, aber befolgt Agent-Regeln
+- Reviews/Analysen: IMMER als Subagent (frische Augen)
+- Parallele Tasks: Mehrere Agents gleichzeitig dispatchen
+- Details: @.claude/rules/agent-routing.md
 <!-- CORTEX:ROUTING:END -->
 
 ## Commands

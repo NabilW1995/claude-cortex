@@ -25,9 +25,21 @@ Agents KÖNNEN parallel als mehrere Subagents dispatcht werden wenn die Aufgaben
 - coder + code-review → NICHT gleichzeitig (Review braucht fertigen Code)
 - build-validator + env-validator → gleichzeitig (unabhängig voneinander)
 
+### Wann Subagent, wann selbst?
+
+| Komplexität | Methode | Beispiel |
+|-------------|---------|----------|
+| Klein (<10 Zeilen, einfacher Fix) | Claude selbst, aber Agent-Regeln befolgen | Typo fixen, Variable umbenennen |
+| Mittel (10-50 Zeilen) | Claude selbst ODER Subagent — je nach Kontext | Funktion hinzufügen, Hook anpassen |
+| Groß (50+ Zeilen, neues Feature) | MUST: Subagent dispatchen | Neues Modul, größeres Refactoring |
+| Parallel (2+ unabhängige Tasks) | MUST: Subagents parallel dispatchen | 3 Features gleichzeitig |
+| Review/Analyse | MUST: Subagent (frische Augen) | Code Review, Deep Dive, Audit |
+
 ### Regeln
-- MUST: Jeden Agent als Subagent dispatchen — NICHT die Logik selbst ausführen
-- MUST: Die Agent-Definition aus `.claude/agents/{name}.md` als Basis-Prompt nutzen
+- MUST: Bei großen Tasks (50+ Zeilen) → Subagent dispatchen
+- MUST: Bei Reviews/Analysen → immer Subagent (frischer Kontext = bessere Qualität)
+- MAY: Bei kleinen Änderungen → Claude darf selbst, aber befolgt die Agent-Regeln aus `.claude/agents/{name}.md`
+- MUST: Die Agent-Definition als Basis-Prompt nutzen wenn Subagent dispatcht wird
 - MUST: Konkreten Kontext mitgeben (welche Dateien, welcher Fehler, welche Aufgabe)
 - MUST: Agent-Ergebnis dem User in einfacher Sprache zusammenfassen
 
