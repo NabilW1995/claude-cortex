@@ -210,6 +210,42 @@ async function sendTelegram(
   });
 }
 
+/**
+ * Send a Telegram message with optional reply-to-message threading.
+ * Returns the sent message's ID so it can be stored for future replies.
+ *
+ * - threadId: the topic/forum thread (message_thread_id) for supergroups
+ * - replyToMessageId: if set, the new message becomes a reply to this one
+ * - allow_sending_without_reply: ensures the message is still sent even
+ *   if the original message was deleted
+ */
+async function sendTelegramThreaded(
+  botToken: string,
+  chatId: string,
+  text: string,
+  threadId?: number,
+  replyToMessageId?: number | null
+): Promise<number | null> {
+  const body: Record<string, unknown> = { chat_id: chatId, text };
+  if (threadId) body.message_thread_id = threadId;
+  if (replyToMessageId) body.reply_to_message_id = replyToMessageId;
+  body.allow_sending_without_reply = true;
+
+  const res = await fetch(
+    `https://api.telegram.org/bot${botToken}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(body),
+    }
+  );
+  const result = (await res.json()) as {
+    ok: boolean;
+    result?: { message_id: number };
+  };
+  return result.ok ? result.result?.message_id ?? null : null;
+}
+
 // ---------------------------------------------------------------------------
 // User color assignment (for dashboard)
 // ---------------------------------------------------------------------------
@@ -277,6 +313,41 @@ async function githubRequest(
   }
 
   return fetch(`${GITHUB_API}${path}`, options);
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for message threading (PR/Issue reply chains)
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up the Telegram message_id for the first message posted about a
+ * specific PR or Issue. Returns null if no thread exists yet.
+ */
+async function getThreadMessageId(
+  kv: KVNamespace,
+  projectId: string,
+  type: "issue" | "pr",
+  number: number
+): Promise<number | null> {
+  const key = `msg:${projectId}:${type}:${number}`;
+  const raw = await kv.get(key);
+  return raw ? parseInt(raw, 10) : null;
+}
+
+/**
+ * Store the Telegram message_id for the first message about a PR or Issue.
+ * Subsequent events can reply to this message to create a thread.
+ * Expires after 30 days — old threads don't need tracking.
+ */
+async function saveThreadMessageId(
+  kv: KVNamespace,
+  projectId: string,
+  type: "issue" | "pr",
+  number: number,
+  messageId: number
+): Promise<void> {
+  const key = `msg:${projectId}:${type}:${number}`;
+  await kv.put(key, String(messageId), { expirationTtl: 2592000 });
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,7 +2219,28 @@ async function handleGitHubIssues(
   }
 
   if (message) {
-    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+    if (action === "opened") {
+      // First message about this issue — send and save the message_id for threading
+      const sentId = await sendTelegramThreaded(
+        project.botToken,
+        project.chatId,
+        message,
+        project.threadId
+      );
+      if (sentId) {
+        await saveThreadMessageId(env.PROJECTS, projectId, "issue", issue.number, sentId);
+      }
+    } else {
+      // Follow-up event — reply to the original message if it exists
+      const replyTo = await getThreadMessageId(env.PROJECTS, projectId, "issue", issue.number);
+      await sendTelegramThreaded(
+        project.botToken,
+        project.chatId,
+        message,
+        project.threadId,
+        replyTo
+      );
+    }
   }
 
   // Log ALL events to D1 for reports (even filtered ones)
@@ -2168,7 +2260,7 @@ async function handleGitHubPR(
   rawBody: string,
   project: ProjectConfig,
   env: Env,
-  _projectId: string
+  projectId: string
 ): Promise<Response> {
   let payload: GitHubPRPayload;
   try {
@@ -2224,7 +2316,31 @@ async function handleGitHubPR(
   }
 
   if (message) {
-    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+    // "opened" (non-draft) and "ready_for_review" can start a thread
+    const isThreadStarter = action === "opened" || action === "ready_for_review";
+    const existingThread = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
+
+    if (isThreadStarter && !existingThread) {
+      // First message about this PR — send and save the message_id for threading
+      const sentId = await sendTelegramThreaded(
+        project.botToken,
+        project.chatId,
+        message,
+        project.threadId
+      );
+      if (sentId) {
+        await saveThreadMessageId(env.PROJECTS, projectId, "pr", pr.number, sentId);
+      }
+    } else {
+      // Follow-up event — reply to the original message if it exists
+      await sendTelegramThreaded(
+        project.botToken,
+        project.chatId,
+        message,
+        project.threadId,
+        existingThread
+      );
+    }
   }
 
   // Log ALL events to D1 for reports (even filtered/draft ones)
@@ -2244,7 +2360,7 @@ async function handleGitHubReview(
   rawBody: string,
   project: ProjectConfig,
   env: Env,
-  _projectId: string
+  projectId: string
 ): Promise<Response> {
   let payload: GitHubReviewPayload;
   try {
@@ -2281,7 +2397,15 @@ async function handleGitHubReview(
   }
 
   if (message) {
-    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+    // Reviews belong to PRs — reply to the PR's existing thread
+    const replyTo = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
+    await sendTelegramThreaded(
+      project.botToken,
+      project.chatId,
+      message,
+      project.threadId,
+      replyTo
+    );
   }
 
   // Log ALL review events to D1 for reports
