@@ -8,6 +8,7 @@ CLAUDE.local.md
 .agents/
 .claude/logs/
 .claude/backups/
+.claude/agent-memory/
 daily-notes/
 *.db
 *.sqlite

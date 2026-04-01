@@ -47,3 +47,25 @@ description: Automatic agent routing - when to trigger which agent based on cont
 - TRIGGER: Wenn ein Learning gespeichert und genehmigt wurde → Qualitäts-Check
 - AKTION: Nominations reviewen, Knowledge-Base aktualisieren
 - MUST: Jede Promotion braucht einen [Source:] Tag
+
+### archaeologist — Bei "Warum ist das so?"
+- TRIGGER: Wenn der User fragt "Warum wurde das so gemacht?", "Wer hat das geschrieben?", "Ist es sicher das zu ändern?"
+- TRIGGER: Wenn Code unklar ist und die Geschichte verstanden werden muss
+- AKTION: Git Blame + Commit-Archäologie, Kontext rekonstruieren
+- FORMAT: Archaeological Report mit Timeline, Sicherheits-Verdict (SAFE/CAUTION/DANGEROUS)
+- MUST: Immer Git-History lesen bevor Schlüsse gezogen werden
+
+### debt-collector — Bei /debt-map + periodisch
+- TRIGGER: Wenn User `/debt-map` aufruft
+- TRIGGER: Wenn viele TODOs/FIXMEs in geänderten Dateien erkannt werden
+- TRIGGER: Periodisch bei größeren Projekten (empfohlen: wöchentlich)
+- AKTION: Codebase scannen, Tech-Debt kategorisieren und priorisieren
+- FORMAT: Debt-Report mit Hotspots, Impact×Effort Matrix, Empfehlungen
+- Speichert Scan-History in agent-memory/debt-collector/MEMORY.md
+
+### rubber-duck — Bei Denkblockade
+- TRIGGER: Wenn der User sagt "Ich weiß nicht wie", "Ich stecke fest", "Hilf mir denken"
+- TRIGGER: Wenn der unsticker nach 2 Runden keine Lösung findet
+- AKTION: Sokratisches Debugging — Fragen stellen statt Antworten geben
+- FORMAT: Gezielte Fragen die den User zum eigentlichen Problem führen
+- MUST: Niemals direkt die Lösung geben — der User soll sie selbst finden
