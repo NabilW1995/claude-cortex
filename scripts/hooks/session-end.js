@@ -25,6 +25,15 @@ const projectName = path.basename(projectDir);
         console.error(`  Korrekturen: ${session.corrections_count}`);
         console.error(`  Tipp: Learnings werden automatisch extrahiert und gespeichert.`);
       }
+
+      // Notify Telegram
+      try {
+        const { notifySessionEnd } = require('../bot/notify');
+        const stats = session || {};
+        await notifySessionEnd(projectDir, stats);
+      } catch (e) {
+        // Silent fail — Telegram is optional
+      }
     }
 
     db.close();
