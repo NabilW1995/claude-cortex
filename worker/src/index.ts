@@ -863,43 +863,46 @@ function createBot(
 
   // /register <github-username> — register sender as a team member
   bot.command("register", async (ctx: Context) => {
-    const githubUsername = ctx.match as string;
+    const githubUsername = (ctx.match as string).trim();
 
     if (!githubUsername) {
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        "Nutzung: /register <github-username>",
-        project.threadId
+      await ctx.reply(
+        "Usage: /register <github-username>\n\nExample: /register NabilW1995"
       );
       return;
     }
 
-    const from = ctx.from;
-    if (!from || !from.id) {
-      await sendTelegram(
-        project.botToken,
-        project.chatId,
-        "Fehler: Telegram-User konnte nicht erkannt werden.",
-        project.threadId
-      );
+    const telegramId = ctx.from?.id;
+    const telegramUsername = ctx.from?.username || "";
+    const firstName = ctx.from?.first_name || "Unknown";
+
+    if (!telegramId) {
+      await ctx.reply("Could not identify your Telegram account.");
       return;
     }
 
-    const member: TeamMember = {
-      telegram_id: from.id,
-      telegram_username: from.username || from.first_name || "unknown",
+    // Save to central team registry
+    await upsertTeamMember(env.PROJECTS, {
+      telegram_id: telegramId,
+      telegram_username: telegramUsername || firstName,
       github: githubUsername.replace(/^@/, ""),
-      name: from.first_name || from.username || "unknown",
-    };
+      name: firstName,
+    });
 
-    await upsertTeamMember(env.PROJECTS, member);
+    // Retrieve updated member list to show the assigned color
+    const members = await getTeamMembers(env.PROJECTS);
+    const color = getUserColor(members, telegramId);
 
-    await sendTelegram(
-      project.botToken,
-      project.chatId,
-      `Registriert: @${member.telegram_username} = ${member.github}`,
-      project.threadId
+    await ctx.reply(
+      `${color} <b>Registered!</b>\n\n` +
+        `Telegram: @${telegramUsername || firstName}\n` +
+        `GitHub: ${githubUsername.replace(/^@/, "")}\n\n` +
+        `You can now use:\n` +
+        `\u{1F4CB} /tasks \u{2014} see open tasks\n` +
+        `\u{1F4CC} /grab #1 #2 \u{2014} claim tasks\n` +
+        `\u{2705} /done #5 \u{2014} mark task done\n` +
+        `\u{1F4CA} /dashboard \u{2014} live dashboard`,
+      { parse_mode: "HTML" }
     );
   });
 
@@ -937,6 +940,38 @@ function createBot(
       `${fromUser}: To mark tasks done, use /done #1`,
       project.threadId
     );
+  });
+
+  // -------------------------------------------------------------------
+  // New group member detection — auto-greet and prompt for registration
+  // -------------------------------------------------------------------
+
+  bot.on("message:new_chat_members", async (ctx) => {
+    const newMembers = ctx.message.new_chat_members || [];
+    for (const member of newMembers) {
+      // Skip other bots joining the group
+      if (member.is_bot) continue;
+
+      // Check if this user is already registered in the team registry
+      const members = await getTeamMembers(env.PROJECTS);
+      const existing = members.find((m) => m.telegram_id === member.id);
+
+      if (existing) {
+        await ctx.reply(
+          `\u{1F44B} Welcome back, ${member.first_name}! ` +
+            `You're linked to GitHub as <b>${existing.github}</b>.`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.reply(
+          `\u{1F44B} Welcome, <b>${member.first_name}</b>!\n\n` +
+            `Please link your GitHub account:\n` +
+            `<code>/register your-github-username</code>\n\n` +
+            `This lets the bot show your tasks and track your activity.`,
+          { parse_mode: "HTML" }
+        );
+      }
+    }
   });
 
   // -------------------------------------------------------------------
