@@ -152,11 +152,11 @@ function getRecentCommits(projectDir, hours = 8, limit = 5) {
  * Returns { issues: [...], error: null } on success,
  * or { issues: [], error: "message" } on failure.
  */
-function getOpenIssues(projectDir, limit = 10) {
+function getOpenIssues(projectDir, limit = 100) {
   try {
     const output = execSync(
-      `gh issue list --state open --limit ${limit} --json number,title,assignees`,
-      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }
+      `gh issue list --state open --limit ${limit} --json number,title,assignees,labels`,
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 }
     ).trim();
 
     if (!output) return { issues: [], error: null };
@@ -282,13 +282,47 @@ async function notifySessionStart(projectDir) {
   const { issues, error } = getOpenIssues(projectDir);
 
   if (issues.length > 0) {
+    // Group issues by label
+    const grouped = {};
+    const unlabeled = [];
+
+    for (const issue of issues) {
+      const labelNames = (issue.labels || []).map(l => l.name);
+      if (labelNames.length === 0) {
+        unlabeled.push(issue);
+      } else {
+        for (const label of labelNames) {
+          if (!grouped[label]) grouped[label] = [];
+          grouped[label].push(issue);
+        }
+      }
+    }
+
     lines.push('');
     lines.push(`Open Tasks (${issues.length}):`);
 
-    for (const issue of issues) {
-      const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
-      const assigneeLabel = assigneeNames ? assigneeNames : 'open';
-      lines.push(`- #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
+    // Show grouped by label with counts
+    const labelKeys = Object.keys(grouped).sort();
+    for (const label of labelKeys) {
+      const labelIssues = grouped[label];
+      lines.push('');
+      lines.push(`<b>${escapeHtml(label)}</b> (${labelIssues.length}):`);
+      for (const issue of labelIssues) {
+        const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
+        const assigneeLabel = assigneeNames ? assigneeNames : 'open';
+        lines.push(`- #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
+      }
+    }
+
+    // Show unlabeled issues if any
+    if (unlabeled.length > 0) {
+      lines.push('');
+      lines.push(`<b>other</b> (${unlabeled.length}):`);
+      for (const issue of unlabeled) {
+        const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
+        const assigneeLabel = assigneeNames ? assigneeNames : 'open';
+        lines.push(`- #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
+      }
     }
   } else if (error) {
     lines.push('');
