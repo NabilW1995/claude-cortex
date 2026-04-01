@@ -56,14 +56,6 @@ const sessionId = `session-${Date.now()}`;
     if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(path.join(stateDir, '.session-id'), sessionId);
 
-    // Notify Telegram
-    try {
-      const { notifySessionStart } = require('../bot/notify');
-      await notifySessionStart(projectDir);
-    } catch (e) {
-      // Silent fail — Telegram is optional
-    }
-
     db.close();
   } catch (e) {
     if (e.message && e.message.includes('no such table')) {
@@ -71,5 +63,13 @@ const sessionId = `session-${Date.now()}`;
     } else {
       console.error(`[Learning-DB] Session-Start Error: ${e.message}`);
     }
+  }
+
+  // Notify Telegram (outside DB try/catch — always fires even if DB fails)
+  try {
+    const { notifySessionStart } = require('../bot/notify');
+    await notifySessionStart(projectDir);
+  } catch (e) {
+    // Silent fail — Telegram is optional
   }
 })();

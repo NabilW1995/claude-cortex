@@ -167,9 +167,9 @@ function getOpenIssues(projectDir, limit = 10) {
     // gh not installed, not authenticated, or no GitHub remote
     const msg = e.message || '';
     if (msg.includes('ENOENT') || msg.includes('not found') || msg.includes('not recognized')) {
-      return { issues: [], error: 'gh CLI ist nicht installiert' };
+      return { issues: [], error: 'gh CLI is not installed' };
     }
-    return { issues: [], error: 'GitHub Issues konnten nicht geladen werden' };
+    return { issues: [], error: 'Could not load GitHub Issues' };
   }
 }
 
@@ -265,29 +265,29 @@ async function notifySessionStart(projectDir) {
 
   // --- Login topic: short message ---
   if (config.loginThreadId) {
-    const loginText = `<b>${escapeHtml(user)}</b> ist online -- arbeitet an <b>${escapeHtml(projectName)}</b>`;
+    const loginText = `<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`;
     try {
       await sendTelegram(config.token, config.chatId, loginText, config.loginThreadId);
-      console.error('[Notify] Login-Topic Nachricht gesendet');
+      console.error('[Notify] Login topic message sent');
     } catch (e) {
-      console.error(`[Notify] Login-Topic fehlgeschlagen: ${e.message}`);
+      console.error(`[Notify] Login topic failed: ${e.message}`);
     }
   }
 
   // --- Project topic: full message with open tasks ---
   const lines = [];
-  lines.push(`<b>${escapeHtml(user)}</b> ist online -- arbeitet an <b>${escapeHtml(projectName)}</b>`);
+  lines.push(`<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`);
 
   // Try to load open GitHub issues
   const { issues, error } = getOpenIssues(projectDir);
 
   if (issues.length > 0) {
     lines.push('');
-    lines.push(`Offene Tasks (${issues.length}):`);
+    lines.push(`Open Tasks (${issues.length}):`);
 
     for (const issue of issues) {
       const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
-      const assigneeLabel = assigneeNames ? assigneeNames : 'offen';
+      const assigneeLabel = assigneeNames ? assigneeNames : 'open';
       lines.push(`- #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
     }
   } else if (error) {
@@ -299,9 +299,9 @@ async function notifySessionStart(projectDir) {
 
   try {
     await sendTelegram(config.token, config.chatId, projectText, config.threadId);
-    console.error('[Notify] Session-Start Nachricht gesendet');
+    console.error('[Notify] Session start message sent');
   } catch (e) {
-    console.error(`[Notify] Session-Start fehlgeschlagen: ${e.message}`);
+    console.error(`[Notify] Session start failed: ${e.message}`);
   }
 }
 
@@ -324,30 +324,30 @@ async function notifySessionEnd(projectDir, stats) {
 
   // --- Login topic: short message ---
   if (config.loginThreadId) {
-    const loginText = `<b>${escapeHtml(user)}</b> hat die Session beendet (<b>${escapeHtml(projectName)}</b>)`;
+    const loginText = `<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`;
     try {
       await sendTelegram(config.token, config.chatId, loginText, config.loginThreadId);
-      console.error('[Notify] Login-Topic End-Nachricht gesendet');
+      console.error('[Notify] Login topic end message sent');
     } catch (e) {
-      console.error(`[Notify] Login-Topic End fehlgeschlagen: ${e.message}`);
+      console.error(`[Notify] Login topic end failed: ${e.message}`);
     }
   }
 
   // --- Project topic: full message with stats + commits ---
   const lines = [];
-  lines.push(`<b>${escapeHtml(user)}</b> hat die Session beendet (<b>${escapeHtml(projectName)}</b>)`);
+  lines.push(`<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
 
   // Session stats (if available)
   if (stats && (stats.prompts_count || stats.corrections_count)) {
     lines.push(`- Prompts: ${stats.prompts_count || 0}`);
-    lines.push(`- Korrekturen: ${stats.corrections_count || 0}`);
+    lines.push(`- Corrections: ${stats.corrections_count || 0}`);
   }
 
   // Recent commits
   const commits = getRecentCommits(projectDir);
   if (commits) {
     lines.push('');
-    lines.push('Letzte Commits:');
+    lines.push('Recent Commits:');
     // Limit to 5 lines and escape HTML in commit messages
     const commitLines = commits.split('\n').slice(0, 5);
     for (const commitLine of commitLines) {
@@ -359,9 +359,9 @@ async function notifySessionEnd(projectDir, stats) {
 
   try {
     await sendTelegram(config.token, config.chatId, projectText, config.threadId);
-    console.error('[Notify] Session-End Nachricht gesendet');
+    console.error('[Notify] Session end message sent');
   } catch (e) {
-    console.error(`[Notify] Session-End fehlgeschlagen: ${e.message}`);
+    console.error(`[Notify] Session end failed: ${e.message}`);
   }
 }
 

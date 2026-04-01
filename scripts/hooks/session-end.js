@@ -26,19 +26,31 @@ const projectName = path.basename(projectDir);
         console.error(`  Tipp: Learnings werden automatisch extrahiert und gespeichert.`);
       }
 
-      // Notify Telegram
-      try {
-        const { notifySessionEnd } = require('../bot/notify');
-        const stats = session || {};
-        await notifySessionEnd(projectDir, stats);
-      } catch (e) {
-        // Silent fail — Telegram is optional
-      }
     }
 
     db.close();
   } catch (e) {
     if (e.message) console.error(`[Learning-DB] Session-End Error: ${e.message}`);
+  }
+
+  // Notify Telegram (outside DB try/catch — always fires even if DB fails)
+  try {
+    const { notifySessionEnd } = require('../bot/notify');
+    // Try to read session stats even if DB block failed
+    let stats = {};
+    try {
+      const sessionIdFile = path.join(projectDir, '.claude', 'logs', '.session-id');
+      if (fs.existsSync(sessionIdFile)) {
+        const { getDb, queryOne } = require('../db/store');
+        const db2 = await getDb();
+        const sid = fs.readFileSync(sessionIdFile, 'utf-8').trim();
+        stats = queryOne(db2, 'SELECT * FROM sessions WHERE id = ?', [sid]) || {};
+        db2.close();
+      }
+    } catch (e) { /* stats will be empty */ }
+    await notifySessionEnd(projectDir, stats);
+  } catch (e) {
+    // Silent fail — Telegram is optional
   }
 
   // Auto-push learnings at session end

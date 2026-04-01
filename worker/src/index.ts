@@ -295,11 +295,11 @@ async function handleTelegram(
     }
   } catch (err) {
     const message =
-      err instanceof Error ? err.message : "Unbekannter Fehler";
+      err instanceof Error ? err.message : "Unknown error";
     await sendTelegram(
       project.botToken,
       project.chatId,
-      `Fehler: ${message}`,
+      `Error: ${message}`,
       project.threadId
     );
   }
@@ -315,7 +315,7 @@ async function handleTasksCommand(project: ProjectConfig): Promise<void> {
     await sendTelegram(
       project.botToken,
       project.chatId,
-      "Kein GitHub-Token konfiguriert. Tasks koennen nicht geladen werden.",
+      "No GitHub token configured. Cannot load tasks.",
       project.threadId
     );
     return;
@@ -331,7 +331,7 @@ async function handleTasksCommand(project: ProjectConfig): Promise<void> {
     await sendTelegram(
       project.botToken,
       project.chatId,
-      `GitHub API Fehler: ${response.status}`,
+      `GitHub API error: ${response.status}`,
       project.threadId
     );
     return;
@@ -347,7 +347,7 @@ async function handleTasksCommand(project: ProjectConfig): Promise<void> {
     await sendTelegram(
       project.botToken,
       project.chatId,
-      "Keine offenen Tasks.",
+      "No open tasks.",
       project.threadId
     );
     return;
@@ -363,7 +363,7 @@ async function handleTasksCommand(project: ProjectConfig): Promise<void> {
   await sendTelegram(
     project.botToken,
     project.chatId,
-    `Offene Tasks:\n\n${lines.join("\n")}`,
+    `Open Tasks:\n\n${lines.join("\n")}`,
     project.threadId
   );
 }
@@ -382,7 +382,7 @@ async function handleWerCommand(
     await sendTelegram(
       project.botToken,
       project.chatId,
-      "Niemand arbeitet gerade.",
+      "Nobody is currently working.",
       project.threadId
     );
     return;
