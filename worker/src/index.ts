@@ -20,6 +20,7 @@ import type { Context } from "grammy";
 interface Env {
   PROJECTS: KVNamespace;
   DB: D1Database;
+  GITHUB_WEBHOOK_SECRET?: string;
 }
 
 interface ProjectConfig {
@@ -75,6 +76,52 @@ interface RegisterPayload {
   githubRepo: string;
   githubToken?: string;
   members: Array<{ name: string; github: string; telegram: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub webhook signature verification (HMAC-SHA256)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify that a GitHub webhook payload was signed with the expected secret.
+ * Uses the Web Crypto API (available in Cloudflare Workers) to compute
+ * HMAC-SHA256 and compares it against the X-Hub-Signature-256 header.
+ *
+ * Returns false if the signature is missing or does not match.
+ */
+async function verifyGitHubSignature(
+  payload: string,
+  signature: string | null,
+  secret: string
+): Promise<boolean> {
+  if (!signature) return false;
+
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+  const expected =
+    "sha256=" +
+    [...new Uint8Array(sig)]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+  // Constant-length comparison: both strings are hex-encoded SHA-256 hashes
+  // so they always have the same length when format is correct.
+  if (expected.length !== signature.length) return false;
+
+  // Compare every character to avoid timing attacks
+  let mismatch = 0;
+  for (let i = 0; i < expected.length; i++) {
+    mismatch |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+  }
+  return mismatch === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,6 +1396,28 @@ async function handleGitHub(
     return new Response("Project not found", { status: 404 });
   }
 
+  // Read raw body first — needed for signature verification and JSON parsing
+  let rawBody: string;
+  try {
+    rawBody = await request.text();
+  } catch {
+    return new Response("Could not read request body", { status: 400 });
+  }
+
+  // Verify GitHub webhook signature when secret is configured
+  if (env.GITHUB_WEBHOOK_SECRET) {
+    const signature = request.headers.get("X-Hub-Signature-256");
+    const valid = await verifyGitHubSignature(
+      rawBody,
+      signature,
+      env.GITHUB_WEBHOOK_SECRET
+    );
+    if (!valid) {
+      return new Response("Invalid signature", { status: 401 });
+    }
+  }
+  // When no secret is configured, all requests are accepted (development mode)
+
   const event = request.headers.get("X-GitHub-Event");
   if (event !== "issues") {
     // We only handle issue events — acknowledge others silently
@@ -1357,7 +1426,7 @@ async function handleGitHub(
 
   let payload: GitHubIssuesPayload;
   try {
-    payload = (await request.json()) as GitHubIssuesPayload;
+    payload = JSON.parse(rawBody) as GitHubIssuesPayload;
   } catch {
     return new Response("Invalid JSON", { status: 400 });
   }
