@@ -932,6 +932,12 @@ function matchRoute(
     return { handler: "register-member" };
   }
 
+  // GET /sessions/:projectId — fetch active sessions (for notify.js)
+  const sessionsMatch = pathname.match(/^\/sessions\/([a-zA-Z0-9_-]+)\/?$/);
+  if (sessionsMatch && method === "GET") {
+    return { handler: "get-sessions", projectId: sessionsMatch[1] };
+  }
+
   // Match /:handler/:projectId patterns
   const match = pathname.match(
     /^\/(telegram|github|session)\/([a-zA-Z0-9_-]+)\/?$/
@@ -974,6 +980,11 @@ export default {
 
       case "session":
         return handleSession(request, env, route.projectId!);
+
+      case "get-sessions": {
+        const sessions = await getActiveSessions(env.PROJECTS, route.projectId!);
+        return Response.json({ sessions });
+      }
 
       default:
         return new Response("Not Found", { status: 404 });

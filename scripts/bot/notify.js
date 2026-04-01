@@ -76,6 +76,8 @@ function loadBotConfig(projectDir) {
     const threadId = vars.TELEGRAM_THREAD_ID || '';
     const loginChatId = vars.TELEGRAM_LOGIN_CHAT_ID || '';
     const loginThreadId = vars.TELEGRAM_LOGIN_THREAD_ID || '';
+    const workerUrl = vars.CORTEX_WORKER_URL || '';
+    const projectId = vars.CORTEX_PROJECT_ID || '';
 
     // Both token and chatId are required
     if (!token || !chatId) return null;
@@ -85,7 +87,9 @@ function loadBotConfig(projectDir) {
       chatId,
       threadId: threadId || null,
       loginChatId: loginChatId || null,
-      loginThreadId: loginThreadId || null
+      loginThreadId: loginThreadId || null,
+      workerUrl: workerUrl || null,
+      projectId: projectId || null
     };
   } catch {
     return null;
@@ -254,6 +258,60 @@ function getBranchInfo(projectDir) {
 }
 
 /**
+ * Notify the Worker of a session event (start/end) and optionally fetch active sessions.
+ * Returns active sessions array or empty array on failure.
+ */
+function workerRequest(workerUrl, projectId, method, path, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, workerUrl);
+    const data = body ? JSON.stringify(body) : null;
+    const mod = url.protocol === 'https:' ? https : require('http');
+
+    const req = mod.request(url, {
+      method: method,
+      headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}
+    }, (res) => {
+      let result = '';
+      res.on('data', c => result += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(result)); } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(8000, () => { req.destroy(); resolve(null); });
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+/**
+ * Register session start with the Worker and fetch who else is active.
+ * Returns array of { user, since } for active sessions.
+ */
+async function workerSessionStart(config, user) {
+  if (!config.workerUrl || !config.projectId) return [];
+  // Register this session with the Worker
+  await workerRequest(config.workerUrl, config.projectId, 'POST',
+    `/session/${config.projectId}`, { type: 'start', user, message: '' });
+  // Fetch all active sessions
+  const data = await workerRequest(config.workerUrl, config.projectId, 'GET',
+    `/sessions/${config.projectId}`, null);
+  if (data && Array.isArray(data.sessions)) {
+    return data.sessions.filter(s => s.user !== user); // exclude self
+  }
+  return [];
+}
+
+/**
+ * Register session end with the Worker.
+ */
+async function workerSessionEnd(config, user) {
+  if (!config.workerUrl || !config.projectId) return;
+  await workerRequest(config.workerUrl, config.projectId, 'POST',
+    `/session/${config.projectId}`, { type: 'end', user, message: '' });
+}
+
+/**
  * Get branches that have not been merged into main/master.
  * Returns an array of branch name strings (excluding remote-only branches).
  */
@@ -380,21 +438,30 @@ async function notifySessionStart(projectDir) {
   const lines = [];
   lines.push(`\uD83D\uDC4B <b>${escapeHtml(user)}</b> is online \u2014 working on <b>${escapeHtml(projectName)}</b>`);
 
-  // Show unmerged branches as pending review items
+  // Register with Worker and fetch who else is active
+  const activeSessions = await workerSessionStart(config, user);
+  if (activeSessions.length > 0) {
+    lines.push('');
+    lines.push(`\uD83D\uDC65 <b>Currently active:</b>`);
+    for (const s of activeSessions) {
+      lines.push(`\u2022 ${escapeHtml(s.user)} (since ${escapeHtml(s.since)})`);
+    }
+  }
+
+  // Show unmerged branches as ready-to-test items
   const pendingBranches = getPendingBranches(projectDir);
   if (pendingBranches.length > 0) {
     lines.push('');
-    lines.push(`\u26A0\uFE0F <b>Branches pending review:</b>`);
+    lines.push(`\uD83D\uDD00 <b>Branches ready to test:</b>`);
     for (const branchName of pendingBranches) {
-      // Get ahead count for each pending branch
-      let detail = 'not merged';
+      let detail = 'not merged \u2014 ready to test';
       try {
         const mainRef = execSync('git rev-parse --verify main 2>/dev/null || git rev-parse --verify master 2>/dev/null',
           { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() ? 'main' : 'master';
         const ahead = execSync(`git rev-list --count ${mainRef}..${branchName}`,
           { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
         const count = parseInt(ahead) || 0;
-        if (count > 0) detail = `not merged, ${count} commits ahead`;
+        if (count > 0) detail = `${count} commits, not merged \u2014 ready to test`;
       } catch {}
       const branchLink = repoUrl ? `<a href="${repoUrl}/tree/${branchName}">${escapeHtml(branchName)}</a>` : escapeHtml(branchName);
       lines.push(`\u2022 ${branchLink} (${detail})`);
@@ -494,6 +561,9 @@ async function notifySessionEnd(projectDir, stats) {
     }
   }
 
+  // Unregister session with Worker
+  await workerSessionEnd(config, user);
+
   // --- Project group/topic: full message with stats + categorized commits ---
   const repoUrl = getGitHubRepoUrl(projectDir);
   const lines = [];
@@ -510,14 +580,8 @@ async function notifySessionEnd(projectDir, stats) {
   // Categorized commits from the last 8 hours
   const { features, fixes, other } = getCategorizedCommits(projectDir);
 
-  // Helper to format a commit entry with optional GitHub link
-  const fmtCommit = (entry) => {
-    const linkText = escapeHtml(entry.msg);
-    if (repoUrl && entry.hash) {
-      return `\u2022 <a href="${repoUrl}/commit/${entry.hash}">${linkText}</a>`;
-    }
-    return `\u2022 ${linkText}`;
-  };
+  // Format commit entry (no commit links — they 404 on unpushed branches)
+  const fmtCommit = (entry) => `\u2022 ${escapeHtml(entry.msg)}`;
 
   if (features.length > 0) {
     lines.push('');
