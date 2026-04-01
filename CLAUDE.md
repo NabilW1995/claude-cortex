@@ -20,11 +20,12 @@
 | "Review"/"Prüfe den Code" | → code-review Agent dispatchen |
 | Fehler/Bug/Error | → error-whisperer + debug-investigator |
 
-## Agent-System (15 Agents — MUST use)
+## Agent-System (15 Agents + 5 Plugins — MUST use)
 - Große Tasks (50+ Zeilen): MUST als Subagent dispatchen
 - Kleine Tasks (<10 Zeilen): Claude darf selbst, aber befolgt Agent-Regeln
 - Reviews/Analysen: IMMER als Subagent (frische Augen)
 - Parallele Tasks: Mehrere Agents gleichzeitig dispatchen
+- Plugins: code-review, code-simplifier, feature-dev, claude-md-management, skill-creator
 - Details: @.claude/rules/agent-routing.md
 <!-- CORTEX:ROUTING:END -->
 

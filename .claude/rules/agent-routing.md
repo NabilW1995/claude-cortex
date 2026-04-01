@@ -137,20 +137,65 @@ Agents KÖNNEN parallel als mehrere Subagents dispatcht werden wenn die Aufgaben
 
 ---
 
+## Plugins (projektspezifisch installiert)
+
+Plugins ergänzen unsere Agents. Sie werden über Skills/Commands aufgerufen.
+
+### code-review Plugin — PR-Review auf GitHub
+- TRIGGER: Wenn ein PR auf GitHub reviewed werden soll
+- AUFRUF: `/code-review` oder Skill `code-review:code-review`
+- UNTERSCHIED zu unserem code-review Agent: Plugin reviewt auf GitHub (mit `gh`), unser Agent reviewt lokal
+- Workflow: Unser Agent für lokales Review → Plugin für PR-Review auf GitHub
+
+### code-simplifier Plugin — Code vereinfachen
+- TRIGGER: Nach Abschluss eines Features (vor PR)
+- TRIGGER: Wenn der User sagt "Vereinfache den Code", "Mach es simpler", "Cleanup"
+- TRIGGER: Nach größeren Refactorings
+- AUFRUF: Skill `code-simplifier:code-simplifier` oder Agent `code-simplifier` dispatchen
+- MUST: NACH dem code-review laufen lassen (erst prüfen, dann vereinfachen)
+
+### feature-dev Plugin — Geführte Feature-Entwicklung
+- TRIGGER: Wenn ein komplexes Feature gebaut werden soll mit Discovery-Phase
+- TRIGGER: Wenn der User sagt "Bau ein Feature", "Neues Feature"
+- AUFRUF: `/feature-dev` oder Skill `feature-dev:feature-dev`
+- UNTERSCHIED zu unserem coder Agent: Plugin hat Discovery + Architecture Phase
+- Workflow: feature-dev Plugin für komplexe Features, coder Agent für einfache Implementierung
+
+### claude-md-management Plugin — CLAUDE.md pflegen
+- TRIGGER: Nach Template-Update (`/template-update`)
+- TRIGGER: Wenn der User sagt "Verbessere die CLAUDE.md", "Prüfe die CLAUDE.md"
+- TRIGGER: Am Ende eines produktiven Arbeitstags (bei `/wrap-up`)
+- AUFRUF: `/revise-claude-md` oder Skill `claude-md-management:claude-md-improver`
+- MUST: Nach jedem Template-Update die CLAUDE.md prüfen und verbessern
+
+### skill-creator Plugin — Neue Skills erstellen
+- TRIGGER: Wenn der User einen neuen Skill erstellen will
+- AUFRUF: Skill `skill-creator:skill-creator`
+
+---
+
 ## Standard-Workflow: Feature bauen
 
-Die typische Reihenfolge der Agents bei einem neuen Feature:
+Die typische Reihenfolge bei einem neuen Feature:
 
 ```
-1. env-validator    → Umgebung OK?
-2. deep-dive        → Analyse des Ansatzes (bei komplexen Features)
-3. coder            → Implementierung (ggf. mehrere parallel)
-4. build-validator  → Build + Tests bestanden?
-5. code-review      → Code-Qualität prüfen
-6. pr-ghostwriter   → PR-Beschreibung schreiben
+1. env-validator       → Umgebung OK?
+2. feature-dev Plugin  → Discovery + Architecture (bei komplexen Features)
+   ODER deep-dive      → Analyse (bei Architektur-Fragen)
+3. coder               → Implementierung (ggf. mehrere parallel)
+4. build-validator     → Build + Types + Lint bestanden?
+5. code-review Agent   → Lokales Code-Review
+6. code-simplifier     → Code vereinfachen (optional)
+7. pr-ghostwriter      → PR-Beschreibung schreiben
+8. code-review Plugin  → PR-Review auf GitHub
 ```
 
 Bei Fehlern zwischendurch:
 ```
 error-whisperer → debug-investigator → rubber-duck (3x) → unsticker (5x)
+```
+
+Am Ende des Tages:
+```
+claude-md-management → CLAUDE.md prüfen und verbessern
 ```
