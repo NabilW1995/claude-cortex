@@ -35,7 +35,19 @@ interface ActiveSession {
   since: string;
 }
 
+interface DashboardState {
+  messageId: number | null; // Telegram message_id for editing
+  activeSessions: Array<{ user: string; since: string; tasks: number[] }>;
+  lastUpdated: string;
+}
+
 interface TelegramUpdate {
+  callback_query?: {
+    id: string;
+    data?: string;
+    from?: { id?: number; first_name?: string; username?: string };
+    message?: { chat: { id: number }; message_thread_id?: number };
+  };
   message?: {
     text?: string;
     chat: { id: number };
@@ -101,6 +113,40 @@ async function sendTelegram(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+// ---------------------------------------------------------------------------
+// User color assignment (for dashboard)
+// ---------------------------------------------------------------------------
+
+const USER_COLORS = [
+  "\u{1F7E1}", // yellow circle
+  "\u{1F535}", // blue circle
+  "\u{1F7E3}", // purple circle
+  "\u{1F7E0}", // orange circle
+  "\u{1F7E4}", // brown circle
+  "\u{1F534}", // red circle
+  "\u{1F7E2}", // green circle
+];
+
+/**
+ * Get a consistent color emoji for a team member by telegram_id.
+ * Each member gets a unique color based on their position in the list.
+ */
+function getUserColor(members: TeamMember[], telegramId: number): string {
+  const idx = members.findIndex((m) => m.telegram_id === telegramId);
+  return USER_COLORS[idx % USER_COLORS.length] || "\u{2B1C}";
+}
+
+/**
+ * Get a consistent color emoji for a team member by name or github handle.
+ */
+function getUserColorByName(members: TeamMember[], name: string): string {
+  const idx = members.findIndex(
+    (m) => m.name === name || m.github === name
+  );
+  if (idx < 0) return "\u{2B1C}";
+  return USER_COLORS[idx % USER_COLORS.length];
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +253,40 @@ async function upsertTeamMember(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for dashboard state
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve the dashboard state for a project.
+ * Stores the Telegram message_id so we can edit the same message.
+ */
+async function getDashboardState(
+  kv: KVNamespace,
+  projectId: string
+): Promise<DashboardState> {
+  const raw = await kv.get(projectId + ":dashboard");
+  if (raw) {
+    try {
+      return JSON.parse(raw) as DashboardState;
+    } catch {
+      // Corrupted data — return fresh state
+    }
+  }
+  return { messageId: null, activeSessions: [], lastUpdated: "" };
+}
+
+/**
+ * Persist the dashboard state (message_id, active sessions, etc.).
+ */
+async function saveDashboardState(
+  kv: KVNamespace,
+  projectId: string,
+  state: DashboardState
+): Promise<void> {
+  await kv.put(projectId + ":dashboard", JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
 // Project config from KV
 // ---------------------------------------------------------------------------
 
@@ -220,6 +300,252 @@ async function getProject(
     return JSON.parse(raw) as ProjectConfig;
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live Dashboard — rendering and send/edit logic
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the full dashboard text as HTML for Telegram.
+ * Shows: online users, open GitHub issues grouped by label,
+ * who is working on what (color-coded), and a timestamp.
+ */
+async function renderDashboard(
+  env: Env,
+  projectId: string,
+  project: ProjectConfig
+): Promise<string> {
+  const members = await getTeamMembers(env.PROJECTS);
+  const sessions = await getActiveSessions(env.PROJECTS, projectId);
+  const dashState = await getDashboardState(env.PROJECTS, projectId);
+
+  const lines: string[] = [];
+
+  // Header
+  lines.push(`\u{1F4CA} <b>${projectId}</b> \u{2014} Live Dashboard`);
+  lines.push("\u{2500}".repeat(30));
+
+  // Online users
+  lines.push("");
+  if (sessions.length > 0) {
+    lines.push("\u{1F465} <b>Online:</b>");
+    for (const s of sessions) {
+      const color = getUserColorByName(members, s.user);
+      const taskList =
+        dashState.activeSessions.find((ds) => ds.user === s.user)?.tasks ||
+        [];
+      const taskText =
+        taskList.length > 0
+          ? " \u{2014} working on " +
+            taskList.map((t) => "#" + t).join(", ")
+          : "";
+      lines.push(`${color} ${s.user}${taskText}`);
+    }
+  } else {
+    lines.push("\u{1F465} <b>Online:</b> nobody right now");
+  }
+
+  // Fetch GitHub issues
+  let issues: Array<{
+    number: number;
+    title: string;
+    labels?: Array<{ name: string }>;
+    assignees?: Array<{ login: string }>;
+  }> = [];
+
+  if (project.githubToken) {
+    const headers: Record<string, string> = {
+      "User-Agent": "CortexBot",
+      Authorization: "token " + project.githubToken,
+    };
+    const res = await fetch(
+      "https://api.github.com/repos/" +
+        project.githubRepo +
+        "/issues?state=open&per_page=100",
+      { headers }
+    );
+    if (res.ok) {
+      issues = (await res.json()) as typeof issues;
+    }
+  }
+
+  if (issues.length > 0) {
+    // Group by label
+    const grouped: Record<string, typeof issues> = {};
+    const unlabeled: typeof issues = [];
+
+    for (const issue of issues) {
+      const labels = (issue.labels || []).map((l) => l.name);
+      if (labels.length === 0) {
+        unlabeled.push(issue);
+      } else {
+        for (const label of labels) {
+          if (!grouped[label]) grouped[label] = [];
+          grouped[label].push(issue);
+        }
+      }
+    }
+
+    lines.push("");
+    lines.push(`\u{1F4CB} <b>Open Tasks</b> (${issues.length}):`);
+
+    // Build a set of claimed task numbers
+    const claimedTasks = new Map<number, string>(); // issue# -> user
+    for (const ds of dashState.activeSessions) {
+      for (const t of ds.tasks) {
+        claimedTasks.set(t, ds.user);
+      }
+    }
+    // Also check GitHub assignees
+    for (const issue of issues) {
+      if (
+        issue.assignees &&
+        issue.assignees.length > 0 &&
+        !claimedTasks.has(issue.number)
+      ) {
+        claimedTasks.set(issue.number, issue.assignees[0].login);
+      }
+    }
+
+    const labelKeys = Object.keys(grouped).sort();
+    for (const label of labelKeys) {
+      const labelIssues = grouped[label];
+      lines.push("");
+      lines.push(`<b>${label}</b> (${labelIssues.length}):`);
+      for (const issue of labelIssues) {
+        const claimer = claimedTasks.get(issue.number);
+        if (claimer) {
+          const color = getUserColorByName(members, claimer);
+          lines.push(
+            `${color} #${issue.number} ${issue.title} \u{2190} ${claimer}`
+          );
+        } else {
+          lines.push(`\u{2B1C} #${issue.number} ${issue.title}`);
+        }
+      }
+    }
+
+    if (unlabeled.length > 0) {
+      lines.push("");
+      lines.push(`<b>other</b> (${unlabeled.length}):`);
+      for (const issue of unlabeled) {
+        const claimer = claimedTasks.get(issue.number);
+        if (claimer) {
+          const color = getUserColorByName(members, claimer);
+          lines.push(
+            `${color} #${issue.number} ${issue.title} \u{2190} ${claimer}`
+          );
+        } else {
+          lines.push(`\u{2B1C} #${issue.number} ${issue.title}`);
+        }
+      }
+    }
+  }
+
+  // Footer
+  lines.push("");
+  lines.push(
+    `\u{1F552} Updated: ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}`
+  );
+
+  return lines.join("\n");
+}
+
+/**
+ * Send a new dashboard message or edit the existing one.
+ * Stores the message_id in KV so subsequent calls edit the same message.
+ * Includes inline buttons for Refresh, Claim Tasks, and Done.
+ */
+async function sendOrEditDashboard(
+  env: Env,
+  projectId: string,
+  project: ProjectConfig
+): Promise<void> {
+  const text = await renderDashboard(env, projectId, project);
+  const state = await getDashboardState(env.PROJECTS, projectId);
+
+  const buttons = {
+    inline_keyboard: [
+      [
+        { text: "\u{1F504} Refresh", callback_data: "refresh" },
+        { text: "\u{1F4CB} Claim Tasks", callback_data: "claim" },
+        { text: "\u{2705} Done", callback_data: "done" },
+      ],
+    ],
+  };
+
+  if (state.messageId) {
+    // Try to edit existing message
+    const body: Record<string, unknown> = {
+      chat_id: project.chatId,
+      message_id: state.messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buttons,
+    };
+
+    const res = await fetch(
+      `https://api.telegram.org/bot${project.botToken}/editMessageText`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(body),
+      }
+    );
+    const result = (await res.json()) as { ok: boolean };
+
+    if (result.ok) {
+      state.lastUpdated = new Date().toISOString();
+      await saveDashboardState(env.PROJECTS, projectId, state);
+      return;
+    }
+    // If edit failed (message deleted etc.), fall through to send new
+  }
+
+  // Send new dashboard message
+  const body: Record<string, unknown> = {
+    chat_id: project.chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: buttons,
+  };
+  if (project.threadId) body.message_thread_id = project.threadId;
+
+  const res = await fetch(
+    `https://api.telegram.org/bot${project.botToken}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(body),
+    }
+  );
+  const result = (await res.json()) as {
+    ok: boolean;
+    result?: { message_id: number };
+  };
+
+  if (result.ok && result.result?.message_id) {
+    state.messageId = result.result.message_id;
+    state.lastUpdated = new Date().toISOString();
+    await saveDashboardState(env.PROJECTS, projectId, state);
+
+    // Pin the dashboard message so it stays visible
+    await fetch(
+      `https://api.telegram.org/bot${project.botToken}/pinChatMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: project.chatId,
+          message_id: result.result.message_id,
+          disable_notification: true,
+        }),
+      }
+    );
   }
 }
 
@@ -251,7 +577,60 @@ async function handleTelegram(
     return new Response("Invalid JSON", { status: 400 });
   }
 
-  const text = update.message?.text?.trim();
+  // -----------------------------------------------------------------------
+  // Handle callback queries (inline button presses on the dashboard)
+  // -----------------------------------------------------------------------
+  if (update.callback_query) {
+    const cbData = update.callback_query.data;
+    const cbId = update.callback_query.id;
+
+    // Answer the callback to remove loading state on the button
+    await fetch(
+      `https://api.telegram.org/bot${project.botToken}/answerCallbackQuery`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callback_query_id: cbId }),
+      }
+    );
+
+    if (cbData === "refresh") {
+      await sendOrEditDashboard(env, projectId, project);
+      return new Response("OK");
+    }
+
+    if (cbData === "claim") {
+      const fromUser =
+        update.callback_query.from?.first_name || "Unknown";
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        `${fromUser}: To claim tasks, use /grab #1 #2 #3`,
+        project.threadId
+      );
+      return new Response("OK");
+    }
+
+    if (cbData === "done") {
+      const fromUser =
+        update.callback_query.from?.first_name || "Unknown";
+      await sendTelegram(
+        project.botToken,
+        project.chatId,
+        `${fromUser}: To mark tasks done, use /done #1`,
+        project.threadId
+      );
+      return new Response("OK");
+    }
+
+    return new Response("OK");
+  }
+
+  // -----------------------------------------------------------------------
+  // Handle text messages / commands
+  // -----------------------------------------------------------------------
+  const message = update.message;
+  const text = message?.text?.trim();
   if (!text) {
     // Not a text message — ignore silently
     return new Response("OK");
@@ -264,6 +643,19 @@ async function handleTelegram(
   const args = parts.slice(1).join(" ");
 
   try {
+    // /dashboard — send or refresh the live dashboard
+    if (command === "/dashboard") {
+      await sendOrEditDashboard(env, projectId, project);
+      return new Response("OK");
+    }
+
+    // /grab #1 #2 #3 — claim tasks for yourself
+    const grabMatch = text.match(/^\/grab(?:@\w+)?\s+(.+)/);
+    if (grabMatch) {
+      await handleGrabCommand(env, project, projectId, grabMatch[1], message!);
+      return new Response("OK");
+    }
+
     switch (command) {
       case "/tasks":
         await handleTasksCommand(project);
@@ -294,17 +686,105 @@ async function handleTelegram(
         break;
     }
   } catch (err) {
-    const message =
+    const errMessage =
       err instanceof Error ? err.message : "Unknown error";
     await sendTelegram(
       project.botToken,
       project.chatId,
-      `Error: ${message}`,
+      `Error: ${errMessage}`,
       project.threadId
     );
   }
 
   return new Response("OK");
+}
+
+/**
+ * /grab #1 #2 #3 — Claim GitHub issues for the sender.
+ * Updates the dashboard state and optionally assigns on GitHub.
+ */
+async function handleGrabCommand(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string,
+  argsText: string,
+  message: NonNullable<TelegramUpdate["message"]>
+): Promise<void> {
+  const taskNumbers =
+    argsText.match(/#?(\d+)/g)?.map((n) => parseInt(n.replace("#", ""), 10)) ||
+    [];
+
+  if (taskNumbers.length === 0) {
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "Usage: /grab #1 #2 #3",
+      project.threadId
+    );
+    return;
+  }
+
+  const fromUser = message.from?.first_name || "Unknown";
+  const state = await getDashboardState(env.PROJECTS, projectId);
+
+  // Find or create user's session in dashboard state
+  let userSession = state.activeSessions.find((s) => s.user === fromUser);
+  if (!userSession) {
+    userSession = {
+      user: fromUser,
+      since: new Date().toLocaleTimeString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }),
+      tasks: [],
+    };
+    state.activeSessions.push(userSession);
+  }
+
+  // Add new tasks (avoid duplicates)
+  for (const t of taskNumbers) {
+    if (!userSession.tasks.includes(t)) userSession.tasks.push(t);
+  }
+
+  // Also assign on GitHub if token available
+  if (project.githubToken) {
+    const members = await getTeamMembers(env.PROJECTS);
+    const member = members.find((m) => m.name === fromUser);
+    const githubUser = member?.github || fromUser;
+
+    for (const num of taskNumbers) {
+      try {
+        await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/issues/${num}/assignees`,
+          {
+            method: "POST",
+            headers: {
+              "User-Agent": "CortexBot",
+              Authorization: "token " + project.githubToken,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ assignees: [githubUser] }),
+          }
+        );
+      } catch {
+        // Best-effort — don't fail the whole command if GitHub is unreachable
+      }
+    }
+  }
+
+  await saveDashboardState(env.PROJECTS, projectId, state);
+
+  // Update dashboard
+  await sendOrEditDashboard(env, projectId, project);
+
+  const taskStr = taskNumbers.map((t) => "#" + t).join(", ");
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `${fromUser} claimed ${taskStr}`,
+    project.threadId
+  );
 }
 
 /**
@@ -827,10 +1307,20 @@ async function handleSession(
       `${update.user} hat eine Session gestartet.`,
       project.threadId
     );
+
+    // Refresh the live dashboard to show the new online user
+    await sendOrEditDashboard(env, projectId, project);
   } else if (update.type === "end") {
     // Remove user from active sessions
     const filtered = sessions.filter((s) => s.user !== update.user);
     await setActiveSessions(env.PROJECTS, projectId, filtered);
+
+    // Clear the user's tasks from dashboard state
+    const dashState = await getDashboardState(env.PROJECTS, projectId);
+    dashState.activeSessions = dashState.activeSessions.filter(
+      (s) => s.user !== update.user
+    );
+    await saveDashboardState(env.PROJECTS, projectId, dashState);
 
     // Send to Login topic (short message) if configured
     if (project.loginThreadId) {
@@ -849,6 +1339,9 @@ async function handleSession(
       `${update.user} hat die Session beendet.`,
       project.threadId
     );
+
+    // Refresh the live dashboard to remove the offline user
+    await sendOrEditDashboard(env, projectId, project);
   } else {
     return new Response("Invalid session type", { status: 400 });
   }
@@ -940,7 +1433,7 @@ function matchRoute(
 
   // Match /:handler/:projectId patterns
   const match = pathname.match(
-    /^\/(telegram|github|session)\/([a-zA-Z0-9_-]+)\/?$/
+    /^\/(telegram|github|session|dashboard)\/([a-zA-Z0-9_-]+)\/?$/
   );
   if (match && method === "POST") {
     return { handler: match[1], projectId: match[2] };
@@ -980,6 +1473,15 @@ export default {
 
       case "session":
         return handleSession(request, env, route.projectId!);
+
+      case "dashboard": {
+        const dashProject = await getProject(env.PROJECTS, route.projectId!);
+        if (!dashProject) {
+          return new Response("Project not found", { status: 404 });
+        }
+        await sendOrEditDashboard(env, route.projectId!, dashProject);
+        return Response.json({ ok: true });
+      }
 
       case "get-sessions": {
         const sessions = await getActiveSessions(env.PROJECTS, route.projectId!);
