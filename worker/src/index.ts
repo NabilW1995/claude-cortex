@@ -377,8 +377,8 @@ interface BatchBuffer {
  * 2. Second event -> append to buffer, suppress sending (shouldSend = false)
  * 3. Nth event    -> if buffer age > 10s OR items >= 10, flush as batch summary
  *
- * The KV entry auto-expires after 30 seconds (TTL) as a safety net so
- * stale buffers don't linger if no more events arrive.
+ * The KV entry auto-expires after 60 seconds (TTL, KV minimum) as a safety
+ * net so stale buffers don't linger if no more events arrive.
  */
 async function checkAndBatch(
   kv: KVNamespace,
@@ -425,16 +425,18 @@ async function checkAndBatch(
     }
 
     // Keep accumulating — don't send yet
-    await kv.put(key, JSON.stringify(batch), { expirationTtl: 30 });
+    // KV requires minimum TTL of 60 seconds
+    await kv.put(key, JSON.stringify(batch), { expirationTtl: 60 });
     return { shouldSend: false, batchMessage: null };
   }
 
   // First event of this type from this actor — send normally,
   // but also start a batch buffer in case more events follow quickly.
+  // KV requires minimum TTL of 60 seconds
   await kv.put(
     key,
     JSON.stringify({ items: [detail], firstSeen: Date.now() } as BatchBuffer),
-    { expirationTtl: 30 }
+    { expirationTtl: 60 }
   );
   return { shouldSend: true, batchMessage: null };
 }
@@ -2899,7 +2901,14 @@ export default {
       }
 
       case "github":
-        return handleGitHub(request, env, route.projectId!);
+        try {
+          return await handleGitHub(request, env, route.projectId!);
+        } catch (err) {
+          // Surface actionable info for debugging but don't leak internals
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("GitHub handler error:", err);
+          return new Response(`GitHub handler error: ${msg}`, { status: 500 });
+        }
 
       case "session":
         return handleSession(request, env, route.projectId!);
