@@ -10,7 +10,7 @@
  * still use the direct sendTelegram helper.
  */
 
-import { Bot, webhookCallback, Keyboard } from "grammy";
+import { Bot, webhookCallback, Keyboard, InlineKeyboard } from "grammy";
 import type { Context } from "grammy";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ interface ProjectConfig {
   chatId: string;
   threadId?: number;
   loginThreadId?: number | null;
+  loginChatId?: string | null;
   githubRepo: string;
   githubToken?: string;
   members: Array<{ name: string; github: string; telegram: string }>;
@@ -73,6 +74,7 @@ interface RegisterPayload {
   chatId: string;
   threadId?: number;
   loginThreadId?: number | null;
+  loginChatId?: string | null;
   githubRepo: string;
   githubToken?: string;
   members: Array<{ name: string; github: string; telegram: string }>;
@@ -707,6 +709,433 @@ async function sendOrEditDashboard(
 }
 
 // ---------------------------------------------------------------------------
+// Telegram helpers for sending messages with inline keyboards
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a message with an inline keyboard to a Telegram chat.
+ * Returns the sent message's ID so it can be pinned afterwards.
+ */
+async function sendTelegramWithKeyboard(
+  botToken: string,
+  chatId: string,
+  text: string,
+  replyMarkup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> },
+  threadId?: number
+): Promise<number | null> {
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: replyMarkup,
+  };
+
+  if (threadId) {
+    body.message_thread_id = threadId;
+  }
+
+  const res = await fetch(
+    `https://api.telegram.org/bot${botToken}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(body),
+    }
+  );
+
+  const result = (await res.json()) as {
+    ok: boolean;
+    result?: { message_id: number };
+  };
+
+  if (result.ok && result.result?.message_id) {
+    return result.result.message_id;
+  }
+  return null;
+}
+
+/**
+ * Pin a message in a Telegram chat (silently, without notification).
+ */
+async function pinMessage(
+  botToken: string,
+  chatId: string,
+  messageId: number
+): Promise<void> {
+  await fetch(
+    `https://api.telegram.org/bot${botToken}/pinChatMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        disable_notification: true,
+      }),
+    }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Control Panel — Login Channel (team-wide overview)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send and pin the Login Channel control message with 6 quick-access buttons.
+ * This panel provides team-wide visibility: who is online, daily summary,
+ * work hours, aggregated tasks, blockers, and open PRs across all projects.
+ */
+async function sendLoginControlMessage(
+  project: ProjectConfig,
+  env: Env
+): Promise<void> {
+  const chatId = project.loginChatId || project.chatId;
+
+  const text =
+    "\u{1F4CA} <b>Team Status \u{2014} Control Panel</b>\n\n" +
+    "Use the buttons below for quick access:";
+
+  const buttons = {
+    inline_keyboard: [
+      [
+        { text: "\u{1F465} Who is on?", callback_data: "login_online" },
+        { text: "\u{1F4CA} Today", callback_data: "login_today" },
+      ],
+      [
+        { text: "\u{23F1} Work Hours", callback_data: "login_hours" },
+        { text: "\u{1F4CB} All Tasks", callback_data: "login_tasks" },
+      ],
+      [
+        { text: "\u{1F525} Blockers", callback_data: "login_blockers" },
+        { text: "\u{1F504} Open PRs", callback_data: "login_prs" },
+      ],
+    ],
+  };
+
+  const messageId = await sendTelegramWithKeyboard(
+    project.botToken,
+    chatId,
+    text,
+    buttons,
+    project.loginThreadId ?? undefined
+  );
+
+  if (messageId) {
+    await pinMessage(project.botToken, chatId, messageId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Control Panel — Project Group (project-specific)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send and pin the Project Group control message with 7 quick-access buttons.
+ * This panel provides project-level actions: board view, personal tasks,
+ * open PRs, review queue, urgent items, milestones, and weekly reports.
+ */
+async function sendProjectControlMessage(
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const text =
+    `\u{1F4CB} <b>${projectId}</b> \u{2014} Control Panel\n\n` +
+    "Use the buttons below for quick access:";
+
+  const buttons = {
+    inline_keyboard: [
+      [
+        { text: "\u{1F4CB} Board", callback_data: "project_board" },
+        { text: "\u{1F4CC} My Tasks", callback_data: "project_mytasks" },
+      ],
+      [
+        { text: "\u{1F500} Open PRs", callback_data: "project_prs" },
+        { text: "\u{1F440} Needs Review", callback_data: "project_reviews" },
+      ],
+      [
+        { text: "\u{1F525} Urgent", callback_data: "project_urgent" },
+        { text: "\u{1F3AF} Milestone", callback_data: "project_milestone" },
+      ],
+      [
+        { text: "\u{1F4C8} Weekly Report", callback_data: "project_weekly" },
+      ],
+    ],
+  };
+
+  const messageId = await sendTelegramWithKeyboard(
+    project.botToken,
+    project.chatId,
+    text,
+    buttons,
+    project.threadId
+  );
+
+  if (messageId) {
+    await pinMessage(project.botToken, project.chatId, messageId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Callback handlers — Login Channel buttons (fully implemented)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle "Who is on?" button — show active sessions across ALL registered
+ * projects. Iterates through KV keys to find all project sessions.
+ */
+async function handleLoginOnline(
+  env: Env,
+  project: ProjectConfig
+): Promise<string> {
+  // List all KV keys to discover registered projects
+  const keyList = await env.PROJECTS.list();
+  const members = await getTeamMembers(env.PROJECTS);
+
+  const lines: string[] = [
+    "\u{1F465} <b>Team Status (Live)</b>",
+    "\u{2501}".repeat(16),
+  ];
+
+  let anyoneOnline = false;
+
+  for (const key of keyList.keys) {
+    const keyName = key.name;
+
+    // Skip non-project keys (team-members, *:sessions, *:dashboard, etc.)
+    if (
+      keyName === "team-members" ||
+      keyName.includes(":sessions") ||
+      keyName.includes(":dashboard")
+    ) {
+      continue;
+    }
+
+    // This is a project key — check for active sessions
+    const sessions = await getActiveSessions(env.PROJECTS, keyName);
+
+    for (const s of sessions) {
+      anyoneOnline = true;
+      const color = getUserColorByName(members, s.user);
+      lines.push(
+        `\u{1F7E2} ${s.user} \u{2014} ${keyName} (since ${s.since})`
+      );
+    }
+  }
+
+  if (!anyoneOnline) {
+    // Check all known members and mark them as offline
+    if (members.length > 0) {
+      for (const m of members) {
+        lines.push(`\u{1F534} ${m.name} \u{2014} not seen today`);
+      }
+    } else {
+      lines.push("No team members registered yet.");
+      lines.push("Use /register <github-username> to join.");
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Callback handlers — Project Group buttons (fully implemented)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle "Board" button — show open GitHub issues grouped by status.
+ * Provides a quick sprint-board overview with assigned vs unassigned issues.
+ */
+async function handleProjectBoard(
+  project: ProjectConfig,
+  projectId: string
+): Promise<string> {
+  if (!project.githubToken) {
+    return "\u{1F4CB} No GitHub token configured. Cannot load board.";
+  }
+
+  const response = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&per_page=50`,
+    project.githubToken
+  );
+
+  if (!response.ok) {
+    return `\u{1F4CB} GitHub API error: ${response.status}`;
+  }
+
+  const issues = (await response.json()) as Array<{
+    number: number;
+    title: string;
+    assignee?: { login: string } | null;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out pull requests (GitHub API returns PRs as issues too)
+  const realIssues = issues.filter((i) => !i.pull_request);
+
+  if (realIssues.length === 0) {
+    return `\u{1F4CB} <b>${projectId}</b> \u{2014} Board\n\u{2501}`.repeat(0) +
+      `\u{1F4CB} <b>${projectId}</b> \u{2014} Board\n\u{2501}${"\u{2501}".repeat(15)}\n\nNo open issues.`;
+  }
+
+  const assigned = realIssues.filter((i) => i.assignee);
+  const unassigned = realIssues.filter((i) => !i.assignee);
+
+  const lines: string[] = [
+    `\u{1F4CB} <b>${projectId}</b> \u{2014} Board`,
+    "\u{2501}".repeat(16),
+  ];
+
+  if (unassigned.length > 0) {
+    lines.push(`\nOpen (${unassigned.length}):`);
+    for (const issue of unassigned.slice(0, 15)) {
+      lines.push(`\u{2022} #${issue.number} ${issue.title} [open]`);
+    }
+    if (unassigned.length > 15) {
+      lines.push(`  ... and ${unassigned.length - 15} more`);
+    }
+  }
+
+  if (assigned.length > 0) {
+    lines.push(`\nIn Progress (${assigned.length}):`);
+    for (const issue of assigned.slice(0, 15)) {
+      lines.push(
+        `\u{2022} #${issue.number} ${issue.title} [${issue.assignee!.login}]`
+      );
+    }
+    if (assigned.length > 15) {
+      lines.push(`  ... and ${assigned.length - 15} more`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Handle "My Tasks" button — show tasks assigned to the calling user.
+ * Looks up the caller's GitHub username from the team registry, then
+ * filters GitHub issues by assignee.
+ */
+async function handleProjectMyTasks(
+  project: ProjectConfig,
+  env: Env,
+  callerTelegramId: number,
+  callerFirstName: string
+): Promise<string> {
+  if (!project.githubToken) {
+    return "\u{1F4CC} No GitHub token configured.";
+  }
+
+  // Look up the caller's GitHub username from the team registry
+  const members = await getTeamMembers(env.PROJECTS);
+  const member = members.find((m) => m.telegram_id === callerTelegramId);
+  const githubUsername = member?.github;
+
+  if (!githubUsername) {
+    return (
+      `\u{1F4CC} <b>Your Tasks, ${callerFirstName}</b>\n\u{2501}${"\u{2501}".repeat(15)}\n\n` +
+      "You are not registered yet.\n" +
+      "Use /register <github-username> to link your account."
+    );
+  }
+
+  // Fetch issues assigned to this user
+  const response = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&assignee=${githubUsername}&per_page=30`,
+    project.githubToken
+  );
+
+  if (!response.ok) {
+    return `\u{1F4CC} GitHub API error: ${response.status}`;
+  }
+
+  const issues = (await response.json()) as Array<{
+    number: number;
+    title: string;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out pull requests
+  const myIssues = issues.filter((i) => !i.pull_request);
+
+  const lines: string[] = [
+    `\u{1F4CC} <b>Your Tasks, ${callerFirstName}</b>`,
+    "\u{2501}".repeat(16),
+  ];
+
+  if (myIssues.length === 0) {
+    lines.push("\nNo tasks assigned to you.");
+    lines.push("Use /grab #1 #2 to claim some!");
+  } else {
+    lines.push(`\nAssigned to you (${myIssues.length}):`);
+    for (const issue of myIssues) {
+      lines.push(`\u{2022} #${issue.number} ${issue.title}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Handle "Open PRs" button — show open pull requests with status info.
+ * Uses GitHub API to fetch PRs and shows author, reviewer, and CI status.
+ */
+async function handleProjectPRs(
+  project: ProjectConfig,
+  projectId: string
+): Promise<string> {
+  if (!project.githubToken) {
+    return "\u{1F500} No GitHub token configured.";
+  }
+
+  const response = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/pulls?state=open&per_page=20`,
+    project.githubToken
+  );
+
+  if (!response.ok) {
+    return `\u{1F500} GitHub API error: ${response.status}`;
+  }
+
+  const prs = (await response.json()) as Array<{
+    number: number;
+    title: string;
+    user: { login: string };
+    requested_reviewers?: Array<{ login: string }>;
+    draft?: boolean;
+  }>;
+
+  const lines: string[] = [
+    `\u{1F500} <b>Open PRs \u{2014} ${projectId}</b>`,
+    "\u{2501}".repeat(16),
+  ];
+
+  if (prs.length === 0) {
+    lines.push("\nNo open pull requests.");
+    return lines.join("\n");
+  }
+
+  for (const pr of prs) {
+    const draft = pr.draft ? " [DRAFT]" : "";
+    const reviewers =
+      pr.requested_reviewers && pr.requested_reviewers.length > 0
+        ? pr.requested_reviewers.map((r) => r.login).join(", ")
+        : "No reviewer";
+
+    lines.push(
+      `\n#${pr.number} "${pr.title}"${draft} \u{2014} @${pr.user.login}`
+    );
+    lines.push(`   \u{23F3} ${reviewers}`);
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // grammy bot factory — creates a bot instance with all handlers registered
 // ---------------------------------------------------------------------------
 
@@ -906,6 +1335,24 @@ function createBot(
     );
   });
 
+  // /setup — send and pin the control panel with all buttons
+  bot.command("setup", async (ctx: Context) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
+    // Determine whether this is the Login Channel or a Project Group
+    const isLoginChannel =
+      project.loginChatId && String(chatId) === String(project.loginChatId);
+
+    if (isLoginChannel) {
+      await sendLoginControlMessage(project, env);
+      await ctx.reply("\u{2705} Login Control Panel sent and pinned.");
+    } else {
+      await sendProjectControlMessage(project, env, projectId);
+      await ctx.reply("\u{2705} Project Control Panel sent and pinned.");
+    }
+  });
+
   // -------------------------------------------------------------------
   // Callback query handlers (inline button presses on the dashboard)
   // -------------------------------------------------------------------
@@ -938,6 +1385,146 @@ function createBot(
       project.botToken,
       project.chatId,
       `${fromUser}: To mark tasks done, use /done #1`,
+      project.threadId
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // Login Channel callback handlers (control panel buttons)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("login_online", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const text = await handleLoginOnline(env, project);
+    const chatId = project.loginChatId || project.chatId;
+    await sendTelegram(
+      project.botToken,
+      chatId,
+      text,
+      project.loginThreadId ?? undefined
+    );
+  });
+
+  bot.callbackQuery("login_today", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const chatId = project.loginChatId || project.chatId;
+    await sendTelegram(
+      project.botToken,
+      chatId,
+      "\u{1F4CA} Daily summary coming soon.",
+      project.loginThreadId ?? undefined
+    );
+  });
+
+  bot.callbackQuery("login_hours", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const chatId = project.loginChatId || project.chatId;
+    await sendTelegram(
+      project.botToken,
+      chatId,
+      "\u{23F1} Work hours tracking coming soon.",
+      project.loginThreadId ?? undefined
+    );
+  });
+
+  bot.callbackQuery("login_tasks", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const chatId = project.loginChatId || project.chatId;
+    await sendTelegram(
+      project.botToken,
+      chatId,
+      "\u{1F4CB} Aggregated task view coming soon.",
+      project.loginThreadId ?? undefined
+    );
+  });
+
+  bot.callbackQuery("login_blockers", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const chatId = project.loginChatId || project.chatId;
+    await sendTelegram(
+      project.botToken,
+      chatId,
+      "\u{1F525} Blocker detection coming soon.",
+      project.loginThreadId ?? undefined
+    );
+  });
+
+  bot.callbackQuery("login_prs", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const chatId = project.loginChatId || project.chatId;
+    await sendTelegram(
+      project.botToken,
+      chatId,
+      "\u{1F504} Cross-repo PR view coming soon.",
+      project.loginThreadId ?? undefined
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // Project Group callback handlers (control panel buttons)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("project_board", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const text = await handleProjectBoard(project, projectId);
+    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
+  });
+
+  bot.callbackQuery("project_mytasks", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const telegramId = ctx.from?.id || 0;
+    const firstName = ctx.from?.first_name || "Unknown";
+    const text = await handleProjectMyTasks(
+      project,
+      env,
+      telegramId,
+      firstName
+    );
+    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
+  });
+
+  bot.callbackQuery("project_prs", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    const text = await handleProjectPRs(project, projectId);
+    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
+  });
+
+  bot.callbackQuery("project_reviews", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "\u{1F440} Review queue coming soon.",
+      project.threadId
+    );
+  });
+
+  bot.callbackQuery("project_urgent", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "\u{1F525} Priority filter coming soon.",
+      project.threadId
+    );
+  });
+
+  bot.callbackQuery("project_milestone", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "\u{1F3AF} Milestone tracking coming soon.",
+      project.threadId
+    );
+  });
+
+  bot.callbackQuery("project_weekly", async (ctx: Context) => {
+    await ctx.answerCallbackQuery();
+    await sendTelegram(
+      project.botToken,
+      project.chatId,
+      "\u{1F4C8} Weekly report coming soon.",
       project.threadId
     );
   });
@@ -1585,6 +2172,7 @@ async function handleRegister(
     chatId: payload.chatId,
     threadId: payload.threadId,
     loginThreadId: payload.loginThreadId || null,
+    loginChatId: payload.loginChatId || null,
     githubRepo: payload.githubRepo,
     githubToken: payload.githubToken,
     members: payload.members || [],
