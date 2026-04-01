@@ -77,3 +77,63 @@ description: Automatic agent routing - when to trigger which agent based on cont
 - AKTION: Sokratisches Debugging — Fragen stellen statt Antworten geben
 - FORMAT: Gezielte Fragen die den User zum eigentlichen Problem führen
 - MUST: Niemals direkt die Lösung geben — der User soll sie selbst finden
+
+### coder — Bei JEDER Coding-Aufgabe
+- TRIGGER: Wenn ein neues Feature implementiert werden soll
+- TRIGGER: Wenn bestehender Code refactored werden soll
+- TRIGGER: Wenn der User sagt "Bau mir...", "Implementiere...", "Schreibe Code fuer..."
+- TRIGGER: Wenn eine neue Komponente, Funktion oder Modul erstellt werden soll
+- AKTION: 3-Phasen-Workflow: Recherche → Implementierung → Verifizierung
+- FORMAT: Code-Aenderungen mit einfacher Erklaerung was gemacht wurde und warum
+- MUST: Immer zuerst Codebase und Learnings-DB recherchieren
+- MUST: Immer `npm run lint` und `npm run test` vor Abschluss ausfuehren
+
+### code-review — Nach Feature-Completion + vor PR
+- TRIGGER: Wenn ein Feature fertig implementiert wurde
+- TRIGGER: Wenn der User sagt "Review", "Pruefe den Code", "Ist das gut so?"
+- TRIGGER: Vor dem Erstellen eines Pull Requests
+- TRIGGER: Wenn der User fragt ob Code produktionsreif ist
+- AKTION: 7-Kategorien-Review (Qualitaet, Wartbarkeit, Doku, Performance, Security, Error Handling, Testing)
+- FORMAT: Strukturierter Report mit Schweregrad-Levels (CRITICAL, HIGH, MEDIUM, LOW)
+- MUST: Issues in einfacher Sprache erklaeren — der User ist kein Programmierer
+- MUST: Wiederkehrende Issues als Learning in der SQLite-DB speichern
+
+### debug-investigator — Bei spezifischen Fehlern/Bugs
+- TRIGGER: Wenn ein spezifischer Fehler oder Bug untersucht werden muss
+- TRIGGER: Wenn ein Test fehlschlaegt und die Ursache unklar ist
+- TRIGGER: Wenn der User einen Stack-Trace oder eine Fehlermeldung teilt
+- TRIGGER: Ergaenzend zum error-whisperer wenn tiefere Analyse noetig ist
+- AKTION: 5-Schritt-Untersuchung: Fehler parsen → Dateien lesen → Patterns suchen → Git-History pruefen → Grundursache identifizieren
+- FORMAT: Strukturierter Bericht mit Fehler-Klassifizierung, technischen Details und einfacher Erklaerung
+- MUST: Learnings-DB konsultieren ob der Fehler schon mal aufgetreten ist
+- MUST: Fehler in einfacher Sprache uebersetzen (ggf. error-whisperer nutzen)
+
+### deep-dive — Bei gruendlicher Analyse vor Entscheidungen
+- TRIGGER: Wenn eine technische Entscheidung gruendlich analysiert werden muss
+- TRIGGER: Wenn der User sagt "Analysiere...", "Untersuche...", "Was waere der beste Ansatz?"
+- TRIGGER: Wenn ein Implementierungsplan vor der Ausfuehrung geprueft werden soll
+- TRIGGER: Wenn eine unbekannte Codebase erkundet werden muss
+- TRIGGER: Wenn Architektur-Alternativen bewertet werden muessen
+- AKTION: 6-Phasen-Framework: Umfang → Exploration → Recherche → Tiefenanalyse → Alternativen → Bericht
+- FORMAT: Executive Summary (einfache Sprache) + Detaillierte Erkenntnisse + Risiken + Empfehlungen
+- MUST: Gruendlichkeit vor Geschwindigkeit — keine uebereilten Analysen
+
+### build-validator — Nach Implementierung + vor Commit
+- TRIGGER: Wenn eine Implementierung abgeschlossen wurde
+- TRIGGER: Vor jedem Git-Commit
+- TRIGGER: Wenn der User fragt "Funktioniert alles?", "Ist der Code bereit?"
+- TRIGGER: Nach grossen Refactorings oder Merges
+- AKTION: Build → Types → Lint → Tests → Visuelles Review (wenn UI betroffen)
+- FORMAT: Ampel-System (BESTANDEN / WARNUNG / FEHLGESCHLAGEN) mit einfacher Zusammenfassung
+- MUST: Alle 4 Haupt-Checks ausfuehren (Build, Types, Lint, Tests)
+- MUST: Auto-Fix nur fuer sichere Aenderungen (Formatierung, Imports)
+
+### env-validator — Am Session-Start + vor Deploy
+- TRIGGER: Am Beginn einer neuen Arbeitssession (schneller Check)
+- TRIGGER: Vor einem Deployment
+- TRIGGER: Nach einer Cortex-Installation oder Template-Setup
+- TRIGGER: Wenn der User sagt "Funktioniert meine Umgebung?", "Ist alles installiert?"
+- AKTION: Umgebungsvariablen, CLI-Tools, Dependencies, Datenbank und Git-Status pruefen
+- FORMAT: Tabellen-basierter Report mit Schweregrad (KRITISCH / WARNUNG / OK)
+- MUST: NIEMALS Secret-Werte anzeigen — nur ob sie gesetzt sind
+- MUST: Klare Loesungsschritte fuer jedes Problem angeben
