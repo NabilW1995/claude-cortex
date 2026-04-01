@@ -60,7 +60,11 @@ function parseEnvFile(filePath) {
 
 /**
  * Load Telegram bot configuration from the project's .env file.
- * Returns { token, chatId, threadId, loginThreadId } or null if token/chatId are missing.
+ * Returns config object or null if token/chatId are missing.
+ *
+ * Supports two structures:
+ *   - Separate groups: TELEGRAM_LOGIN_CHAT_ID (login channel) + TELEGRAM_CHAT_ID (project group)
+ *   - Forum topics: TELEGRAM_CHAT_ID + TELEGRAM_THREAD_ID + TELEGRAM_LOGIN_THREAD_ID (legacy)
  */
 function loadBotConfig(projectDir) {
   try {
@@ -70,6 +74,7 @@ function loadBotConfig(projectDir) {
     const token = vars.TELEGRAM_BOT_TOKEN || '';
     const chatId = vars.TELEGRAM_CHAT_ID || '';
     const threadId = vars.TELEGRAM_THREAD_ID || '';
+    const loginChatId = vars.TELEGRAM_LOGIN_CHAT_ID || '';
     const loginThreadId = vars.TELEGRAM_LOGIN_THREAD_ID || '';
 
     // Both token and chatId are required
@@ -79,6 +84,7 @@ function loadBotConfig(projectDir) {
       token,
       chatId,
       threadId: threadId || null,
+      loginChatId: loginChatId || null,
       loginThreadId: loginThreadId || null
     };
   } catch {
@@ -263,18 +269,20 @@ async function notifySessionStart(projectDir) {
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
 
-  // --- Login topic: short message ---
-  if (config.loginThreadId) {
+  // --- Login channel/topic: short message ---
+  const loginChatId = config.loginChatId || config.chatId;
+  const loginThreadId = config.loginChatId ? null : config.loginThreadId;
+  if (config.loginChatId || config.loginThreadId) {
     const loginText = `<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`;
     try {
-      await sendTelegram(config.token, config.chatId, loginText, config.loginThreadId);
-      console.error('[Notify] Login topic message sent');
+      await sendTelegram(config.token, loginChatId, loginText, loginThreadId);
+      console.error('[Notify] Login message sent');
     } catch (e) {
-      console.error(`[Notify] Login topic failed: ${e.message}`);
+      console.error(`[Notify] Login message failed: ${e.message}`);
     }
   }
 
-  // --- Project topic: full message with open tasks ---
+  // --- Project group/topic: full message with open tasks ---
   const lines = [];
   lines.push(`<b>${escapeHtml(user)}</b> is online -- working on <b>${escapeHtml(projectName)}</b>`);
 
@@ -356,18 +364,20 @@ async function notifySessionEnd(projectDir, stats) {
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
 
-  // --- Login topic: short message ---
-  if (config.loginThreadId) {
+  // --- Login channel/topic: short message ---
+  const loginChatId = config.loginChatId || config.chatId;
+  const loginThreadId = config.loginChatId ? null : config.loginThreadId;
+  if (config.loginChatId || config.loginThreadId) {
     const loginText = `<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`;
     try {
-      await sendTelegram(config.token, config.chatId, loginText, config.loginThreadId);
-      console.error('[Notify] Login topic end message sent');
+      await sendTelegram(config.token, loginChatId, loginText, loginThreadId);
+      console.error('[Notify] Login end message sent');
     } catch (e) {
-      console.error(`[Notify] Login topic end failed: ${e.message}`);
+      console.error(`[Notify] Login end message failed: ${e.message}`);
     }
   }
 
-  // --- Project topic: full message with stats + commits ---
+  // --- Project group/topic: full message with stats + commits ---
   const lines = [];
   lines.push(`<b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
 
