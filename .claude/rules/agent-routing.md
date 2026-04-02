@@ -34,6 +34,11 @@ core--code-review Agent
   → Checks quality, architecture, security
   → Suggests simplifications
         ↓
+Sanity Check (skill)
+  → Is everything consistent?
+  → Did we forget anything?
+  → Does the feature fit the existing codebase?
+        ↓
 Done (or fix round)
 ```
 
@@ -90,6 +95,7 @@ When tasks are independent, dispatch multiple coder subagents simultaneously:
 
 - MUST: Run core--test-runner after every core--coder task
 - MUST: Run core--code-review after test-runner passes
+- MUST: Run sanity-check skill after code-review passes (final gate before merge)
 - MUST: Use subagents for tasks >50 lines (fresh context = better quality)
 - MUST: Give subagents complete context (files, errors, requirements)
 - MUST: Summarize subagent results to the user in simple language
