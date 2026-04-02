@@ -1368,6 +1368,11 @@ function createBot(
 ): Bot {
   const bot = new Bot(project.botToken);
 
+  // Global error handler — prevents errors from leaking to Telegram users
+  bot.catch((err) => {
+    console.error(`[Bot Error] ${err.message}`);
+  });
+
   // -------------------------------------------------------------------
   // Command handlers
   // -------------------------------------------------------------------
@@ -1575,17 +1580,17 @@ function createBot(
   // -------------------------------------------------------------------
 
   bot.callbackQuery("refresh", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     await sendOrEditDashboard(env, projectId, project);
   });
 
   bot.callbackQuery("active", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     await sendActiveInfo(env, project, projectId);
   });
 
   bot.callbackQuery("claim", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const fromUser = ctx.from?.first_name || "Unknown";
     await sendTelegram(
       project.botToken,
@@ -1596,7 +1601,7 @@ function createBot(
   });
 
   bot.callbackQuery("done", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const fromUser = ctx.from?.first_name || "Unknown";
     await sendTelegram(
       project.botToken,
@@ -1611,7 +1616,7 @@ function createBot(
   // -------------------------------------------------------------------
 
   bot.callbackQuery("login_online", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const text = await handleLoginOnline(env, project);
     const chatId = project.loginChatId || project.chatId;
     await sendTelegram(
@@ -1623,7 +1628,7 @@ function createBot(
   });
 
   bot.callbackQuery("login_today", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const chatId = project.loginChatId || project.chatId;
     await sendTelegram(
       project.botToken,
@@ -1634,7 +1639,7 @@ function createBot(
   });
 
   bot.callbackQuery("login_hours", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const chatId = project.loginChatId || project.chatId;
     await sendTelegram(
       project.botToken,
@@ -1645,7 +1650,7 @@ function createBot(
   });
 
   bot.callbackQuery("login_tasks", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const chatId = project.loginChatId || project.chatId;
     await sendTelegram(
       project.botToken,
@@ -1656,7 +1661,7 @@ function createBot(
   });
 
   bot.callbackQuery("login_blockers", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const chatId = project.loginChatId || project.chatId;
     await sendTelegram(
       project.botToken,
@@ -1667,7 +1672,7 @@ function createBot(
   });
 
   bot.callbackQuery("login_prs", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const chatId = project.loginChatId || project.chatId;
     await sendTelegram(
       project.botToken,
@@ -1682,13 +1687,13 @@ function createBot(
   // -------------------------------------------------------------------
 
   bot.callbackQuery("project_board", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const text = await handleProjectBoard(project, projectId);
     await sendTelegram(project.botToken, project.chatId, text, project.threadId);
   });
 
   bot.callbackQuery("project_mytasks", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const telegramId = ctx.from?.id || 0;
     const firstName = ctx.from?.first_name || "Unknown";
     const text = await handleProjectMyTasks(
@@ -1701,13 +1706,13 @@ function createBot(
   });
 
   bot.callbackQuery("project_prs", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const text = await handleProjectPRs(project, projectId);
     await sendTelegram(project.botToken, project.chatId, text, project.threadId);
   });
 
   bot.callbackQuery("project_reviews", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     await sendTelegram(
       project.botToken,
       project.chatId,
@@ -1717,7 +1722,7 @@ function createBot(
   });
 
   bot.callbackQuery("project_urgent", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     await sendTelegram(
       project.botToken,
       project.chatId,
@@ -1727,7 +1732,7 @@ function createBot(
   });
 
   bot.callbackQuery("project_milestone", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     await sendTelegram(
       project.botToken,
       project.chatId,
@@ -1737,7 +1742,7 @@ function createBot(
   });
 
   bot.callbackQuery("project_weekly", async (ctx: Context) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     await sendTelegram(
       project.botToken,
       project.chatId,
@@ -1751,7 +1756,7 @@ function createBot(
   // -------------------------------------------------------------------
 
   bot.callbackQuery(/^claim_review:(\d+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const prNumber = parseInt(ctx.match![1], 10);
     const fromUser = ctx.from?.first_name || "Unknown";
     const members = await getTeamMembers(env.PROJECTS);
@@ -1778,7 +1783,7 @@ function createBot(
   });
 
   bot.callbackQuery(/^claim_issue:(\d+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
     const issueNumber = parseInt(ctx.match![1], 10);
     const fromUser = ctx.from?.first_name || "Unknown";
     const members = await getTeamMembers(env.PROJECTS);
