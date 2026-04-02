@@ -1960,13 +1960,26 @@ async function sendActiveInfo(
 
     lines.push(`${color} <b>${s.user}</b> (since ${s.since})`);
 
+    // Show activity data from heartbeat (branch, files, commit)
+    const activity = await getActivityData(env.PROJECTS, projectId, s.user);
+    if (activity) {
+      if (activity.branch) {
+        lines.push(`   \u{1F4CB} Branch: ${activity.branch}`);
+      }
+      if (activity.lastFiles && activity.lastFiles.length > 0) {
+        lines.push(`   \u{1F4DD} Editing: ${activity.lastFiles.slice(0, 3).join(", ")}`);
+      }
+      if (activity.lastCommit) {
+        lines.push(`   \u{1F4AC} Last commit: ${activity.lastCommit}`);
+      }
+    }
+
     if (tasks.length > 0) {
       lines.push(
-        `   \u{1F4CB} Working on: ${tasks.map((t) => "#" + t).join(", ")}`
+        `   \u{1F4CC} Claimed: ${tasks.map((t) => "#" + t).join(", ")}`
       );
     }
 
-    // Show GitHub link if available
     const member = members.find(
       (m) => m.name === s.user || m.github === s.user
     );
