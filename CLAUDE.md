@@ -1,110 +1,85 @@
-# [Projektname]
-[Einzeilige Beschreibung — wird beim Setup ausgefüllt]
+# Claude Cortex — Starter Team Template
 
-<!-- CORTEX:WICHTIG:START -->
-## WICHTIG (Top 3 Regeln)
-- MUST: Erkläre jede Änderung in einfacher, nicht-technischer Sprache
-- MUST: Frag bevor du Dateien löschst oder Features entfernst
-- MUST: Teste bevor du sagst dass du fertig bist
-<!-- CORTEX:WICHTIG:END -->
+Shared learning system, hooks, and agents for Claude Code teams.
 
-<!-- CORTEX:ROUTING:START -->
-## Skill-Routing (MUST follow)
+## Top Rules
 
-| User sagt... | Aktion |
+- MUST: Explain every change in simple, non-technical language (3-5 sentences)
+- MUST: Ask before deleting files or removing features
+- MUST: Follow the full pipeline: Coder → Test-Runner → Code-Review → Sanity Check
+- MUST: Never commit directly to main/master — always use feature branches
+
+## Development Pipeline
+
+Every coding task follows this flow. No exceptions.
+
+```
+1. Plan Mode        → Discuss requirements, design, get approval
+2. core--coder      → Write code + basic tests, commit
+3. core--test-runner → Run ALL tests, find edge cases
+4. core--code-review → Fresh eyes on quality + security
+5. sanity-check     → Does everything fit together?
+6. Done             → Merge
+```
+
+Details: @.claude/rules/agent-routing.md
+
+## Agents (8)
+
+| Agent | Purpose |
+|-------|---------|
+| **core--coder** | Writes code + tests. Dispatch for tasks >10 lines. |
+| **core--test-runner** | Tests everything. MANDATORY after every coder task. |
+| **core--code-review** | Reviews code quality. MANDATORY after test-runner. |
+| **pre--architect** | Deep analysis before complex features. |
+| **fix--error-translator** | Translates errors into simple explanations + fixes. |
+| **fix--root-cause-finder** | Finds the root cause of bugs, not just symptoms. |
+| **start--onboarding** | One-time codebase scan for new projects. |
+| **util--pr-writer** | Writes PR descriptions from git diff. |
+
+## Skill Routing
+
+| User says... | Action |
 |---|---|
-| UI/Design/Seite/Website bauen | → Design-Flow starten (@.claude/rules/design-flow.md) |
-| "Neues Projekt starten" | project-discovery → scaffolding |
-| "Welche Farben/Fonts/Style?" | ui-ux-pro-max |
-| Code schreiben/Feature bauen | → coder Agent dispatchen |
-| "Review"/"Prüfe den Code" | → code-review Agent dispatchen |
-| Fehler/Bug/Error | → error-whisperer + debug-investigator |
+| "Build feature X", code task | → Plan Mode → core--coder pipeline |
+| UI/Design/Website | → Design flow (@.claude/rules/design-flow.md) |
+| "New project" | → project-discovery → scaffolding |
+| "Colors/fonts/style?" | → ui-ux-pro-max skill |
+| Error/Bug | → fix--error-translator + fix--root-cause-finder |
+| "Check everything" | → sanity-check skill |
 
-## Agent-System (15 Agents + 5 Plugins — MUST use)
-- Große Tasks (50+ Zeilen): MUST als Subagent dispatchen
-- Kleine Tasks (<10 Zeilen): Claude darf selbst, aber befolgt Agent-Regeln
-- Reviews/Analysen: IMMER als Subagent (frische Augen)
-- Parallele Tasks: Mehrere Agents gleichzeitig dispatchen
-- Plugins: code-review, code-simplifier, feature-dev, claude-md-management, skill-creator
-- Details: @.claude/rules/agent-routing.md
-<!-- CORTEX:ROUTING:END -->
+## Communication
 
-## Commands
-`npm run dev` · `npm run build` · `npm run test` · `npm run lint`
+- Explain EVERY code change: what changed + why, in simple language
+- Use analogies for technical concepts
+- Ask before making assumptions
+- Warn before breaking changes — wait for explicit approval
 
-<!-- CORTEX:KOMMUNIKATION:START -->
-## Kommunikation (Nicht-Programmierer)
-- Erkläre JEDE Code-Änderung in 3-5 einfachen Sätzen: Was + Warum
-- Nutze Analogien für technische Konzepte
-- Bei fehlenden Informationen: FRAG bevor du Annahmen triffst
-- Vor Breaking Changes: Warnung + explizite Bestätigung abwarten
-<!-- CORTEX:KOMMUNIKATION:END -->
+## Git
 
-<!-- CORTEX:WORKFLOW:START -->
-## Workflow
-- MUST: Plan zeigen und auf Genehmigung warten bevor Code geschrieben wird
-- MUST: Kleine, testbare Schritte — nicht 20 Dateien auf einmal
-- MUST: Git-Commit nach jeder sinnvollen Änderung
-- MUST: `npm run lint` und `npm run test` vor jedem Commit
-- Branch-Naming: feature/beschreibung, fix/beschreibung
-- Commit-Messages: <typ>: <beschreibung> (feat, fix, refactor, docs, test, chore)
-<!-- CORTEX:WORKFLOW:END -->
+- Branch naming: feature/description, fix/description
+- Commit messages: <type>: <description> (feat, fix, refactor, docs, test, chore)
+- MUST: Review `git diff` before committing — check for hardcoded values and secrets
+- MUST: Checkpoint commit before large refactors
 
-<!-- CORTEX:GIT:START -->
-## Git-Workflow
-- NEVER: Direkt auf main/master committen — immer Feature-Branches
-- NEVER: Force push — zerstört shared History
-- MUST: Checkpoint-Commit vor großen Refactors
-- MUST: `git diff` reviewen vor dem Commit — prüfe auf hardcoded Values und Secrets
-<!-- CORTEX:GIT:END -->
+## Telegram Bot
 
-## Projekt-Struktur
-[Wird beim Scaffolding automatisch ausgefüllt]
+- Worker: cortex-team-bot.twilight-resonance-f2fc.workers.dev
+- Setup: docs/QUICKSTART-TELEGRAM.md
+- Session hooks auto-notify Telegram on start/end
 
-## Gotchas
-[Wird über die Zeit durch das Lernsystem gefüllt]
+## Reference Rules
 
-<!-- CORTEX:SETUP:START -->
-## Setup (Erstinstallation)
-
-Cortex zu einem bestehenden Projekt hinzufügen:
-```bash
-git clone --depth 1 https://github.com/NabilW1995/claude-cortex.git .cortex-temp && node .cortex-temp/scripts/template/install.js . && rm -rf .cortex-temp
-```
-
-Nach der Installation:
-```bash
-npm install                                    # Dependencies
-npm run db:init                                # Learning-Datenbank
-browser-use install && browser-use doctor      # Browser Use CLI (optional)
-```
-
-Cortex updaten:
-```bash
-npm run cortex:update
-```
-<!-- CORTEX:SETUP:END -->
-
-<!-- CORTEX:REFS:START -->
-## Reference Documents (Detail-Regeln)
-@.claude/rules/agent-routing.md — Wann welcher Agent automatisch laufen MUSS
-@.claude/rules/design-flow.md — Design-Workflow: Stitch vs Lokal, Schritt-für-Schritt
-@.claude/rules/browser-use.md — Browser Use CLI Commands & Regeln
-@.claude/rules/testing.md — Testing-Pyramide, TDD, E2E mit Browser Use
-@.claude/rules/lernsystem.md — Korrektur-Erkennung, Learning-Extraktion, Zweisprachig
-@.claude/rules/sub-agent-regeln.md — Was Sub-Agents dürfen und nicht dürfen
-@.claude/rules/code-quality.md — Code-Qualitätsstandards
-@.claude/rules/non-programmer.md — Ausführliche Kommunikationsregeln
-@.claude/rules/web-development.md — Frontend + Backend Patterns
-@.claude/rules/security.md — Sicherheits-Checkliste
-@.claude/rules/git-workflow.md — Git Best Practices
-@.claude/rules/accessibility.md — Barrierefreiheit
-@.claude/rules/input-sanitization.md — XSS, CSRF, SQL Injection Prevention
-<!-- CORTEX:REFS:END -->
-
-<!-- CORTEX:WICHTIG_REPEAT:START -->
-## WICHTIG (Wiederholung)
-- MUST: Erkläre jede Änderung in einfacher, nicht-technischer Sprache
-- MUST: Frag bevor du Dateien löschst oder Features entfernst
-- MUST: Teste bevor du sagst dass du fertig bist
-<!-- CORTEX:WICHTIG_REPEAT:END -->
+@.claude/rules/agent-routing.md — Development pipeline and agent dispatch rules
+@.claude/rules/design-flow.md — Design workflow (Stitch vs local)
+@.claude/rules/code-quality.md — Code quality standards
+@.claude/rules/security.md — Security checklist
+@.claude/rules/git-workflow.md — Git best practices
+@.claude/rules/web-development.md — Frontend + backend patterns
+@.claude/rules/testing.md — Testing pyramid
+@.claude/rules/lernsystem.md — Learning system (correction detection, SQLite DB)
+@.claude/rules/sub-agent-regeln.md — Sub-agent rules
+@.claude/rules/non-programmer.md — Communication rules for non-programmers
+@.claude/rules/accessibility.md — Accessibility standards
+@.claude/rules/input-sanitization.md — XSS, CSRF, SQL injection prevention
+@.claude/rules/browser-use.md — Browser Use CLI commands
