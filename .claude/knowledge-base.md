@@ -39,5 +39,27 @@ Jeder Eintrag MUSS seine Quelle zitieren:
 - Korrektur: express-session mit cookie:{httpOnly:true, secure:true}
 - [Source: learning-db #2, approved 2026-03-31]
 
+## Platform & Infrastructure
+
+### Cloudflare KV: TTL minimum is 60 seconds
+- Mistake: Set expirationTtl to 30s — Worker crashed with 500 error
+- Fix: Always use at least 60 as expirationTtl value
+- [Source: learning-db #5, approved 2026-04-01]
+
+### Telegram: Session-end must not fire on context compression
+- Mistake: Session-end hook fired on Claude context compression — user showed as offline
+- Fix: Use KV TTL (2h) for auto-expire instead of explicit deletion on session-end
+- [Source: learning-db #6, approved 2026-04-01]
+
+### grammy: Always wrap answerCallbackQuery in try/catch
+- Mistake: Old callback queries crashed the bot with "query too old" error
+- Fix: try/catch around all answerCallbackQuery() + global bot.catch() error handler
+- [Source: learning-db #7, approved 2026-04-01]
+
+### Telegram: sendMessage needs explicit parse_mode HTML
+- Mistake: HTML tags (<b>, <a>) displayed as raw text instead of formatted
+- Fix: Set parse_mode: "HTML" on every direct fetch call to Telegram API
+- [Source: learning-db #8, approved 2026-04-01]
+
 ## Known Failure Modes
 (none yet)
