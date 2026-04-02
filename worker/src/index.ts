@@ -2912,11 +2912,13 @@ async function handleSession(
   const sessions = await getActiveSessions(env.PROJECTS, projectId);
 
   if (update.type === "start") {
-    // Remove old entry if exists, then add fresh (refreshes time + TTL)
+    // Preserve original "since" time if user is already active (context compression re-fires start)
+    const existingStart = sessions.find((s) => s.user === update.user)?.since;
     const filtered = sessions.filter((s) => s.user !== update.user);
     filtered.push({
       user: update.user,
-      since: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
+      since: existingStart ||
+        new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
     });
     await setActiveSessions(env.PROJECTS, projectId, filtered);
     // Log session start to D1 for work hours tracking
