@@ -442,13 +442,46 @@ function isOnline() {
   });
 }
 
+/**
+ * Notification dedup — only one Claude session sends Telegram notifications.
+ * Uses a lockfile with the session ID. If another session holds the lock, skip.
+ */
+function acquireNotifyLock(projectDir) {
+  const lockFile = path.join(projectDir, '.claude', 'logs', '.notify-lock');
+  const sessionFile = path.join(projectDir, '.claude', 'logs', '.session-id');
+  const mySession = fs.existsSync(sessionFile) ? fs.readFileSync(sessionFile, 'utf-8').trim() : '';
+
+  try {
+    if (fs.existsSync(lockFile)) {
+      const lock = JSON.parse(fs.readFileSync(lockFile, 'utf-8'));
+      const lockAge = Date.now() - (lock.timestamp || 0);
+      // Lock expires after 30 minutes (stale session)
+      if (lockAge < 30 * 60 * 1000 && lock.session !== mySession) {
+        return false; // Another session holds the lock
+      }
+    }
+    // Acquire or refresh the lock
+    const dir = path.dirname(lockFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(lockFile, JSON.stringify({ session: mySession, timestamp: Date.now() }));
+    return true;
+  } catch {
+    return true; // On error, allow notifications (fail open)
+  }
+}
+
 async function notifySessionStart(projectDir) {
   const config = loadBotConfig(projectDir);
-  if (!config) return; // Telegram not configured — silent skip
+  if (!config) return;
 
-  // Skip all network calls if offline
   if (!(await isOnline())) {
     console.error('[Notify] Offline — skipping Telegram notifications');
+    return;
+  }
+
+  // Dedup: only one Claude session sends notifications
+  if (!acquireNotifyLock(projectDir)) {
+    console.error('[Notify] Another session holds the notification lock — skipping');
     return;
   }
 
