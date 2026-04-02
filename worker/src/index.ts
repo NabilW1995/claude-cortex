@@ -2794,6 +2794,38 @@ async function handleGitHubPush(
     commit_count: commits.length,
   });
 
+  // Check for merge conflicts on open PRs after push to main
+  if (isMainBranch && project.githubToken) {
+    try {
+      const prsRes = await fetch(
+        `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+        { headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken } }
+      );
+      if (prsRes.ok) {
+        const prs = await prsRes.json() as Array<{
+          number: number; title: string; mergeable: boolean | null; html_url: string;
+        }>;
+        const conflicts = prs.filter((pr) => pr.mergeable === false);
+        if (conflicts.length > 0) {
+          const conflictMsg = conflicts
+            .map((pr) => `\u{26A0}\u{FE0F} PR #${pr.number} "${pr.title}"\n\u{1F517} ${pr.html_url}`)
+            .join("\n\n");
+          const body: Record<string, unknown> = {
+            chat_id: project.chatId,
+            text: `\u{1F6A8} <b>Merge conflicts after push to ${branch}:</b>\n\n${conflictMsg}`,
+            parse_mode: "HTML", disable_web_page_preview: true,
+          };
+          if (project.threadId) body.message_thread_id = project.threadId;
+          await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify(body),
+          });
+        }
+      }
+    } catch {}
+  }
+
   return new Response("OK");
 }
 
@@ -3166,20 +3198,257 @@ export default {
     }
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    // Cron runs every 30 minutes
-    // Phase 3: Session cleanup (KV TTL handles this automatically)
-    // Phase 4 will add: stale PR detection, daily/weekly digests
-    console.log("[Cron] Scheduled check running");
+  async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+    const hour = new Date(event.scheduledTime).getUTCHours();
+    const minute = new Date(event.scheduledTime).getUTCMinutes();
+    const dayOfWeek = new Date(event.scheduledTime).getUTCDay();
 
-    // Iterate registered projects and log status
-    const keys = await env.PROJECTS.list();
-    for (const key of keys.keys) {
-      if (key.name.includes(":") || key.name === "team-members") continue;
-      const sessions = await getActiveSessions(env.PROJECTS, key.name);
-      if (sessions.length > 0) {
-        console.log(`[Cron] ${key.name}: ${sessions.length} active sessions`);
-      }
+    // Every 30 min: stale PR check
+    await checkStalePRs(env);
+
+    // Mon-Fri 07:00 UTC (09:00 CEST): morning digest
+    if (hour === 7 && minute === 0 && dayOfWeek >= 1 && dayOfWeek <= 5) {
+      await sendMorningDigest(env);
+    }
+
+    // Mon-Fri 16:00 UTC (18:00 CEST): evening summary
+    if (hour === 16 && minute === 0 && dayOfWeek >= 1 && dayOfWeek <= 5) {
+      await sendEveningSummary(env);
+    }
+
+    // Friday 15:00 UTC (17:00 CEST): weekly report
+    if (hour === 15 && minute === 0 && dayOfWeek === 5) {
+      await sendWeeklyReport(env);
     }
   },
 };
+
+// ---------------------------------------------------------------------------
+// Cron handlers — stale PRs, digests, reports
+// ---------------------------------------------------------------------------
+
+async function getProjectList(env: Env): Promise<Array<{ id: string; config: ProjectConfig }>> {
+  const keys = await env.PROJECTS.list();
+  const projects: Array<{ id: string; config: ProjectConfig }> = [];
+  for (const key of keys.keys) {
+    if (key.name.includes(":") || key.name === "team-members") continue;
+    const config = await getProject(env.PROJECTS, key.name);
+    if (config) projects.push({ id: key.name, config });
+  }
+  return projects;
+}
+
+async function sendToLoginChannel(env: Env, text: string): Promise<void> {
+  const projects = await getProjectList(env);
+  if (projects.length === 0) return;
+  const p = projects[0].config;
+  const chatId = p.loginChatId || p.chatId;
+  const body: Record<string, unknown> = {
+    chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true,
+  };
+  if (p.loginThreadId) body.message_thread_id = p.loginThreadId;
+  await fetch(`https://api.telegram.org/bot${p.botToken}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function checkStalePRs(env: Env): Promise<void> {
+  const projects = await getProjectList(env);
+  const now = Date.now();
+
+  for (const { id, config: project } of projects) {
+    if (!project.githubToken) continue;
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+        { headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken } }
+      );
+      if (!res.ok) continue;
+
+      const prs = await res.json() as Array<{
+        number: number; title: string; html_url: string; created_at: string;
+        user: { login: string }; requested_reviewers: Array<{ login: string }>; draft: boolean;
+      }>;
+
+      const alerts: string[] = [];
+      for (const pr of prs) {
+        if (pr.draft) continue;
+        const ageHours = (now - new Date(pr.created_at).getTime()) / (1000 * 60 * 60);
+        if (ageHours > 24 && pr.requested_reviewers.length === 0) {
+          alerts.push(`\u{1F6A8} PR #${pr.number} "${pr.title}" by @${pr.user.login} \u{2014} open ${Math.round(ageHours)}h, NO REVIEWER!\n\u{1F517} ${pr.html_url}`);
+        } else if (ageHours > 4 && pr.requested_reviewers.length === 0) {
+          alerts.push(`\u{26A0}\u{FE0F} PR #${pr.number} "${pr.title}" by @${pr.user.login} \u{2014} open ${Math.round(ageHours)}h, no reviewer\n\u{1F517} ${pr.html_url}`);
+        }
+      }
+
+      if (alerts.length > 0) {
+        const alertKey = `stale-alert:${id}`;
+        const lastAlert = await env.PROJECTS.get(alertKey);
+        const lastAlertTime = lastAlert ? parseInt(lastAlert, 10) : 0;
+        if (now - lastAlertTime > 2 * 60 * 60 * 1000) {
+          const body: Record<string, unknown> = {
+            chat_id: project.chatId,
+            text: `\u{1F6A8} <b>Stale PR Alert</b>\n\n${alerts.join("\n\n")}`,
+            parse_mode: "HTML", disable_web_page_preview: true,
+          };
+          if (project.threadId) body.message_thread_id = project.threadId;
+          await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify(body),
+          });
+          await env.PROJECTS.put(alertKey, String(now), { expirationTtl: 7200 });
+        }
+      }
+    } catch (e) {
+      console.error(`[Cron] Stale PR check failed for ${id}:`, e);
+    }
+  }
+}
+
+async function sendMorningDigest(env: Env): Promise<void> {
+  const projects = await getProjectList(env);
+  const members = await getTeamMembers(env.PROJECTS);
+  const lines: string[] = ["\u{2600}\u{FE0F} <b>Morning Digest</b>", "\u{2500}".repeat(25), ""];
+
+  // Who is online
+  let anyOnline = false;
+  for (const { id, config: _ } of projects) {
+    const sessions = await getActiveSessions(env.PROJECTS, id);
+    for (const s of sessions) {
+      anyOnline = true;
+      const color = getUserColorByName(members, s.user);
+      lines.push(`${color} ${s.user} \u{2014} ${id} (since ${s.since})`);
+    }
+  }
+  if (!anyOnline) lines.push("Nobody online yet.");
+
+  // Open tasks per project
+  lines.push("");
+  lines.push("<b>Open Tasks:</b>");
+  for (const { id, config: project } of projects) {
+    if (!project.githubToken) continue;
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${project.githubRepo}/issues?state=open&per_page=100`,
+        { headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken } }
+      );
+      if (res.ok) {
+        const issues = await res.json() as Array<{ number: number }>;
+        lines.push(`\u{2022} ${id}: ${issues.length} open`);
+      }
+    } catch {}
+  }
+
+  // Open PRs
+  lines.push("");
+  lines.push("<b>Open PRs:</b>");
+  let anyPR = false;
+  for (const { id, config: project } of projects) {
+    if (!project.githubToken) continue;
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${project.githubRepo}/pulls?state=open`,
+        { headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken } }
+      );
+      if (res.ok) {
+        const prs = await res.json() as Array<{ number: number; title: string; user: { login: string } }>;
+        for (const pr of prs) {
+          anyPR = true;
+          lines.push(`\u{2022} ${id} #${pr.number}: ${pr.title} (@${pr.user.login})`);
+        }
+      }
+    } catch {}
+  }
+  if (!anyPR) lines.push("No open PRs.");
+
+  await sendToLoginChannel(env, lines.join("\n"));
+}
+
+async function sendEveningSummary(env: Env): Promise<void> {
+  const stats = await getTodayStats(env.DB);
+  const workHours = await getWorkHoursToday(env.DB);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  const lines: string[] = ["\u{1F319} <b>Evening Summary</b>", "\u{2500}".repeat(25), ""];
+  lines.push(`\u{1F4DD} Issues: ${stats.issues_opened} opened, ${stats.issues_closed} closed`);
+  lines.push(`\u{1F500} PRs: ${stats.prs_merged} merged, ${stats.prs_open} opened`);
+  lines.push(`\u{1F4CA} Total events: ${stats.total_events}`);
+
+  if (workHours.length > 0) {
+    lines.push("");
+    lines.push("<b>Work Hours:</b>");
+    for (const w of workHours) {
+      const color = getUserColorByName(members, w.user_id);
+      const hours = Math.floor(w.total_minutes / 60);
+      const mins = w.total_minutes % 60;
+      lines.push(`${color} ${w.user_id}: ${hours}h ${mins}m`);
+    }
+  }
+
+  await sendToLoginChannel(env, lines.join("\n"));
+}
+
+async function sendWeeklyReport(env: Env): Promise<void> {
+  const members = await getTeamMembers(env.PROJECTS);
+
+  // Get this week's events from D1
+  let weekIssuesOpened = 0, weekIssuesClosed = 0, weekPRsMerged = 0, weekTotalEvents = 0;
+  const contributorMap = new Map<string, number>();
+
+  try {
+    const opened = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.opened' AND created_at > datetime('now', '-7 days')"
+    ).first<{ c: number }>();
+    weekIssuesOpened = opened?.c || 0;
+
+    const closed = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND created_at > datetime('now', '-7 days')"
+    ).first<{ c: number }>();
+    weekIssuesClosed = closed?.c || 0;
+
+    const merged = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'pr.merged' AND created_at > datetime('now', '-7 days')"
+    ).first<{ c: number }>();
+    weekPRsMerged = merged?.c || 0;
+
+    const total = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE created_at > datetime('now', '-7 days')"
+    ).first<{ c: number }>();
+    weekTotalEvents = total?.c || 0;
+
+    // Top contributors
+    const contributors = await env.DB.prepare(
+      "SELECT actor, COUNT(*) as actions FROM events WHERE created_at > datetime('now', '-7 days') GROUP BY actor ORDER BY actions DESC LIMIT 5"
+    ).all<{ actor: string; actions: number }>();
+    if (contributors.results) {
+      for (const c of contributors.results) {
+        contributorMap.set(c.actor, c.actions);
+      }
+    }
+  } catch {}
+
+  const net = weekIssuesClosed - weekIssuesOpened;
+  const netIcon = net > 0 ? "\u{2705}" : net < 0 ? "\u{26A0}\u{FE0F}" : "\u{2796}";
+
+  const lines: string[] = ["\u{1F4C8} <b>Weekly Report</b>", "\u{2500}".repeat(25), ""];
+  lines.push(`\u{1F4DD} Issues: ${weekIssuesOpened} opened, ${weekIssuesClosed} closed (${netIcon} ${net >= 0 ? "+" : ""}${net} net)`);
+  lines.push(`\u{1F500} PRs merged: ${weekPRsMerged}`);
+  lines.push(`\u{1F4CA} Total events: ${weekTotalEvents}`);
+
+  if (contributorMap.size > 0) {
+    lines.push("");
+    lines.push("<b>Top Contributors:</b>");
+    const medals = ["\u{1F947}", "\u{1F948}", "\u{1F949}", "4.", "5."];
+    let i = 0;
+    for (const [actor, actions] of contributorMap) {
+      const color = getUserColorByName(members, actor);
+      lines.push(`${medals[i] || "\u{2022}"} ${color} ${actor}: ${actions} actions`);
+      i++;
+    }
+  }
+
+  await sendToLoginChannel(env, lines.join("\n"));
+}
