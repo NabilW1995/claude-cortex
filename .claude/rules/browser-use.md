@@ -6,20 +6,20 @@ globs: "**/*.{test,spec}.{ts,tsx,js,jsx}"
 # Browser Use CLI
 
 ## Commands
-`browser-use doctor`              # Installation prüfen
-`browser-use open <url>`          # Seite öffnen
-`browser-use state`               # Sichtbare Elemente + Indizes anzeigen
-`browser-use screenshot [path]`   # Screenshot machen
-`browser-use click <index>`       # Element klicken
-`browser-use input <index> "text"` # Text eingeben
-`browser-use scroll down|up`      # Scrollen
-`browser-use eval "js code"`      # JavaScript ausführen
-`browser-use --headed open <url>` # Browser sichtbar öffnen
-`browser-use close --all`         # Alle Sessions schließen
+`browser-use doctor`              # Check installation
+`browser-use open <url>`          # Open a page
+`browser-use state`               # Show visible elements + indices
+`browser-use screenshot [path]`   # Take a screenshot
+`browser-use click <index>`       # Click an element
+`browser-use input <index> "text"` # Enter text
+`browser-use scroll down|up`      # Scroll
+`browser-use eval "js code"`      # Execute JavaScript
+`browser-use --headed open <url>` # Open browser visibly
+`browser-use close --all`         # Close all sessions
 
-## Regeln
-- MUST: Browser Use statt Playwright für alle E2E Tests und visuelles Review
-- MUST: Nach jedem Design-Build → `browser-use screenshot` zur Kontrolle
-- MUST: `PYTHONIOENCODING=utf-8` setzen auf Windows (Emoji-Fix)
-- Sessions bleiben persistent — kein Neustart nötig zwischen Befehlen
+## Rules
+- MUST: Use Browser Use instead of Playwright for all E2E tests and visual review
+- MUST: After every design build — `browser-use screenshot` to verify
+- MUST: Set `PYTHONIOENCODING=utf-8` on Windows (emoji fix)
+- Sessions remain persistent — no restart needed between commands
 - Docs: https://docs.browser-use.com/open-source/browser-use-cli

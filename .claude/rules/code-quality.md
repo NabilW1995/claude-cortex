@@ -3,12 +3,12 @@ description: Code quality standards - style matching, DRY, TypeScript, error han
 globs: "src/**/*"
 ---
 
-# Code-Qualität
+# Code Quality
 
-- Match den existierenden Stil des Repos — auch wenn er nicht perfekt ist
-- Check ob Logik schon existiert bevor du neue schreibst (DRY)
-- Einfache Funktionen mit einem Zweck — keine Multi-Mode-Funktionen
-- TypeScript strict mode wenn TS genutzt wird — kein `any` Typ
-- Fehler explizit werfen — nie stillschweigend schlucken
-- Error-Messages: klar, actionable, mit Kontext (was ging schief, wo, warum)
-- Keine generischen Catch-All Exception Handler
+- Match the existing style of the repo — even if it's not perfect
+- Check if logic already exists before writing new code (DRY)
+- Simple functions with a single purpose — no multi-mode functions
+- TypeScript strict mode when TS is used — no `any` type
+- Throw errors explicitly — never silently swallow them
+- Error messages: clear, actionable, with context (what went wrong, where, why)
+- No generic catch-all exception handlers

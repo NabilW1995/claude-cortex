@@ -3,30 +3,30 @@ description: Accessibility (a11y) rules for web applications
 globs: "src/**/*.{tsx,jsx,html,vue,svelte}"
 ---
 
-# Barrierefreiheit (Accessibility)
+# Accessibility
 
-## Bilder
-- MUST: Alle img brauchen alt-Text
-- Dekorative Bilder: alt=""
-- Informative Bilder: Beschreibender alt-Text
+## Images
+- MUST: All img elements need alt text
+- Decorative images: alt=""
+- Informative images: Descriptive alt text
 
-## Formulare
-- MUST: Jedes Input braucht ein label (nicht nur Placeholder)
-- MUST: Fehlermeldungen sind mit dem Input verknüpft (aria-describedby)
-- MUST: Required-Felder sind markiert
+## Forms
+- MUST: Every input needs a label (not just a placeholder)
+- MUST: Error messages are linked to the input (aria-describedby)
+- MUST: Required fields are marked
 
-## Farben und Kontrast
-- MUST: Farbkontrast mindestens 4.5:1 (WCAG AA)
-- NEVER: Farbe als einziges Unterscheidungsmerkmal
-- MUST: Focus-Styles sichtbar lassen (nie outline:none global)
+## Colors and Contrast
+- MUST: Color contrast at least 4.5:1 (WCAG AA)
+- NEVER: Color as the only distinguishing feature
+- MUST: Keep focus styles visible (never global outline:none)
 
 ## Navigation
-- MUST: Alle interaktiven Elemente per Tastatur erreichbar
-- MUST: Sinnvolle Heading-Hierarchie (h1, h2, h3 — keine Sprünge)
-- MUST: Skip-to-content Link für Screenreader
-- MUST: aria-labels für Icon-Buttons ohne sichtbaren Text
+- MUST: All interactive elements reachable via keyboard
+- MUST: Meaningful heading hierarchy (h1, h2, h3 — no skipping levels)
+- MUST: Skip-to-content link for screen readers
+- MUST: aria-labels for icon buttons without visible text
 
-## Dynamischer Content
-- MUST: aria-live für dynamisch aktualisierten Content
-- MUST: Modals fangen den Fokus (Focus Trap)
-- MUST: Loading-States sind für Screenreader erkennbar
+## Dynamic Content
+- MUST: aria-live for dynamically updated content
+- MUST: Modals trap focus (focus trap)
+- MUST: Loading states are recognizable for screen readers

@@ -1,102 +1,100 @@
 ---
-description: Agent routing — the core development flow and when to use which agent
+description: Agent routing — the core development flow, dispatch rules, and sub-agent restrictions
 ---
 
 # Agent Routing
 
 ## The Core Flow
 
-Every coding task follows this pipeline:
+Every coding task follows this pipeline. No exceptions.
 
 ```
 Plan Mode (User + Claude)
-  → User describes what they want
-  → Discussion, design, requirements
-  → Plan approved
+  → Discuss requirements, design, get approval
         ↓
 Claude (Orchestrator)
   → Splits plan into tasks
-  → Decides: parallel or sequential?
+  → Decides: parallel or sequential
   → Dispatches subagents
         ↓
 core--coder Agent(s) — one or more in parallel
-  → Writes code + basic tests
+  → Writes code + tests
   → Commits after each task
   → Hooks run automatically (lint, tests, security)
         ↓
 core--test-runner Agent
-  → Runs ALL tests
+  → Runs ALL tests, finds edge cases
   → Writes missing tests
-  → Finds edge cases the coder missed
         ↓
 core--code-review Agent
   → Fresh context = fresh eyes
-  → Checks quality, architecture, security
-  → Suggests simplifications
+  → Quality, architecture, security, simplification
         ↓
 Sanity Check (skill)
-  → Is everything consistent?
-  → Did we forget anything?
-  → Does the feature fit the existing codebase?
+  → Does everything fit together?
         ↓
 Done (or fix round)
 ```
 
-## When to Use Which Agent
+## Agents
 
-### Core Agents (every coding task)
+### Core (every coding task, in this order)
 
-| Agent | When | How |
-|-------|------|-----|
-| **core--coder** | Writing new code, implementing features, refactoring | Subagent for tasks >10 lines. Claude handles <10 lines directly. |
-| **core--test-runner** | AFTER every coder task (mandatory quality gate) | Always dispatch after coder finishes. No code without tests. |
-| **core--code-review** | AFTER test-runner passes | Always dispatch with fresh context. Never skip. |
+| Agent | Purpose |
+|-------|---------|
+| **core--coder** | Writes code + tests. Subagent for tasks >10 lines. |
+| **core--test-runner** | Runs all tests, writes missing ones. MANDATORY after coder. |
+| **core--code-review** | Reviews quality + security. MANDATORY after test-runner. |
 
-### Before Coding (when needed)
+### Before Coding
 
-| Agent | When | How |
-|-------|------|-----|
-| **pre--architect** | Complex decisions, architecture questions, "what's the best approach?" | Dispatch before coding. Results inform the plan. |
+| Agent | Purpose |
+|-------|---------|
+| **pre--architect** | Deep analysis for complex decisions. Dispatch before coding. |
 
 ### Problem Solving (reactive)
 
-| Agent | When | How |
-|-------|------|-----|
-| **fix--error-translator** | User sees an error they don't understand | Translates error to simple language + suggests fix. |
-| **fix--root-cause-finder** | A specific bug needs investigation | Finds the root cause, not just the symptom. |
+| Agent | Purpose |
+|-------|---------|
+| **fix--error-translator** | Translates errors into simple explanations + fixes. |
+| **fix--root-cause-finder** | Finds the root cause of bugs, not just symptoms. |
 
-### Utilities (occasional)
+### Utilities
 
-| Agent | When | How |
-|-------|------|-----|
-| **util--pr-writer** | Before creating a PR | Writes PR description from git diff. |
-| **start--onboarding** | First time in a new project | Scans codebase, gives briefing. One-time use. |
+| Agent | Purpose |
+|-------|---------|
+| **util--pr-writer** | Writes PR descriptions from git diff. |
+| **start--onboarding** | One-time codebase scan for new projects. |
 
-## Automatic Hooks (run without manual trigger)
+## Dispatch Rules
 
-These run automatically on every file edit — no agent needed:
+- MUST: Dispatch subagent for tasks >10 lines
+- MUST: Run core--test-runner after every core--coder task
+- MUST: Run core--code-review after test-runner passes
+- MUST: Run sanity-check skill after code-review (final gate)
+- MUST: Give subagents complete context (files, errors, requirements)
+- MUST: Summarize subagent results in simple language
+- MAY: Handle fixes <10 lines directly without subagent
+
+## Sub-Agent Restrictions
+
+- Sub-agents CANNOT see images or screenshots
+- If a sub-agent writes UI code: main agent MUST do visual review via `browser-use screenshot`
+- Sub-agents follow all CLAUDE.md rules (security, quality, git)
+- Hooks run automatically for sub-agents (same project context)
+
+## Parallel Dispatch
+
+- Independent tasks → multiple core--coder agents in parallel
+- coder + code-review → NEVER parallel (review needs finished code)
+- coder + test-runner → NEVER parallel (tests need the code first)
+
+## Automatic Hooks (no manual trigger needed)
 
 | Hook | What it does |
 |------|-------------|
 | `post-edit-lint.sh` | Formats code (ESLint/Prettier/Biome) |
 | `auto-test.sh` | Runs tests related to changed file |
 | `security-scan.sh` | Checks for secrets, XSS, SQL injection |
-| `session-start.js` | Checks .env against .env.example, loads learnings |
+| `session-start.js` | Loads learnings, checks .env |
 | `heartbeat.js` | Sends presence ping to Telegram bot |
-
-## Parallel Dispatch
-
-When tasks are independent, dispatch multiple coder subagents simultaneously:
-- 3 independent features → 3 core--coder agents in parallel
-- Feature + its tests → sequential (tests need the code first)
-- coder + code-review → NEVER parallel (review needs finished code)
-
-## Rules
-
-- MUST: Run core--test-runner after every core--coder task
-- MUST: Run core--code-review after test-runner passes
-- MUST: Run sanity-check skill after code-review passes (final gate before merge)
-- MUST: Use subagents for tasks >50 lines (fresh context = better quality)
-- MUST: Give subagents complete context (files, errors, requirements)
-- MUST: Summarize subagent results to the user in simple language
-- MAY: Handle small fixes (<10 lines) directly without subagent

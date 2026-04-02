@@ -71,7 +71,7 @@ Details: @.claude/rules/agent-routing.md
 @.claude/rules/git-workflow.md — Git best practices
 @.claude/rules/web-development.md — Frontend + backend patterns
 @.claude/rules/testing.md — Testing pyramid
-@.claude/rules/lernsystem.md — Learning system (correction detection, SQLite DB)
+@.claude/rules/learning-system.md — Learning system (correction detection, SQLite DB)
 @.claude/rules/sub-agent-regeln.md — Sub-agent rules
 @.claude/rules/non-programmer.md — Communication rules for non-programmers
 @.claude/rules/accessibility.md — Accessibility standards

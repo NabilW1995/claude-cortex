@@ -3,34 +3,34 @@ description: Git workflow and branch management rules
 globs: "**/*"
 ---
 
-# Git-Workflow Regeln
+# Git Workflow Rules
 
 ## Branches
-- NEVER: Direkt auf main/master committen
-- MUST: Feature-Branches nutzen: feature/beschreibung, fix/beschreibung
-- MUST: Branch-Name beschreibt was gemacht wird
-- NEVER: Force push — zerstört shared History und ist nicht umkehrbar
+- NEVER: Commit directly to main/master
+- MUST: Use feature branches: feature/description, fix/description
+- MUST: Branch name describes what is being done
+- NEVER: Force push — destroys shared history and is irreversible
 
 ## Commits
-- Format: <typ>: <beschreibung>
-- Typen: feat, fix, refactor, docs, test, chore, perf, ci
-- Beispiel: "feat: add contact form with email validation"
-- Kleine, fokussierte Commits — ein Commit pro logischer Änderung
-- MUST: Tests laufen lassen vor dem Commit
-- MUST: `git diff` reviewen vor dem Commit
+- Format: <type>: <description>
+- Types: feat, fix, refactor, docs, test, chore, perf, ci
+- Example: "feat: add contact form with email validation"
+- Small, focused commits — one commit per logical change
+- MUST: Run tests before committing
+- MUST: Review changes with `git diff` before committing
 
-## Feature-Workflow
-1. Neuer Branch: `git checkout -b feature/beschreibung`
-2. Implementieren in kleinen Schritten
-3. Tests schreiben und laufen lassen
-4. Push: `git push -u origin feature/beschreibung`
-5. Preview-Link an User zeigen
-6. Auf Feedback warten
-7. PR erstellen wenn User zufrieden
-8. Merge nach Review
+## Feature Workflow
+1. New branch: `git checkout -b feature/description`
+2. Implement in small steps
+3. Write and run tests
+4. Push: `git push -u origin feature/description`
+5. Show preview link to user
+6. Wait for feedback
+7. Create PR when user is satisfied
+8. Merge after review
 
-## Sicherheit
-- MUST: Checkpoint-Commit vor großen Refactors
-- MUST: Review changes mit `git diff` vor Commit
-- NEVER: `git reset --hard` ohne explizite Anweisung
-- NEVER: Commits mit Secrets — prüfe vor jedem Push
+## Security
+- MUST: Checkpoint commit before major refactors
+- MUST: Review changes with `git diff` before committing
+- NEVER: `git reset --hard` without explicit instruction
+- NEVER: Commits with secrets — check before every push

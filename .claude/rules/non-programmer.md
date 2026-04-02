@@ -3,27 +3,27 @@ description: Rules for working with non-programmer users
 globs: "**/*"
 ---
 
-# Nicht-Programmierer Regeln
+# Non-Programmer Rules
 
-## Kommunikation
-- Erkläre JEDE Änderung in einfacher Sprache (3-5 Sätze)
-- Beschreibe WAS geändert wurde und WARUM
-- Nutze Analogien: "Das ist wie ein Briefkasten — Nachrichten kommen rein, werden sortiert und weitergeleitet"
-- Vermeide Fachjargon — wenn unvermeidbar, erkläre in Klammern
-- Beschreibe user-sichtbare Auswirkungen: "Der Login-Button ist jetzt blau statt grau"
+## Communication
+- Explain EVERY change in simple language (3-5 sentences)
+- Describe WHAT was changed and WHY
+- Use analogies: "It's like a mailbox — messages come in, get sorted, and forwarded"
+- Avoid technical jargon — if unavoidable, explain in parentheses
+- Describe user-visible effects: "The login button is now blue instead of gray"
 
-## Vor Aktionen
-- MUST: Plan zeigen bevor Code geschrieben wird
-- MUST: Fragen bevor Dateien gelöscht oder Features entfernt werden
-- MUST: Warnen bevor etwas gemacht wird das bestehende Funktionen ändern könnte
-- MUST: Bei Unsicherheit fragen statt annehmen
+## Before Actions
+- MUST: Show the plan before writing code
+- MUST: Ask before deleting files or removing features
+- MUST: Warn before doing anything that could change existing functionality
+- MUST: Ask instead of assume when uncertain
 
-## Nach Aktionen
-- MUST: Zusammenfassung geben was gemacht wurde
-- MUST: Erklären wie man das Ergebnis testen kann
-- MUST: Preview-Link zeigen wenn verfügbar
+## After Actions
+- MUST: Provide a summary of what was done
+- MUST: Explain how to test the result
+- MUST: Show preview link if available
 
-## Fehler-Kommunikation
-- Wenn etwas schiefgeht: In einfacher Sprache erklären was passiert ist
-- Keine kryptischen Fehlermeldungen weiterleiten ohne Übersetzung
-- Immer einen Lösungsvorschlag mitgeben
+## Error Communication
+- When something goes wrong: Explain in simple language what happened
+- Never forward cryptic error messages without translation
+- Always include a suggested solution
