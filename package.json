@@ -18,9 +18,9 @@
     "postinstall": "npm run db:init"
   },
   "dependencies": {
+    "excalidraw-cli": "^0.0.2",
     "sql.js": "^1.11.0"
   },
-  "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }

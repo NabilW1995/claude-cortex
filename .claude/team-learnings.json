@@ -33,6 +33,51 @@
       "times_applied": 0
     },
     {
+      "fingerprint": "b2dc37719e66",
+      "category": "Infra",
+      "rule": "Cloudflare KV TTL Minimum ist 60 Sekunden",
+      "rule_en": "Cloudflare KV TTL minimum is 60 seconds",
+      "mistake": "TTL auf 30s gesetzt - Worker crashte",
+      "mistake_en": "Set TTL to 30s - Worker crashed",
+      "correction": "Mindestens 60 als expirationTtl",
+      "correction_en": "Use at least 60 as expirationTtl",
+      "confidence": 0.9,
+      "project": "claude-cortex",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-02T01:13:57.549Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "e971d9ad2621",
+      "category": "Telegram",
+      "rule": "Session-End nicht bei Context-Komprimierung feuern",
+      "rule_en": "Do not fire session-end on context compression",
+      "mistake": "User wurde offline angezeigt bei Komprimierung",
+      "mistake_en": "User showed offline on compression",
+      "correction": "KV TTL auto-expire statt explizit loeschen",
+      "correction_en": "KV TTL auto-expire instead of explicit deletion",
+      "confidence": 0.9,
+      "project": "claude-cortex",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-02T01:13:57.550Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "66a6ff97ae9b",
+      "category": "Telegram",
+      "rule": "grammy answerCallbackQuery in try/catch wrappen",
+      "rule_en": "Wrap grammy answerCallbackQuery in try/catch",
+      "mistake": "Bot crashte bei alten Callbacks",
+      "mistake_en": "Bot crashed on old callbacks",
+      "correction": "try/catch + globaler bot.catch() Handler",
+      "correction_en": "try/catch + global bot.catch() handler",
+      "confidence": 0.9,
+      "project": "claude-cortex",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-02T01:13:57.550Z",
+      "times_applied": 0
+    },
+    {
       "fingerprint": "ca4bb7b2b3e5",
       "category": "CSS",
       "rule": "Bei Zentrierung: Container braucht max-width und margin: 0 auto",
@@ -60,6 +105,21 @@
       "project": "webshop",
       "shared_by": "Nabil",
       "shared_at": "2026-03-30T22:03:32.772Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "043bf4c2c9c0",
+      "category": "Telegram",
+      "rule": "Telegram sendMessage braucht parse_mode HTML",
+      "rule_en": "Telegram sendMessage needs parse_mode HTML",
+      "mistake": "HTML-Tags als Text angezeigt",
+      "mistake_en": "HTML tags displayed as text",
+      "correction": "parse_mode HTML bei jedem fetch setzen",
+      "correction_en": "Set parse_mode HTML on every fetch",
+      "confidence": 0.8,
+      "project": "claude-cortex",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-02T01:13:57.550Z",
       "times_applied": 0
     }
   ]
