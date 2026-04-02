@@ -19,17 +19,17 @@ Claude (Orchestrator)
   → Decides: parallel or sequential?
   → Dispatches subagents
         ↓
-Coder Agent(s) — one or more in parallel
+core--coder Agent(s) — one or more in parallel
   → Writes code + basic tests
   → Commits after each task
   → Hooks run automatically (lint, tests, security)
         ↓
-Test-Runner Agent
+core--test-runner Agent
   → Runs ALL tests
   → Writes missing tests
   → Finds edge cases the coder missed
         ↓
-Code-Review Agent
+core--code-review Agent
   → Fresh context = fresh eyes
   → Checks quality, architecture, security
   → Suggests simplifications
@@ -43,30 +43,29 @@ Done (or fix round)
 
 | Agent | When | How |
 |-------|------|-----|
-| **coder** | Writing new code, implementing features, refactoring | Subagent for tasks >10 lines. Claude handles <10 lines directly. |
-| **test-runner** | AFTER every coder task (mandatory quality gate) | Always dispatch after coder finishes. No code without tests. |
-| **code-review** | AFTER test-runner passes | Always dispatch with fresh context. Never skip. |
+| **core--coder** | Writing new code, implementing features, refactoring | Subagent for tasks >10 lines. Claude handles <10 lines directly. |
+| **core--test-runner** | AFTER every coder task (mandatory quality gate) | Always dispatch after coder finishes. No code without tests. |
+| **core--code-review** | AFTER test-runner passes | Always dispatch with fresh context. Never skip. |
 
 ### Before Coding (when needed)
 
 | Agent | When | How |
 |-------|------|-----|
-| **deep-dive** | Complex decisions, architecture questions, "what's the best approach?" | Dispatch before coding. Results inform the plan. |
+| **pre--architect** | Complex decisions, architecture questions, "what's the best approach?" | Dispatch before coding. Results inform the plan. |
 
 ### Problem Solving (reactive)
 
 | Agent | When | How |
 |-------|------|-----|
-| **error-whisperer** | User sees an error they don't understand | Translates error to simple language + suggests fix. |
-| **debug-investigator** | A specific bug needs investigation | Traces the root cause step by step. |
+| **fix--error-translator** | User sees an error they don't understand | Translates error to simple language + suggests fix. |
+| **fix--root-cause-finder** | A specific bug needs investigation | Finds the root cause, not just the symptom. |
 
 ### Utilities (occasional)
 
 | Agent | When | How |
 |-------|------|-----|
-| **pr-ghostwriter** | Before creating a PR | Writes PR description from git diff. |
-| **env-validator** | Session start, before deploy | Checks env vars, tools, dependencies. |
-| **onboarding-sherpa** | First time in a new project | Scans codebase, gives briefing. |
+| **util--pr-writer** | Before creating a PR | Writes PR description from git diff. |
+| **start--onboarding** | First time in a new project | Scans codebase, gives briefing. One-time use. |
 
 ## Automatic Hooks (run without manual trigger)
 
@@ -77,19 +76,20 @@ These run automatically on every file edit — no agent needed:
 | `post-edit-lint.sh` | Formats code (ESLint/Prettier/Biome) |
 | `auto-test.sh` | Runs tests related to changed file |
 | `security-scan.sh` | Checks for secrets, XSS, SQL injection |
+| `session-start.js` | Checks .env against .env.example, loads learnings |
 | `heartbeat.js` | Sends presence ping to Telegram bot |
 
 ## Parallel Dispatch
 
 When tasks are independent, dispatch multiple coder subagents simultaneously:
-- 3 independent features → 3 coder agents in parallel
+- 3 independent features → 3 core--coder agents in parallel
 - Feature + its tests → sequential (tests need the code first)
 - coder + code-review → NEVER parallel (review needs finished code)
 
 ## Rules
 
-- MUST: Run test-runner after every coder task
-- MUST: Run code-review after test-runner passes
+- MUST: Run core--test-runner after every core--coder task
+- MUST: Run core--code-review after test-runner passes
 - MUST: Use subagents for tasks >50 lines (fresh context = better quality)
 - MUST: Give subagents complete context (files, errors, requirements)
 - MUST: Summarize subagent results to the user in simple language
