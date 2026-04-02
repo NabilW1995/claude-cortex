@@ -65,6 +65,15 @@ const sessionId = `session-${Date.now()}`;
     }
   }
 
+  // Hook smoke test — verify critical hooks exist
+  const criticalHooks = ['guard-bash.sh', 'security-scan.sh', 'post-edit-lint.sh', 'auto-test.sh'];
+  const hooksDir = path.join(projectDir, 'scripts', 'hooks');
+  const missingHooks = criticalHooks.filter(h => !fs.existsSync(path.join(hooksDir, h)));
+  if (missingHooks.length > 0) {
+    console.error(`\n[Hook Check] Missing critical hooks: ${missingHooks.join(', ')}`);
+    console.error('[Hook Check] Run: npm run cortex:update to restore them');
+  }
+
   // Notify Telegram (outside DB try/catch — always fires even if DB fails)
   try {
     const { notifySessionStart } = require('../bot/notify');
