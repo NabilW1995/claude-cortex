@@ -78,6 +78,7 @@ function loadBotConfig(projectDir) {
     const loginThreadId = vars.TELEGRAM_LOGIN_THREAD_ID || '';
     const workerUrl = vars.CORTEX_WORKER_URL || '';
     const projectId = vars.CORTEX_PROJECT_ID || '';
+    const botSecret = vars.TEAM_BOT_SECRET || '';
 
     // Both token and chatId are required
     if (!token || !chatId) return null;
@@ -89,7 +90,8 @@ function loadBotConfig(projectDir) {
       loginChatId: loginChatId || null,
       loginThreadId: loginThreadId || null,
       workerUrl: workerUrl || null,
-      projectId: projectId || null
+      projectId: projectId || null,
+      botSecret: botSecret || null
     };
   } catch {
     return null;
@@ -261,15 +263,22 @@ function getBranchInfo(projectDir) {
  * Notify the Worker of a session event (start/end) and optionally fetch active sessions.
  * Returns active sessions array or empty array on failure.
  */
-function workerRequest(workerUrl, projectId, method, path, body) {
+function workerRequest(workerUrl, projectId, method, path, body, botSecret) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, workerUrl);
     const data = body ? JSON.stringify(body) : null;
     const mod = url.protocol === 'https:' ? https : require('http');
 
+    const headers = {};
+    if (data) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(data);
+    }
+    if (botSecret) headers['Authorization'] = `Bearer ${botSecret}`;
+
     const req = mod.request(url, {
       method: method,
-      headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}
+      headers
     }, (res) => {
       let result = '';
       res.on('data', c => result += c);
@@ -296,11 +305,11 @@ async function workerSessionStart(config, user) {
   // Register this session with the Worker
   console.error(`[Worker] Registering session start for ${user} at ${config.workerUrl}/session/${config.projectId}`);
   const regResult = await workerRequest(config.workerUrl, config.projectId, 'POST',
-    `/session/${config.projectId}`, { type: 'start', user, message: '' });
+    `/session/${config.projectId}`, { type: 'start', user, message: '' }, config.botSecret);
   console.error(`[Worker] Session register result: ${JSON.stringify(regResult)}`);
   // Fetch all active sessions
   const data = await workerRequest(config.workerUrl, config.projectId, 'GET',
-    `/sessions/${config.projectId}`, null);
+    `/sessions/${config.projectId}`, null, config.botSecret);
   if (data && Array.isArray(data.sessions)) {
     return data.sessions.filter(s => s.user !== user); // exclude self
   }
@@ -313,7 +322,7 @@ async function workerSessionStart(config, user) {
 async function workerSessionEnd(config, user) {
   if (!config.workerUrl || !config.projectId) return;
   await workerRequest(config.workerUrl, config.projectId, 'POST',
-    `/session/${config.projectId}`, { type: 'end', user, message: '' });
+    `/session/${config.projectId}`, { type: 'end', user, message: '' }, config.botSecret);
 }
 
 /**
@@ -445,7 +454,7 @@ async function notifySessionStart(projectDir) {
   if (config.workerUrl && config.projectId) {
     try {
       await workerRequest(config.workerUrl, config.projectId, 'POST',
-        `/dashboard/${config.projectId}`, {});
+        `/dashboard/${config.projectId}`, {}, config.botSecret);
       console.error('[Notify] Dashboard updated');
     } catch (e) {
       console.error(`[Notify] Dashboard update failed: ${e.message}`);
@@ -499,7 +508,7 @@ async function notifySessionEnd(projectDir, stats) {
   if (config.workerUrl && config.projectId) {
     try {
       await workerRequest(config.workerUrl, config.projectId, 'POST',
-        `/dashboard/${config.projectId}`, {});
+        `/dashboard/${config.projectId}`, {}, config.botSecret);
     } catch {}
   }
 
@@ -624,7 +633,7 @@ async function sendHeartbeat(projectDir) {
         lastFiles,
         lastCommit,
         project: projectName
-      });
+      }, config.botSecret);
     console.error('[Notify] Heartbeat sent');
   } catch (e) {
     console.error(`[Notify] Heartbeat failed: ${e.message}`);

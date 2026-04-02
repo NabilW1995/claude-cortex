@@ -21,6 +21,7 @@ interface Env {
   PROJECTS: KVNamespace;
   DB: D1Database;
   GITHUB_WEBHOOK_SECRET?: string;
+  TEAM_BOT_SECRET?: string;
 }
 
 interface ProjectConfig {
@@ -182,6 +183,16 @@ async function verifyGitHubSignature(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Auth helper — protects sensitive endpoints
+// ---------------------------------------------------------------------------
+
+function verifyBotSecret(request: Request, env: Env): boolean {
+  if (!env.TEAM_BOT_SECRET) return true; // No secret configured = dev mode
+  const auth = request.headers.get("Authorization");
+  return auth === `Bearer ${env.TEAM_BOT_SECRET}`;
+}
+
 // ---------------------------------------------------------------------------
 // Quiet Hours + DND helpers
 // ---------------------------------------------------------------------------
@@ -3211,9 +3222,11 @@ export default {
         return new Response("Cortex Team Bot Worker is running");
 
       case "register":
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
         return handleRegister(request, env);
 
       case "register-member":
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
         return handleRegisterMember(request, env);
 
       case "telegram": {
@@ -3252,9 +3265,11 @@ export default {
         }
 
       case "session":
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
         return handleSession(request, env, route.projectId!);
 
       case "dashboard": {
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
         const dashProject = await getProject(env.PROJECTS, route.projectId!);
         if (!dashProject) {
           return new Response("Project not found", { status: 404 });
