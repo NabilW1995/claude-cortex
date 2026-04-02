@@ -1847,6 +1847,74 @@ function createBot(
 
   // -------------------------------------------------------------------
   // New group member detection — auto-greet and prompt for registration
+  // Past work — show last 5 days of activity from D1
+  bot.callbackQuery("past_work", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+
+    const lines: string[] = ["\u{1F4C5} <b>Past Work (last 5 days)</b>", ""];
+
+    const pastMembers = await getTeamMembers(env.PROJECTS);
+    try {
+      const result = await env.DB.prepare(
+        `SELECT user_id, date(started_at) as day, SUM(duration_minutes) as total_min, COUNT(*) as sessions
+         FROM sessions
+         WHERE project = ? AND started_at > datetime('now', '-5 days')
+         GROUP BY user_id, day
+         ORDER BY day DESC, total_min DESC`
+      ).bind(projectId).all<{ user_id: string; day: string; total_min: number; sessions: number }>();
+
+      if (result.results && result.results.length > 0) {
+        let currentDay = "";
+        for (const row of result.results) {
+          if (row.day !== currentDay) {
+            currentDay = row.day;
+            lines.push(`<b>${row.day}</b>`);
+          }
+          const hours = Math.floor((row.total_min || 0) / 60);
+          const mins = (row.total_min || 0) % 60;
+          const color = getUserColorByName(pastMembers, row.user_id);
+          lines.push(`${color} ${row.user_id}: ${hours}h ${mins}m (${row.sessions} sessions)`);
+        }
+      } else {
+        lines.push("No activity recorded yet.");
+      }
+
+      // Also show recent events
+      const events = await env.DB.prepare(
+        `SELECT event_type, actor, target, created_at
+         FROM events
+         WHERE repo = ? AND created_at > datetime('now', '-5 days')
+         ORDER BY created_at DESC LIMIT 10`
+      ).bind(project.githubRepo).all<{ event_type: string; actor: string; target: string; created_at: string }>();
+
+      if (events.results && events.results.length > 0) {
+        lines.push("");
+        lines.push("<b>Recent events:</b>");
+        for (const e of events.results) {
+          const icon = e.event_type.includes("opened") ? "\u{1F4DD}" :
+                       e.event_type.includes("closed") || e.event_type.includes("merged") ? "\u{2705}" :
+                       e.event_type.includes("review") ? "\u{1F440}" : "\u{2022}";
+          lines.push(`${icon} ${e.event_type} #${e.target || "?"} by ${e.actor}`);
+        }
+      }
+    } catch {
+      lines.push("Could not load activity data.");
+    }
+
+    const pastBody: Record<string, unknown> = {
+      chat_id: project.chatId,
+      text: lines.join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    };
+    if (project.threadId) pastBody.message_thread_id = project.threadId;
+    await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(pastBody),
+    });
+  });
+
   // -------------------------------------------------------------------
 
   bot.on("message:new_chat_members", async (ctx) => {
@@ -1979,21 +2047,24 @@ async function sendActiveInfo(
         `   \u{1F4CC} Claimed: ${tasks.map((t) => "#" + t).join(", ")}`
       );
     }
-
-    const member = members.find(
-      (m) => m.name === s.user || m.github === s.user
-    );
-    if (member) {
-      lines.push(`   \u{1F517} GitHub: ${member.github}`);
-    }
   }
 
-  await sendTelegram(
-    project.botToken,
-    project.chatId,
-    lines.join("\n"),
-    project.threadId
-  );
+  // Send with HTML formatting + "Past Work" button
+  const buttons = [[{ text: "\u{1F4C5} Past Work (5 days)", callback_data: "past_work" }]];
+  const body: Record<string, unknown> = {
+    chat_id: project.chatId,
+    text: lines.join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: buttons },
+  };
+  if (project.threadId) body.message_thread_id = project.threadId;
+
+  await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body),
+  });
 }
 
 /**
