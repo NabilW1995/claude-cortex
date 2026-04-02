@@ -10,3 +10,6 @@ id = "364a896975b14f2289be5cd20e182afc"
 binding = "DB"
 database_name = "cortex-bot-db"
 database_id = "d252948e-7c2f-46f1-a12f-87a9259604ec"
+
+[triggers]
+crons = ["*/30 * * * *"]

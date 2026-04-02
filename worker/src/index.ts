@@ -1675,14 +1675,40 @@ function createBot(
   });
 
   bot.callbackQuery("login_hours", async (ctx: Context) => {
-    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const workHours = await getWorkHoursToday(env.DB);
+    const members = await getTeamMembers(env.PROJECTS);
+
+    const lines: string[] = ["\u{23F1} <b>Work Hours Today</b>", "\u{2500}".repeat(25), ""];
+
+    if (workHours.length === 0) {
+      lines.push("No sessions recorded today.");
+    } else {
+      const maxMinutes = Math.max(...workHours.map((w) => w.total_minutes), 1);
+      for (const w of workHours) {
+        const color = getUserColorByName(members, w.user_id);
+        const hours = Math.floor(w.total_minutes / 60);
+        const mins = w.total_minutes % 60;
+        const blocks = Math.round((w.total_minutes / maxMinutes) * 10);
+        const bar = "\u{2588}".repeat(blocks) + "\u{2591}".repeat(10 - blocks);
+        lines.push(`${color} ${w.user_id}`);
+        lines.push(`   ${bar} ${hours}h ${mins}m`);
+      }
+    }
+
     const chatId = project.loginChatId || project.chatId;
-    await sendTelegram(
-      project.botToken,
-      chatId,
-      "\u{23F1} Work hours tracking coming soon.",
-      project.loginThreadId ?? undefined
-    );
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text: lines.join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    };
+    if (project.loginThreadId) body.message_thread_id = project.loginThreadId;
+    await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(body),
+    });
   });
 
   bot.callbackQuery("login_tasks", async (ctx: Context) => {
@@ -3137,6 +3163,23 @@ export default {
 
       default:
         return new Response("Not Found", { status: 404 });
+    }
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    // Cron runs every 30 minutes
+    // Phase 3: Session cleanup (KV TTL handles this automatically)
+    // Phase 4 will add: stale PR detection, daily/weekly digests
+    console.log("[Cron] Scheduled check running");
+
+    // Iterate registered projects and log status
+    const keys = await env.PROJECTS.list();
+    for (const key of keys.keys) {
+      if (key.name.includes(":") || key.name === "team-members") continue;
+      const sessions = await getActiveSessions(env.PROJECTS, key.name);
+      if (sessions.length > 0) {
+        console.log(`[Cron] ${key.name}: ${sessions.length} active sessions`);
+      }
     }
   },
 };
