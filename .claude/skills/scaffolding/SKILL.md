@@ -115,12 +115,13 @@ git clone --depth 1 https://github.com/NabilW1995/claude-cortex.git .cortex-temp
 ```
 
 This adds:
-- `.claude/rules/` — 12 Rule-Dateien (Security, Testing, Design-Flow, etc.)
-- `.claude/agents/` — 16 Agents (Coder, Code-Review, Error-Whisperer, etc.)
-- `.claude/commands/` — 11 Commands (/start, /audit, /learn, etc.)
-- `scripts/hooks/` — 12 Hooks (Guard-Bash, Security-Scan, Auto-Test, etc.)
-- `scripts/db/` — SQLite Learning-DB Setup
-- Smart-Merge von CLAUDE.md und settings.json
+- `.claude/rules/` — 11 rules (security, testing, design-flow, etc.)
+- `.claude/agents/` — 8 agents (core--coder, core--test-runner, core--code-review, etc.)
+- `.claude/commands/` — 7 commands (/start, /audit, /learn, etc.)
+- `scripts/hooks/` — Auto-lint, auto-test, security scan, heartbeat, etc.
+- `scripts/db/` — SQLite learning database
+- `scripts/bot/` — Telegram bot notifications
+- Smart merge of CLAUDE.md and settings.json
 
 After install, run:
 ```bash
@@ -130,21 +131,26 @@ npm run db:init      # Initialize learning database
 
 ### Step 5: Update CLAUDE.md
 
-Fill in the template placeholders with real project info:
+Fill in the real project info:
 
+1. **Project name and description** at the top
+2. **Tech Stack table** — update with actual technologies chosen:
 ```markdown
-# [Projektname] → Echter Name
-[Einzeilige Beschreibung] → Aus Discovery
-
-## Commands
-`npm run dev` → Tatsächlicher Dev-Command
-`npm run build` → Tatsächlicher Build-Command
-
-## Projekt-Struktur
-[Wird automatisch ausgefüllt] → Tatsächliche Ordner-Übersicht
+## Tech Stack
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node.js (>=18) |
+| Framework | [Next.js / Vite+React / SvelteKit / etc.] |
+| Language | TypeScript |
+| Database | [PostgreSQL+Prisma / SQLite+Drizzle / etc.] |
+| Auth | [NextAuth / Clerk / Better Auth / none] |
+| UI | [shadcn/ui / Tailwind / Material UI] |
+| Testing | Vitest |
+| Hosting | [Vercel / Netlify / Coolify on Hetzner] |
 ```
+3. **Commands** — actual dev/build/test/lint commands
 
-Also update the `.claude-template.json` with the project name.
+Also update `.claude-template.json` with the project name.
 
 ### Step 6: Git Setup
 
@@ -169,7 +175,7 @@ gh repo create [name] --public/--private --source . --push
 
 ### Step 8: Verify Everything Works
 
-Run these checks (use the env-validator and build-validator agents):
+Run these checks:
 
 ```bash
 npm run dev          # Startet das Projekt?
@@ -197,11 +203,11 @@ Present a clear summary:
 ### Was wurde erstellt
 [Ordner-Übersicht mit Erklärung]
 
-### Claude Cortex installiert
-- 16 Agents bereit (Coder, Reviewer, Debugger, etc.)
-- Learning-DB aktiv — lernt automatisch aus jedem Gespräch
-- 12 Hooks aktiv — Sicherheits-Scans, Auto-Backup, Lint
-- /start für den Tagesbeginn, /wrap-up für den Feierabend
+### Claude Cortex installed
+- 8 agents ready (core--coder, core--test-runner, core--code-review, etc.)
+- Learning DB active — learns from every conversation
+- Auto hooks: lint, tests, security scan after every edit
+- /start for day start, /wrap-up for day end, /audit for learnings
 
 ### Nächste Schritte
 1. Design erstellen (Stitch oder lokal — sag "Bau mir die Startseite")
