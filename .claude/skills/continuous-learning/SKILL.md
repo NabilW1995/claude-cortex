@@ -42,7 +42,7 @@ User gives task → Claude tries → User corrects → Claude fixes → User con
 Two systems work together — hooks provide signals, Claude provides understanding:
 
 **Hook-based detection** (prompt-submit.js, runs automatically):
-The hook scans every user message for correction patterns and success patterns. It tracks a correction streak — 3 in a row triggers the rubber-duck agent, 5 triggers the unsticker.
+The hook scans every user message for correction patterns and success patterns. It tracks a correction streak — 3 in a row suggests rephrasing, 5+ suggests pre--architect for root-cause analysis.
 
 **Claude-based detection** (inline, in the conversation):
 Claude recognizes corrections that go beyond simple keywords:

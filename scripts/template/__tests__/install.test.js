@@ -72,8 +72,8 @@ describe('install', () => {
 
     // Agents
     assert.ok(
-      fs.existsSync(path.join(testDir, '.claude/agents/auditor.md')),
-      'auditor agent copied'
+      fs.existsSync(path.join(testDir, '.claude/agents/core--coder.md')),
+      'core--coder agent copied'
     );
 
     // Commands

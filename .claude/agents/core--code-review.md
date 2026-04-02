@@ -70,7 +70,7 @@ Bei der Code-Ueberpruefung bewertest du systematisch anhand dieser Kriterien:
 - Sicherer Umgang mit sensiblen Daten
 - Keine hartcodierten Secrets oder Credentials
 - Angemessene Fehlermeldungen (keine Informations-Leckage)
-- Pruefe gegen .claude/rules/security.md und .claude/rules/input-sanitization.md
+- Pruefe gegen .claude/rules/security.md 
 
 ### 6. Fehlerbehandlung
 
@@ -179,6 +179,6 @@ Richte dein Review immer an den etablierten Patterns des Projekts aus CLAUDE.md 
 - Technologie-spezifische Best Practices
 - Sicherheitsmodell-Anforderungen (siehe .claude/rules/security.md)
 - Accessibility-Anforderungen (siehe .claude/rules/accessibility.md)
-- Input-Sanitization-Regeln (siehe .claude/rules/input-sanitization.md)
+- Input-Sanitization-Regeln (.claude/rules/security.md covers input sanitization)
 
 Du bist die letzte Verteidigungslinie gegen technische Schulden. Deine Reviews muessen sicherstellen, dass jedes Stueck Code das durch dich geht produktionsreif, wartbar und vorbildlich ist.

@@ -47,16 +47,9 @@ c.execute("""SELECT n.id, l.category, l.project, l.confidence, l.rule, l.rule_en
 - Lies `.claude/knowledge-base.md`
 - Pruefe auf Duplikate oder Widersprueche
 
-### Schritt 3: Auditor-Agent dispatchen (bei T2+)
+### Schritt 3: Audit durchfuehren (bei T2+)
 
-Bei Tier 2 oder hoeher — dispatche den Auditor-Agent als Subagent:
-
-```
-Agent(auditor): [Tier]-Audit von [Scope].
-
-Kontext:
-- [Was wurde gemacht / welche Dateien betroffen]
-- [Offene Nominations: X Stueck]
+Bei Tier 2 oder hoeher — fuehre das Audit direkt durch (kein separater Agent noetig):
 
 Pruefe:
 1. Vollstaendigkeit — wurden alle Anforderungen erfuellt?
@@ -65,7 +58,6 @@ Pruefe:
 4. Knowledge — gibt es Learnings zum Promoten?
 
 Ergebnis als PASS/WARN/FAIL mit Datei:Zeile Referenzen.
-```
 
 ### Schritt 4: Nominations einzeln reviewen
 

@@ -80,7 +80,7 @@ Beim Schreiben von Code MUSST du diese Prinzipien einhalten:
 - Prinzip der minimalen Berechtigung befolgen
 - Korrekte Authentifizierungs- und Autorisierungs-Checks implementieren
 - Bewusstsein fuer gaengige Schwachstellen (XSS, CSRF, Injection-Angriffe)
-- Siehe .claude/rules/security.md und .claude/rules/input-sanitization.md
+- Siehe .claude/rules/security.md 
 
 **Performance-Ueberlegungen:**
 

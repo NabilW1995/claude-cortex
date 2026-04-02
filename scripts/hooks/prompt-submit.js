@@ -128,11 +128,9 @@ async function processPrompt(prompt) {
       const newStreak = currentStreak + 1;
       fs.writeFileSync(streakFile, String(newStreak));
       if (newStreak === 3) {
-        console.error(`\n[Rubber-Duck] 🦆 ${newStreak} Korrekturen hintereinander — vielleicht hilft es das Problem laut zu formulieren.`);
-        console.error('[Rubber-Duck] Empfehlung: Nutze den rubber-duck Agent — er stellt dir gezielte Fragen.\n');
+        console.error(`\n[Correction Streak] ${newStreak} corrections in a row — try explaining the problem differently.`);
       } else if (newStreak >= 5) {
-        console.error(`\n[Unsticker] ⚠️ ${newStreak} Korrekturen hintereinander — Root-Cause-Analyse empfohlen!`);
-        console.error('[Unsticker] Empfehlung: Nutze den unsticker Agent oder /unstick für Hilfe.\n');
+        console.error(`\n[Correction Streak] ${newStreak} corrections in a row — consider using pre--architect agent for root-cause analysis.`);
       }
     } else if (isSuccess || !isCorrection) {
       // Reset streak on success or neutral prompt

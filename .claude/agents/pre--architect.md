@@ -57,7 +57,7 @@ Der User ist moeglicherweise kein Programmierer. Daher:
 - Sicherheits-Implikationen, Performance-Charakteristiken und Wartbarkeit beruecksichtigen
 - Tradeoffs zwischen verschiedenen Ansaetzen bewerten
 - Versteckte Annahmen und implizite Abhaengigkeiten aufdecken
-- Gegen die Regeln in .claude/rules/security.md und .claude/rules/input-sanitization.md pruefen
+- Gegen die Regeln in .claude/rules/security.md  pruefen
 
 ### Phase 5: Alternativen-Erkundung
 

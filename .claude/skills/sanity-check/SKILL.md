@@ -145,12 +145,10 @@ Verify everything actually works.
 
 For complex checks, dispatch specialized agents:
 
-- **build-validator** — for Check 8 (build/lint/types)
-- **code-review** — for deeper code quality analysis
-- **debug-investigator** — if you find a suspicious bug during the check
-- **env-validator** — to verify the environment is correctly set up
+- **core--code-review** — for deeper code quality analysis
+- **fix--root-cause-finder** — if you find a suspicious bug during the check
 
-Only dispatch agents when the check reveals something that needs deeper investigation. Simple checks should be done inline.
+Only dispatch agents when the check reveals something that needs deeper investigation. Simple checks (build, lint, types) should be done inline.
 
 ## Output Format
 

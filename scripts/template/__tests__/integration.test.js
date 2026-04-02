@@ -76,8 +76,8 @@ describe('Claude Cortex Integration Test', () => {
     it('copies template agents WITHOUT overwriting existing ones', () => {
       const agents = fs.readdirSync(path.join(testDir, '.claude/agents'));
       // Template agents added
-      assert.ok(agents.includes('auditor.md'));
-      assert.ok(agents.includes('error-whisperer.md'));
+      assert.ok(agents.includes('core--coder.md'));
+      assert.ok(agents.includes('fix--error-translator.md'));
       // Custom agent preserved
       assert.ok(agents.includes('my-custom-agent.md'));
       const customContent = fs.readFileSync(path.join(testDir, '.claude/agents/my-custom-agent.md'), 'utf-8');

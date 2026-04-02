@@ -240,4 +240,4 @@ If the user chose Google Stitch for design, set up the MCP connection:
 - Explain everything in simple language — the user may not know what "scaffold" means
 - Don't install packages the user didn't ask for — follow the minimal principle
 - Always use latest stable versions — check with `npm view [package] version` if unsure
-- Run env-validator after setup to confirm everything is correctly configured
+- Run session-start hook to verify .env is correctly configured
