@@ -565,6 +565,80 @@ async function notifySessionEnd(projectDir, stats) {
 }
 
 // ---------------------------------------------------------------------------
+// Heartbeat (keeps session alive + sends activity data to Worker)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a heartbeat to the Worker to keep the session alive.
+ * Includes activity data (current branch, recently changed files, last commit)
+ * so the /active display can show what each team member is working on.
+ *
+ * Throttled to once every 15 minutes via a timestamp file to avoid
+ * spamming the Worker on every tool use.
+ *
+ * @param {string} projectDir - Project root directory
+ */
+async function sendHeartbeat(projectDir) {
+  const config = loadBotConfig(projectDir);
+  if (!config || !config.workerUrl || !config.projectId) return;
+
+  // Throttle: only send every 15 minutes
+  const throttleFile = path.join(projectDir, '.claude', 'logs', '.heartbeat-ts');
+  try {
+    if (fs.existsSync(throttleFile)) {
+      const lastTs = parseInt(fs.readFileSync(throttleFile, 'utf-8').trim(), 10);
+      if (Date.now() - lastTs < 15 * 60 * 1000) return; // Skip if <15min since last
+    }
+  } catch {}
+
+  const user = getCurrentUser();
+  const projectName = path.basename(projectDir);
+
+  // Gather activity data
+  let branch = 'unknown';
+  try {
+    branch = execSync('git branch --show-current',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch {}
+
+  let lastFiles = [];
+  try {
+    const files = execSync('git diff --name-only HEAD 2>/dev/null || git diff --name-only --cached 2>/dev/null',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (files) lastFiles = files.split('\n').slice(0, 5);
+  } catch {}
+
+  let lastCommit = '';
+  try {
+    lastCommit = execSync('git log --oneline -1',
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().substring(8);
+  } catch {}
+
+  // Send heartbeat to Worker
+  try {
+    await workerRequest(config.workerUrl, config.projectId, 'POST',
+      `/session/${config.projectId}`, {
+        type: 'heartbeat',
+        user,
+        branch,
+        lastFiles,
+        lastCommit,
+        project: projectName
+      });
+    console.error('[Notify] Heartbeat sent');
+  } catch (e) {
+    console.error(`[Notify] Heartbeat failed: ${e.message}`);
+  }
+
+  // Update throttle timestamp
+  try {
+    const dir = path.dirname(throttleFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(throttleFile, String(Date.now()));
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -613,10 +687,15 @@ if (require.main === module) {
         break;
       }
 
+      case 'heartbeat':
+        await sendHeartbeat(projectDir);
+        break;
+
       default:
         console.error('Usage:');
         console.error('  node notify.js session-start   Send session start notification');
         console.error('  node notify.js session-end     Send session end notification');
+        console.error('  node notify.js heartbeat       Send heartbeat to keep session alive');
         break;
     }
   })().catch((e) => {
@@ -636,6 +715,7 @@ module.exports = {
   sendTelegram,
   notifySessionStart,
   notifySessionEnd,
+  sendHeartbeat,
   parseEnvFile,
   escapeHtml,
   getRecentCommits,

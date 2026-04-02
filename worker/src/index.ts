@@ -115,8 +115,12 @@ interface GitHubWorkflowPayload {
 }
 
 interface SessionUpdate {
-  type: "start" | "end";
+  type: "start" | "end" | "heartbeat";
   user: string;
+  branch?: string;
+  lastFiles?: string[];
+  lastCommit?: string;
+  project?: string;
 }
 
 interface RegisterPayload {
@@ -467,6 +471,38 @@ async function setActiveSessions(
 ): Promise<void> {
   // Sessions auto-expire after 2 hours (7200 seconds) — no explicit "end" needed
   await kv.put(`${projectId}:sessions`, JSON.stringify(sessions), { expirationTtl: 7200 });
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for heartbeat activity data
+// ---------------------------------------------------------------------------
+
+/**
+ * Store activity data (branch, files, last commit) for a user.
+ * Used by the heartbeat system to show what each team member is working on.
+ * Auto-expires after 2 hours — if no heartbeat arrives, the data disappears.
+ */
+async function saveActivityData(
+  kv: KVNamespace,
+  projectId: string,
+  user: string,
+  data: { branch: string; lastFiles: string[]; lastCommit: string }
+): Promise<void> {
+  const key = `activity:${projectId}:${user}`;
+  await kv.put(key, JSON.stringify(data), { expirationTtl: 7200 }); // 2h TTL
+}
+
+/**
+ * Retrieve stored activity data for a user.
+ * Returns null if no heartbeat data exists (expired or never sent).
+ */
+async function getActivityData(
+  kv: KVNamespace,
+  projectId: string,
+  user: string
+): Promise<{ branch: string; lastFiles: string[]; lastCommit: string } | null> {
+  const raw = await kv.get(`activity:${projectId}:${user}`);
+  return raw ? JSON.parse(raw) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2801,6 +2837,25 @@ async function handleSession(
     await setActiveSessions(env.PROJECTS, projectId, filtered);
     // Log session start to D1 for work hours tracking
     await logSessionStart(env.DB, update.user, projectId);
+  } else if (update.type === "heartbeat") {
+    // Refresh session TTL (keeps user "online") but preserve original "since" time
+    const existingSince = sessions.find((s) => s.user === update.user)?.since;
+    const filtered = sessions.filter((s) => s.user !== update.user);
+    filtered.push({
+      user: update.user,
+      since: existingSince ||
+        new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" }),
+    });
+    await setActiveSessions(env.PROJECTS, projectId, filtered);
+
+    // Store activity data (branch, files, commit) for /active display
+    if (update.branch) {
+      await saveActivityData(env.PROJECTS, projectId, update.user, {
+        branch: update.branch,
+        lastFiles: update.lastFiles || [],
+        lastCommit: update.lastCommit || "",
+      });
+    }
   } else if (update.type === "end") {
     // Don't remove from KV — auto-expires via TTL (prevents false offline from context compression)
     // But DO log the end to D1 for work hours tracking
