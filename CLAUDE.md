@@ -76,6 +76,7 @@ Details: @.claude/rules/agent-routing.md
 | `/learn` | Search past learnings |
 | `/onboard` | First-time codebase scan |
 | `/new-project` | Start a new project from scratch |
+| `/metrics` | Code metrics — LOC, complexity, coverage, deps |
 | `/template-update` | Update Cortex to latest version |
 
 ## Communication

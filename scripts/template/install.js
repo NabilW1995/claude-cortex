@@ -420,13 +420,32 @@ function install(targetDir) {
     }
   }
 
-  // Summary
-  console.log(`\nClaude Cortex v${manifest.version} installed successfully!\n`);
-  console.log('Next steps:');
-  console.log('  1. Run: npm install');
-  console.log('  2. Copy .mcp.json.example to .mcp.json and add your API keys');
-  console.log('  3. Run: npm run db:init');
-  console.log('  4. Start a new Claude Code session\n');
+  // Post-Install Summary
+  const agentCount = fs.readdirSync(path.join(targetDir, '.claude/agents')).filter(f => f.endsWith('.md')).length;
+  const commandCount = fs.readdirSync(path.join(targetDir, '.claude/commands')).filter(f => f.endsWith('.md')).length;
+  const ruleCount = fs.readdirSync(path.join(targetDir, '.claude/rules')).filter(f => f.endsWith('.md')).length;
+  const hookCount = fs.readdirSync(path.join(targetDir, 'scripts/hooks')).filter(f => f.endsWith('.sh') || f.endsWith('.js')).length;
+
+  console.log('');
+  console.log('  ===========================================');
+  console.log(`  Claude Cortex v${manifest.version} installed!`);
+  console.log('  ===========================================');
+  console.log('');
+  console.log(`  Agents:   ${agentCount} (coder, test-runner, code-review, ...)`);
+  console.log(`  Commands: ${commandCount} (/start, /health, /audit, ...)`);
+  console.log(`  Rules:    ${ruleCount} (security, testing, git, ...)`);
+  console.log(`  Hooks:    ${hookCount} (auto-lint, auto-test, security-scan, ...)`);
+  console.log('');
+  console.log('  Next steps:');
+  console.log('  1. npm install');
+  console.log('  2. npm run db:init');
+  console.log('  3. Open Claude Code and say "/start"');
+  console.log('');
+  console.log('  Optional:');
+  console.log('  - Telegram Bot: see docs/QUICKSTART-TELEGRAM.md');
+  console.log('  - Google Stitch: cp .mcp.json.example .mcp.json');
+  console.log('  - Health check: /health');
+  console.log('');
 }
 
 // CLI entry point

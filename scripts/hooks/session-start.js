@@ -65,6 +65,37 @@ const sessionId = `session-${Date.now()}`;
     }
   }
 
+  // Vulnerability check — quick npm audit (async, non-blocking)
+  try {
+    const pkgLock = path.join(projectDir, 'package-lock.json');
+    if (fs.existsSync(pkgLock)) {
+      const { execSync } = require('child_process');
+      const audit = execSync('npm audit --audit-level=high --json 2>/dev/null', {
+        cwd: projectDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000
+      });
+      const result = JSON.parse(audit);
+      const vulns = result.metadata?.vulnerabilities || {};
+      const high = (vulns.high || 0) + (vulns.critical || 0);
+      if (high > 0) {
+        console.error(`\n[Security] \u{26A0}\u{FE0F} ${high} high/critical vulnerabilities found!`);
+        console.error('[Security] Run: npm audit fix');
+      }
+    }
+  } catch (e) {
+    // npm audit returns exit code 1 when vulnerabilities found — parse the output
+    if (e.stdout) {
+      try {
+        const result = JSON.parse(e.stdout);
+        const vulns = result.metadata?.vulnerabilities || {};
+        const high = (vulns.high || 0) + (vulns.critical || 0);
+        if (high > 0) {
+          console.error(`\n[Security] \u{26A0}\u{FE0F} ${high} high/critical vulnerabilities found!`);
+          console.error('[Security] Run: npm audit fix');
+        }
+      } catch { /* silent */ }
+    }
+  }
+
   // Hook smoke test — verify critical hooks exist
   const criticalHooks = ['guard-bash.sh', 'security-scan.sh', 'post-edit-lint.sh', 'auto-test.sh'];
   const hooksDir = path.join(projectDir, 'scripts', 'hooks');
