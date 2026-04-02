@@ -10,7 +10,44 @@ allowed-tools:
 
 Starte eine neue Arbeitssession. Lade Kontext, erstelle die Daily Note, pruefe Learnings.
 
-## Schritte
+## First-Run Detection
+
+Check if `.claude/logs/.session-id` exists. If NOT (first time using Cortex in this project):
+
+Show a welcome tour INSTEAD of the normal start flow:
+
+```
+Welcome to Claude Cortex!
+
+Your project now has superpowers. Here's what's active:
+
+DEVELOPMENT PIPELINE (automatic):
+  Plan Mode → core--coder → core--test-runner → core--code-review → sanity-check
+  Just say "Build me [feature]" and the pipeline handles the rest.
+
+COMMANDS you can use:
+  /start      — This! Morning routine.
+  /health     — Check if everything is working
+  /metrics    — Code stats (LOC, complexity, coverage)
+  /changelog  — Generate changelog from git history
+  /audit      — Review and approve learnings
+  /wrap-up    — End of day ritual
+
+HOOKS (run automatically, no action needed):
+  After every file edit: lint, tests, security scan
+  Session start: load learnings, check .env
+  Dangerous commands: blocked automatically
+
+LEARNING SYSTEM:
+  Correct me when I'm wrong → I learn and never repeat the mistake.
+  Learnings are shared with your team via git.
+
+Ready to work! What would you like to build?
+```
+
+After showing the tour, create the `.claude/logs/.session-id` file to mark first run as complete, then STOP (don't run the normal flow).
+
+## Normal Flow (not first run)
 
 ### Schritt 1: Datum holen
 

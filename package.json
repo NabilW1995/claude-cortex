@@ -2,7 +2,9 @@
   "name": "claude-cortex",
   "version": "1.0.0",
   "description": "The collective brain for Claude Code — shared learnings, rules, hooks, and skills across all your projects",
-  "private": true,
+  "bin": {
+    "cortex-init": "./bin/cortex-init.js"
+  },
   "scripts": {
     "db:init": "node scripts/db/init-db.js",
     "db:reset": "node scripts/db/init-db.js --reset",
