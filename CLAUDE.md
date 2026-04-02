@@ -48,6 +48,22 @@ Details: @.claude/rules/agent-routing.md
 | Error/Bug | → fix--error-translator + fix--root-cause-finder |
 | "Check everything" | → sanity-check skill |
 
+## Tech Stack
+
+<!-- Update this when installing Cortex into a new project -->
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node.js (>=18) |
+| Language | TypeScript / JavaScript |
+| Database | SQLite (sql.js) for learnings, Cloudflare D1 for bot analytics |
+| Bot Framework | grammy (Telegram), Cloudflare Workers |
+| Bot Hosting | Cloudflare Workers + KV + D1 |
+| Testing | Vitest / Jest |
+| Linting | ESLint / Biome |
+| Version Control | Git + GitHub |
+| CI/CD | GitHub Actions (planned), Coolify on Hetzner (planned) |
+| Design | Google Stitch, Tailwind CSS |
+
 ## Communication
 
 - Explain EVERY code change: what changed + why, in simple language
