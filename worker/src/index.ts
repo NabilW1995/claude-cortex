@@ -2240,18 +2240,96 @@ function createBot(
   });
 
   bot.hears("\u{1F440} Review", async () => {
-    await sendTelegram(project.botToken, project.chatId,
-      "\u{1F440} Review queue coming soon.\n\nUse /tasks to see open issues for now.", project.threadId);
+    // Same logic as project_reviews callback
+    const githubToken = getGitHubToken(env, project);
+    if (!githubToken) { await sendTelegram(project.botToken, project.chatId, "\u{1F440} No GitHub token.", project.threadId); return; }
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=20`,
+        { headers: { "User-Agent": "CortexBot", Authorization: "token " + githubToken } }
+      );
+      if (!res.ok) throw new Error("API");
+      const prs = await res.json() as Array<{
+        number: number; title: string; html_url: string; user: { login: string };
+        requested_reviewers: Array<{ login: string }>; draft: boolean; created_at: string;
+      }>;
+      const needsReview = prs.filter(pr => !pr.draft && pr.requested_reviewers.length === 0);
+      const pendingReview = prs.filter(pr => !pr.draft && pr.requested_reviewers.length > 0);
+      const lines: string[] = ["\u{1F440} <b>Review Queue</b>", ""];
+      if (needsReview.length > 0) {
+        lines.push("\u{1F6A8} <b>No reviewer assigned:</b>");
+        for (const pr of needsReview) {
+          const age = Math.round((Date.now() - new Date(pr.created_at).getTime()) / 3600000);
+          lines.push(`\u{2022} #${pr.number} ${pr.title} (@${pr.user.login}, ${age}h)`);
+        }
+      }
+      if (pendingReview.length > 0) { lines.push(""); lines.push("\u{23F3} <b>Waiting for review:</b>");
+        for (const pr of pendingReview) { lines.push(`\u{2022} #${pr.number} ${pr.title} \u{2192} ${pr.requested_reviewers.map(r => r.login).join(", ")}`); }
+      }
+      if (needsReview.length === 0 && pendingReview.length === 0) lines.push("\u{2705} All PRs reviewed!");
+      const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
+      if (project.threadId) body.message_thread_id = project.threadId;
+      await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+    } catch { await sendTelegram(project.botToken, project.chatId, "\u{1F440} Could not load review queue.", project.threadId); }
   });
 
   bot.hears("\u{1F525} Urgent", async () => {
-    await sendTelegram(project.botToken, project.chatId,
-      "\u{1F525} Priority filter coming soon.\n\nUse /tasks to see all open issues for now.", project.threadId);
+    // Same logic as project_urgent callback
+    const githubToken = getGitHubToken(env, project);
+    if (!githubToken) { await sendTelegram(project.botToken, project.chatId, "\u{1F525} No GitHub token.", project.threadId); return; }
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${project.githubRepo}/issues?state=open&labels=urgent,blocked,critical&per_page=20`,
+        { headers: { "User-Agent": "CortexBot", Authorization: "token " + githubToken } }
+      );
+      if (!res.ok) throw new Error("API");
+      const issues = await res.json() as Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }>; assignee: { login: string } | null }>;
+      const lines: string[] = ["\u{1F525} <b>Urgent & Blocked</b>", ""];
+      if (issues.length === 0) { lines.push("\u{2705} No urgent or blocked issues!"); }
+      else { for (const issue of issues) { const labels = issue.labels.map(l => l.name).join(", "); const assignee = issue.assignee ? issue.assignee.login : "unassigned"; lines.push(`\u{2022} #${issue.number} ${issue.title} [${labels}] \u{2192} ${assignee}`); } }
+      const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
+      if (project.threadId) body.message_thread_id = project.threadId;
+      await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+    } catch { await sendTelegram(project.botToken, project.chatId, "\u{1F525} Could not load urgent issues.", project.threadId); }
   });
 
   bot.hears("\u{1F4C8} Report", async () => {
-    await sendTelegram(project.botToken, project.chatId,
-      "\u{1F4C8} Weekly report coming soon.\n\nComing in Phase 4.", project.threadId);
+    // Same logic as project_weekly callback
+    const githubToken = getGitHubToken(env, project);
+    const lines: string[] = ["\u{1F4C8} <b>Weekly Report</b>", ""];
+    try {
+      const weekEvents = await env.DB.prepare(
+        "SELECT event_type, COUNT(*) as c FROM events WHERE repo = ? AND created_at > datetime('now', '-7 days') GROUP BY event_type"
+      ).bind(project.githubRepo).all<{ event_type: string; c: number }>();
+      if (weekEvents.results && weekEvents.results.length > 0) {
+        const stats: Record<string, number> = {};
+        for (const e of weekEvents.results) stats[e.event_type] = e.c;
+        lines.push(`\u{1F4DD} Issues: ${stats["issues.opened"] || 0} opened, ${stats["issues.closed"] || 0} closed`);
+        lines.push(`\u{1F500} PRs: ${stats["pr.merged"] || 0} merged, ${stats["pr.opened"] || 0} opened`);
+        lines.push("");
+      }
+    } catch {}
+    if (githubToken) {
+      try {
+        const res = await fetch(`https://api.github.com/repos/${project.githubRepo}/pulls?state=closed&sort=updated&direction=desc&per_page=10`,
+          { headers: { "User-Agent": "CortexBot", Authorization: "token " + githubToken } });
+        if (res.ok) {
+          const prs = await res.json() as Array<{ number: number; title: string; merged_at: string | null; user: { login: string } }>;
+          const merged = prs.filter(pr => pr.merged_at);
+          if (merged.length > 0) { lines.push("<b>Merged PRs:</b>"); for (const pr of merged.slice(0, 5)) lines.push(`\u{2022} #${pr.number} ${pr.title} (@${pr.user.login})`); }
+        }
+      } catch {}
+    }
+    try {
+      const hours = await getWorkHoursToday(env.DB);
+      if (hours.length > 0) { lines.push(""); lines.push("<b>Work Hours (today):</b>");
+        const members = await getTeamMembers(env.PROJECTS);
+        for (const w of hours) { const color = getUserColorByName(members, w.user_id); const h = Math.floor(w.total_minutes / 60); const m = w.total_minutes % 60; lines.push(`${color} ${w.user_id}: ${h}h ${m}m`); }
+      }
+    } catch {}
+    const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
+    if (project.threadId) body.message_thread_id = project.threadId;
+    await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
   });
 
   return bot;
