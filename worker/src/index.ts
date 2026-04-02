@@ -22,6 +22,7 @@ interface Env {
   DB: D1Database;
   GITHUB_WEBHOOK_SECRET?: string;
   TEAM_BOT_SECRET?: string;
+  GITHUB_API_TOKEN?: string;
 }
 
 interface ProjectConfig {
@@ -183,6 +184,14 @@ async function verifyGitHubSignature(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GitHub token helper — prefers Worker Secret over KV-stored token
+// ---------------------------------------------------------------------------
+
+function getGitHubToken(env: Env, project: ProjectConfig): string | undefined {
+  return env.GITHUB_API_TOKEN || project.githubToken;
+}
+
 // ---------------------------------------------------------------------------
 // Auth helper — protects sensitive endpoints
 // ---------------------------------------------------------------------------
@@ -732,12 +741,18 @@ async function getWorkHoursToday(
 
 async function getProject(
   kv: KVNamespace,
-  projectId: string
+  projectId: string,
+  env?: Env
 ): Promise<ProjectConfig | null> {
   const raw = await kv.get(projectId);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as ProjectConfig;
+    const config = JSON.parse(raw) as ProjectConfig;
+    // Prefer Worker Secret over KV-stored token (more secure)
+    if (env?.GITHUB_API_TOKEN) {
+      config.githubToken = env.GITHUB_API_TOKEN;
+    }
+    return config;
   } catch {
     return null;
   }
@@ -2977,7 +2992,7 @@ async function handleGitHub(
   env: Env,
   projectId: string
 ): Promise<Response> {
-  const project = await getProject(env.PROJECTS, projectId);
+  const project = await getProject(env.PROJECTS, projectId, env);
   if (!project) {
     return new Response("Project not found", { status: 404 });
   }
@@ -3037,7 +3052,7 @@ async function handleSession(
   env: Env,
   projectId: string
 ): Promise<Response> {
-  const project = await getProject(env.PROJECTS, projectId);
+  const project = await getProject(env.PROJECTS, projectId, env);
   if (!project) {
     return new Response("Project not found", { status: 404 });
   }
@@ -3231,7 +3246,7 @@ export default {
 
       case "telegram": {
         // grammy handles the Telegram webhook — create a bot per project
-        const project = await getProject(env.PROJECTS, route.projectId!);
+        const project = await getProject(env.PROJECTS, route.projectId!, env);
         if (!project) {
           return new Response("Project not found", { status: 404 });
         }
@@ -3270,7 +3285,7 @@ export default {
 
       case "dashboard": {
         if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
-        const dashProject = await getProject(env.PROJECTS, route.projectId!);
+        const dashProject = await getProject(env.PROJECTS, route.projectId!, env);
         if (!dashProject) {
           return new Response("Project not found", { status: 404 });
         }
@@ -3322,7 +3337,7 @@ async function getProjectList(env: Env): Promise<Array<{ id: string; config: Pro
   const projects: Array<{ id: string; config: ProjectConfig }> = [];
   for (const key of keys.keys) {
     if (key.name.includes(":") || key.name === "team-members") continue;
-    const config = await getProject(env.PROJECTS, key.name);
+    const config = await getProject(env.PROJECTS, key.name, env);
     if (config) projects.push({ id: key.name, config });
   }
   return projects;
