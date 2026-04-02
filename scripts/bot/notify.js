@@ -427,9 +427,30 @@ function sendTelegram(token, chatId, text, threadId) {
  *   2. Project topic: full message with open tasks
  * If loginThreadId is not set, only the project topic message is sent.
  */
+/**
+ * Quick network check — try to reach Telegram API.
+ * Returns false if offline (no internet / DNS failure).
+ */
+function isOnline() {
+  return new Promise((resolve) => {
+    const req = https.get('https://api.telegram.org', { timeout: 3000 }, (res) => {
+      resolve(true);
+      res.resume(); // Consume response
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
 async function notifySessionStart(projectDir) {
   const config = loadBotConfig(projectDir);
   if (!config) return; // Telegram not configured — silent skip
+
+  // Skip all network calls if offline
+  if (!(await isOnline())) {
+    console.error('[Notify] Offline — skipping Telegram notifications');
+    return;
+  }
 
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
@@ -496,7 +517,8 @@ async function notifySessionStart(projectDir) {
  */
 async function notifySessionEnd(projectDir, stats) {
   const config = loadBotConfig(projectDir);
-  if (!config) return; // Telegram not configured — silent skip
+  if (!config) return;
+  if (!(await isOnline())) return; // Skip if offline
 
   const user = getCurrentUser();
   const projectName = path.basename(projectDir);
@@ -590,6 +612,7 @@ async function notifySessionEnd(projectDir, stats) {
 async function sendHeartbeat(projectDir) {
   const config = loadBotConfig(projectDir);
   if (!config || !config.workerUrl || !config.projectId) return;
+  if (!(await isOnline())) return; // Skip if offline
 
   // Throttle: only send every 15 minutes
   const throttleFile = path.join(projectDir, '.claude', 'logs', '.heartbeat-ts');
