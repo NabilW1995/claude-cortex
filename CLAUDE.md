@@ -62,12 +62,6 @@ Details: @.claude/rules/agent-routing.md
 - MUST: Review `git diff` before committing — check for hardcoded values and secrets
 - MUST: Checkpoint commit before large refactors
 
-## Telegram Bot
-
-- Worker: cortex-team-bot.twilight-resonance-f2fc.workers.dev
-- Setup: docs/QUICKSTART-TELEGRAM.md
-- Session hooks auto-notify Telegram on start/end
-
 ## Reference Rules
 
 @.claude/rules/agent-routing.md — Development pipeline and agent dispatch rules
