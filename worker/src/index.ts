@@ -182,6 +182,31 @@ async function verifyGitHubSignature(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Quiet Hours + DND helpers
+// ---------------------------------------------------------------------------
+
+function isQuietHours(): boolean {
+  const berlinHour = parseInt(
+    new Date().toLocaleTimeString("en-GB", { hour: "2-digit", hour12: false, timeZone: "Europe/Berlin" }),
+    10
+  );
+  return berlinHour >= 22 || berlinHour < 7;
+}
+
+function isUrgentEvent(eventType: string, labels?: string[]): boolean {
+  if (eventType.includes("failure") || eventType.includes("failed")) return true;
+  if (labels?.some((l) => ["urgent", "blocked", "critical"].includes(l.toLowerCase()))) return true;
+  if (eventType.includes("escalation")) return true;
+  return false;
+}
+
+async function isUserDND(kv: KVNamespace, telegramId: number): Promise<boolean> {
+  const dnd = await kv.get(`dnd:${telegramId}`);
+  return dnd !== null; // KV TTL auto-deletes when DND expires
+}
+
+// ---------------------------------------------------------------------------
 // Telegram helpers (for OUTGOING messages from hooks/GitHub/cron)
 // ---------------------------------------------------------------------------
 
@@ -1549,6 +1574,42 @@ function createBot(
   });
 
   // /register <github-username> — register sender as a team member
+  // /dnd — personal do not disturb
+  bot.command("dnd", async (ctx: Context) => {
+    const args = ((ctx.match as string) || "").trim();
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    if (args === "off") {
+      await env.PROJECTS.delete(`dnd:${telegramId}`);
+      await ctx.reply("\u{1F514} DND disabled. You will receive notifications again.");
+      return;
+    }
+
+    const match = args.match(/^(\d+)([hmd])$/);
+    if (!match) {
+      await ctx.reply("Usage:\n/dnd 2h \u{2014} silence for 2 hours\n/dnd 30m \u{2014} silence for 30 minutes\n/dnd 1d \u{2014} silence for 1 day\n/dnd off \u{2014} disable DND");
+      return;
+    }
+
+    const amount = parseInt(match[1], 10);
+    const unit = match[2];
+    let seconds = 0;
+    if (unit === "m") seconds = amount * 60;
+    else if (unit === "h") seconds = amount * 3600;
+    else if (unit === "d") seconds = amount * 86400;
+
+    // Minimum 60s (KV TTL requirement)
+    if (seconds < 60) seconds = 60;
+
+    await env.PROJECTS.put(`dnd:${telegramId}`, new Date(Date.now() + seconds * 1000).toISOString(), { expirationTtl: seconds });
+
+    const timeStr = new Date(Date.now() + seconds * 1000).toLocaleTimeString("en-GB", {
+      hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin",
+    });
+    await ctx.reply(`\u{1F515} DND enabled until ${timeStr}. Use /dnd off to disable.`);
+  });
+
   bot.command("register", async (ctx: Context) => {
     const githubUsername = (ctx.match as string).trim();
 
@@ -2559,6 +2620,14 @@ async function handleGitHubIssues(
   }
 
   if (message) {
+    // Quiet hours: skip non-urgent issue events
+    const issueLabels = (issue.labels || []).map((l) => l.name);
+    if (isQuietHours() && !isUrgentEvent(eventType || "", issueLabels)) {
+      // Log to D1 but don't send Telegram message
+      if (eventType) await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(issue.number));
+      return new Response("OK");
+    }
+
     // Contextual buttons for issue events
     const buttons: Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined =
       action === "opened"
@@ -2656,6 +2725,12 @@ async function handleGitHubPR(
   }
 
   if (message) {
+    // Quiet hours: skip all PR events (never urgent enough for 2am)
+    if (isQuietHours()) {
+      if (eventType) await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(pr.number));
+      return new Response("OK");
+    }
+
     // Contextual buttons for PR events
     const needsReview = action === "opened" || action === "ready_for_review";
     const prButtons: Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined =
