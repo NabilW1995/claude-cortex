@@ -65,7 +65,7 @@ fi
 mkdir -p "$PROJECT_DIR/.claude/agent-memory" \
          "$PROJECT_DIR/.claude/backups" \
          "$PROJECT_DIR/.claude/skills" \
-         "$PROJECT_DIR/Daily Notes" \
+         "$PROJECT_DIR/daily-notes" \
          "$LOG_DIR" 2>/dev/null
 
 # ═══════════════════════════════════════════════════════

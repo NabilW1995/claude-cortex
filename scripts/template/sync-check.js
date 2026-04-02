@@ -2,7 +2,7 @@
 /**
  * Claude Cortex — Sync Check
  *
- * Lightweight check for template updates + new team learnings.
+ * Lightweight check for template updates via npm registry.
  * Writes result to .claude/logs/.cortex-status.json
  *
  * Called by:
@@ -15,13 +15,31 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const CACHE_FILE = path.join(PROJECT_DIR, '.claude', 'logs', '.cortex-status.json');
 const CACHE_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+const NPM_PACKAGE_NAME = 'cortex-init';
+const FETCH_TIMEOUT_MS = 5000;
 
-function syncCheck() {
+/**
+ * Compare two semver strings. Returns true if remote > local.
+ * @param {string} local - e.g. "1.0.0"
+ * @param {string} remote - e.g. "1.2.0"
+ * @returns {boolean}
+ */
+function isNewerVersion(local, remote) {
+  if (!local || !remote) return false;
+  const l = local.split('.').map(Number);
+  const r = remote.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((r[i] || 0) > (l[i] || 0)) return true;
+    if ((r[i] || 0) < (l[i] || 0)) return false;
+  }
+  return false;
+}
+
+async function syncCheck() {
   // Ensure logs directory exists
   const logsDir = path.join(PROJECT_DIR, '.claude', 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
@@ -31,7 +49,14 @@ function syncCheck() {
     const stat = fs.statSync(CACHE_FILE);
     const ageMs = Date.now() - stat.mtimeMs;
     if (ageMs < CACHE_MAX_AGE_MS) {
-      return; // Cache is fresh, skip check
+      // Cache is fresh — still show notification if update was found previously
+      try {
+        const cached = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+        if (cached.hasUpdate) {
+          console.error(`[Cortex] Update: ${cached.currentVersion} → ${cached.latestVersion} — Run: npx cortex-init@latest --update`);
+        }
+      } catch {}
+      return;
     }
   }
 
@@ -40,58 +65,43 @@ function syncCheck() {
   if (!fs.existsSync(manifestPath)) return;
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-  const repo = manifest.repo;
+  const currentVersion = manifest.version;
 
   let status = {
     hasUpdate: false,
-    newLearnings: 0,
-    latestSha: null,
+    currentVersion,
+    latestVersion: currentVersion,
     checkedAt: new Date().toISOString()
   };
 
   try {
-    // Check latest commit SHA
-    const latestSha = execSync(`gh api repos/${repo}/commits/HEAD --jq .sha`, {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 10000
-    }).trim();
+    // Check npm registry for latest version
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-    // Read previous status to compare
-    let previousSha = null;
-    if (fs.existsSync(CACHE_FILE)) {
-      try {
-        const prev = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-        previousSha = prev.latestSha;
-      } catch {}
+    const response = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' }
+    });
+    clearTimeout(timeout);
+
+    if (response.ok) {
+      const data = await response.json();
+      const latestVersion = data.version;
+
+      status.latestVersion = latestVersion;
+      status.hasUpdate = isNewerVersion(currentVersion, latestVersion);
     }
-
-    status.latestSha = latestSha;
-    status.hasUpdate = previousSha !== null && previousSha !== latestSha;
-
-    // Check for new learnings
-    try {
-      const remoteJson = execSync(`gh api repos/${repo}/contents/.claude/team-learnings.json --jq .content`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 10000
-      }).trim();
-      const remoteData = JSON.parse(Buffer.from(remoteJson, 'base64').toString('utf-8'));
-
-      const localPath = path.join(PROJECT_DIR, '.claude', 'team-learnings.json');
-      if (fs.existsSync(localPath)) {
-        const localData = JSON.parse(fs.readFileSync(localPath, 'utf-8'));
-        const localFingerprints = new Set(localData.learnings.map(l => l.fingerprint));
-        const newOnes = remoteData.learnings.filter(l => !localFingerprints.has(l.fingerprint));
-        status.newLearnings = newOnes.length;
-      }
-    } catch {}
-
   } catch {
-    // GitHub unreachable — write cache with no update
+    // Network unreachable, npm registry down, timeout — silent fail
   }
 
   fs.writeFileSync(CACHE_FILE, JSON.stringify(status, null, 2) + '\n');
+
+  // Show notification if update available
+  if (status.hasUpdate) {
+    console.error(`[Cortex] Update: ${status.currentVersion} → ${status.latestVersion} — Run: npx cortex-init@latest --update`);
+  }
 }
 
 // CLI
@@ -99,4 +109,4 @@ if (require.main === module) {
   syncCheck();
 }
 
-module.exports = { syncCheck };
+module.exports = { syncCheck, isNewerVersion };

@@ -9,16 +9,25 @@
 Open a terminal in your project folder:
 
 ```bash
-git clone --depth 1 https://github.com/NabilW1995/claude-cortex.git .cortex-temp && node .cortex-temp/scripts/template/install.js . && rm -rf .cortex-temp
+npx cortex-init
 ```
 
-Then:
+That's it. One command installs everything:
+- 8 specialized AI agents
+- 20 automatic hooks (security, linting, testing)
+- 11 rule sets (git, security, testing, accessibility)
+- 7 skills (project discovery, design, learning system)
+- SQLite-based learning database
+
+### Alternative: Manual install (without npm)
+
 ```bash
-npm install                    # sql.js for the learning database
-npm run db:init                # Initialize learning database
+git clone --depth 1 https://github.com/NabilW1995/claude-cortex.git .cortex-temp && node .cortex-temp/scripts/template/install.js . && rm -rf .cortex-temp
+npm install
+npm run db:init
 ```
 
-Optional — Google Stitch for design:
+### Optional — Google Stitch for design:
 ```bash
 cp .mcp.json.example .mcp.json    # Copy MCP config, add your Stitch API key
 ```
@@ -31,7 +40,7 @@ After installation, these hooks run in the background on every Claude Code sessi
 
 | When | What happens |
 |------|-------------|
-| **Session start** | Load learnings, check .env, send Telegram notification |
+| **Session start** | Load learnings, check .env, check for Cortex updates |
 | **Every prompt** | Detect corrections, search relevant learnings |
 | **Before Bash** | Block dangerous commands (rm -rf, force push, secrets) |
 | **After Write/Edit** | Auto-lint, security scan, run related tests |
@@ -130,16 +139,29 @@ Claude extracts the learning, saves it to the database, and asks:
 ## 6. Update Cortex
 
 ```bash
-npm run cortex:update
+npx cortex-init@latest --update
 ```
+
 Or in chat: `/template-update`
 
 What happens:
-1. Fetches latest version from GitHub
-2. Downloads new rules, hooks, agents
-3. Smartly merges CLAUDE.md (your project sections stay)
+1. Downloads latest Cortex version from npm
+2. Updates rules, hooks, agents, skills
+3. Smartly merges CLAUDE.md (your project sections stay intact)
 4. Smartly merges settings.json (your hooks stay)
 5. Imports new team learnings
+
+### Automatic update check
+
+On every session start, Cortex checks the npm registry for new versions (cached for 30 minutes). If an update is available, you'll see:
+```
+[Cortex] Update: 1.0.0 → 1.2.0 — Run: npx cortex-init@latest --update
+```
+
+### Fallback (requires GitHub CLI)
+```bash
+npm run cortex:update
+```
 
 ---
 
@@ -176,7 +198,7 @@ Your Project/
 ├── CLAUDE.local.md               ← Personal overrides (gitignored)
 ├── .claude/
 │   ├── agents/ (8)               ← Specialized AI agents
-│   ├── commands/ (7)             ← Slash commands (/start, /audit, etc.)
+│   ├── commands/ (10)            ← Slash commands (/start, /audit, etc.)
 │   ├── skills/ (7)               ← Skills (design, scaffolding, learning, etc.)
 │   ├── rules/ (11)               ← Rules (security, git, testing, etc.)
 │   ├── settings.json             ← Hooks + permissions
@@ -208,3 +230,6 @@ No. You can design locally with `frontend-design` + `ui-ux-pro-max` skills.
 
 **"What does it cost?"**
 Cortex is free (open source). You only need a Claude Code subscription.
+
+**"How do I update?"**
+Run `npx cortex-init@latest --update` or use `/template-update` in Claude Code.

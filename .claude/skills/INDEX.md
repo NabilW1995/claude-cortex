@@ -1,6 +1,6 @@
 # Skills Index
 
-> 34 skills across 9 categories.
+> 7 skills available, 27 planned across 9 categories.
 > Each skill is a structured operational procedure with a SKILL.md definition.
 
 ## How Skills Work
@@ -14,93 +14,94 @@ Every skill:
 
 ## Categories
 
-### Cortex Core (6 skills)
+### Cortex Core (7 skills)
 
-| Skill | Description |
-|-------|-------------|
-| [continuous-learning](./continuous-learning/) | Automatic learning system — detects corrections, extracts lessons, builds persistent knowledge base via SQLite |
-| [frontend-design](./frontend-design/) | Create distinctive, production-grade frontend interfaces with high design quality |
-| [project-discovery](./project-discovery/) | Interactive interview process to understand what the user wants to build before any code is written |
-| [sanity-check](./sanity-check/) | Comprehensive project sanity check — verifies consistency, completeness, and production-readiness |
-| [scaffolding](./scaffolding/) | Set up a new project based on discovery results, install Cortex, and prepare for development |
-| [ui-ux-pro-max](./ui-ux-pro-max/) | UI/UX design intelligence — 67 styles, 96 palettes, 57 font pairings, 13 stacks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| [continuous-learning](./continuous-learning/) | ✅ | Automatic learning system — detects corrections, extracts lessons, builds persistent knowledge base via SQLite |
+| [frontend-design](./frontend-design/) | ✅ | Create distinctive, production-grade frontend interfaces with high design quality |
+| [project-discovery](./project-discovery/) | ✅ | Interactive interview process to understand what the user wants to build before any code is written |
+| [sanity-check](./sanity-check/) | ✅ | Comprehensive project sanity check — verifies consistency, completeness, and production-readiness |
+| [scaffolding](./scaffolding/) | ✅ | Set up a new project based on discovery results, install Cortex, and prepare for development |
+| [subagent-driven-development](./subagent-driven-development/) | ✅ | Execute implementation plans with independent tasks via parallel subagents |
+| [ui-ux-pro-max](./ui-ux-pro-max/) | ✅ | UI/UX design intelligence — 67 styles, 96 palettes, 57 font pairings, 13 stacks |
 
-### AI Automation (1 skill)
+### AI Automation (1 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [prompt-engineering-guide](./prompt-engineering-guide/) | Design and document a prompt engineering guide with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| prompt-engineering-guide | 🔜 Planned | Design and document a prompt engineering guide with structured process and quality checks |
 
-### Development (5 skills)
+### Development (5 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [technical-spec](./technical-spec/) | Create a technical specification document with structured process and quality checks |
-| [architecture-decision-record](./architecture-decision-record/) | Create an architecture decision record (ADR) with structured process and quality checks |
-| [database-schema-design](./database-schema-design/) | Create a database schema design with structured process and quality checks |
-| [incident-response](./incident-response/) | Create an incident response plan with structured process and quality checks |
-| [readme-template](./readme-template/) | Create a README template with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| technical-spec | 🔜 Planned | Create a technical specification document |
+| architecture-decision-record | 🔜 Planned | Create an architecture decision record (ADR) |
+| database-schema-design | 🔜 Planned | Create a database schema design |
+| incident-response | 🔜 Planned | Create an incident response plan |
+| readme-template | 🔜 Planned | Create a README template |
 
-### Design (2 skills)
+### Design (2 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [logo-brief](./logo-brief/) | Create a logo brief with structured process and quality checks |
-| [storyboard](./storyboard/) | Create a storyboard with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| logo-brief | 🔜 Planned | Create a logo brief |
+| storyboard | 🔜 Planned | Create a storyboard |
 
-### Product (6 skills)
+### Product (6 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [ab-test-plan](./ab-test-plan/) | Design and document an A/B test plan with structured process and quality checks |
-| [beta-program-plan](./beta-program-plan/) | Design and document a beta program plan with structured process and quality checks |
-| [faq-builder](./faq-builder/) | Create a FAQ document with structured process and quality checks |
-| [feature-roadmap](./feature-roadmap/) | Design and document a feature roadmap with structured process and quality checks |
-| [prd-writer](./prd-writer/) | Create a product requirements document (PRD) with structured process and quality checks |
-| [user-story](./user-story/) | Create user stories with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| ab-test-plan | 🔜 Planned | Design and document an A/B test plan |
+| beta-program-plan | 🔜 Planned | Design and document a beta program plan |
+| faq-builder | 🔜 Planned | Create a FAQ document |
+| feature-roadmap | 🔜 Planned | Design and document a feature roadmap |
+| prd-writer | 🔜 Planned | Create a product requirements document (PRD) |
+| user-story | 🔜 Planned | Create user stories |
 
-### Legal (4 skills)
+### Legal (4 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [privacy-policy](./privacy-policy/) | Create a privacy policy with structured process and quality checks |
-| [terms-of-service](./terms-of-service/) | Create terms of service with structured process and quality checks |
-| [cookie-policy](./cookie-policy/) | Create a cookie policy with structured process and quality checks |
-| [gdpr-compliance-audit](./gdpr-compliance-audit/) | Analyze and produce a GDPR compliance audit with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| privacy-policy | 🔜 Planned | Create a privacy policy |
+| terms-of-service | 🔜 Planned | Create terms of service |
+| cookie-policy | 🔜 Planned | Create a cookie policy |
+| gdpr-compliance-audit | 🔜 Planned | Analyze and produce a GDPR compliance audit |
 
-### Productivity (2 skills)
+### Productivity (2 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [decision-matrix](./decision-matrix/) | Create a decision matrix with structured process and quality checks |
-| [project-breakdown](./project-breakdown/) | Create a project breakdown with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| decision-matrix | 🔜 Planned | Create a decision matrix |
+| project-breakdown | 🔜 Planned | Create a project breakdown |
 
-### Email (8 skills)
+### Email (8 planned)
 
-| Skill | Description |
-|-------|-------------|
-| [announcement-email](./announcement-email/) | Create an announcement email with structured process and quality checks |
-| [welcome-sequence](./welcome-sequence/) | Create a welcome email sequence with structured process and quality checks |
-| [confirmation-email](./confirmation-email/) | Create a confirmation email with structured process and quality checks |
-| [feature-launch-email](./feature-launch-email/) | Create a feature launch email with structured process and quality checks |
-| [onboarding-sequence](./onboarding-sequence/) | Create an onboarding email sequence with structured process and quality checks |
-| [launch-sequence](./launch-sequence/) | Create a launch email sequence with structured process and quality checks |
-| [password-reset-email](./password-reset-email/) | Create a password reset email with structured process and quality checks |
-| [win-back-sequence](./win-back-sequence/) | Create a win-back email sequence with structured process and quality checks |
+| Skill | Status | Description |
+|-------|--------|-------------|
+| announcement-email | 🔜 Planned | Create an announcement email |
+| welcome-sequence | 🔜 Planned | Create a welcome email sequence |
+| confirmation-email | 🔜 Planned | Create a confirmation email |
+| feature-launch-email | 🔜 Planned | Create a feature launch email |
+| onboarding-sequence | 🔜 Planned | Create an onboarding email sequence |
+| launch-sequence | 🔜 Planned | Create a launch email sequence |
+| password-reset-email | 🔜 Planned | Create a password reset email |
+| win-back-sequence | 🔜 Planned | Create a win-back email sequence |
 
 ## Summary
 
-| Category | Count |
-|----------|-------|
-| Cortex Core | 6 |
-| AI Automation | 1 |
-| Development | 5 |
-| Design | 2 |
-| Product | 6 |
-| Legal | 4 |
-| Productivity | 2 |
-| Email | 8 |
-| **Total** | **34** |
+| Category | Available | Planned | Total |
+|----------|-----------|---------|-------|
+| Cortex Core | 7 | 0 | 7 |
+| AI Automation | 0 | 1 | 1 |
+| Development | 0 | 5 | 5 |
+| Design | 0 | 2 | 2 |
+| Product | 0 | 6 | 6 |
+| Legal | 0 | 4 | 4 |
+| Productivity | 0 | 2 | 2 |
+| Email | 0 | 8 | 8 |
+| **Total** | **7** | **27** | **34** |
 
 ## Quick Start
 
