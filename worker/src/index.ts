@@ -3294,6 +3294,7 @@ export default {
       }
 
       case "get-sessions": {
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
         const sessions = await getActiveSessions(env.PROJECTS, route.projectId!);
         return Response.json({ sessions });
       }

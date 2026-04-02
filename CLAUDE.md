@@ -64,6 +64,20 @@ Details: @.claude/rules/agent-routing.md
 | CI/CD | GitHub Actions (planned), Coolify on Hetzner (planned) |
 | Design | Google Stitch, Tailwind CSS |
 
+## Commands (9)
+
+| Command | Purpose |
+|---------|---------|
+| `/start` | Morning routine — load context, show open tasks |
+| `/wrap-up` | End of day — save learnings, prepare for tomorrow |
+| `/health` | Verify Cortex is correctly installed and working |
+| `/changelog` | Generate changelog from git history |
+| `/audit` | Review and approve pending learnings |
+| `/learn` | Search past learnings |
+| `/onboard` | First-time codebase scan |
+| `/new-project` | Start a new project from scratch |
+| `/template-update` | Update Cortex to latest version |
+
 ## Communication
 
 - Explain EVERY code change: what changed + why, in simple language

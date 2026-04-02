@@ -187,6 +187,12 @@ function install(targetDir) {
         else if (deps['vite']) stack.push(['Framework', 'Vite']);
         else if (deps['express']) stack.push(['Framework', 'Express']);
 
+        // Frontend library detection (standalone, not via framework)
+        if (deps['react'] && !deps['next']) stack.push(['UI Library', 'React']);
+        else if (deps['vue'] && !deps['nuxt']) stack.push(['UI Library', 'Vue']);
+        else if (deps['@angular/core']) stack.push(['UI Library', 'Angular']);
+        else if (deps['svelte'] && !deps['@sveltejs/kit']) stack.push(['UI Library', 'Svelte']);
+
         // Database detection
         if (deps['prisma'] || deps['@prisma/client']) stack.push(['Database', 'Prisma']);
         else if (deps['drizzle-orm']) stack.push(['Database', 'Drizzle']);
