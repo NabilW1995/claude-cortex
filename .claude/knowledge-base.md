@@ -1,16 +1,14 @@
-# Knowledge Base — Bestätigte Regeln
+# Knowledge Base — Approved Rules
 
-> System-weite Regeln. Werden von ALLEN Agents und Sessions beim Start gelesen.
-> Geschrieben NUR vom Auditor nach Bestätigung von Learnings.
-> Einträge sind verbindliche Regeln, keine Vorschläge.
-> Max 200 Zeilen.
+> System-wide rules. Read by ALL agents and sessions on start.
+> Entries are binding rules, not suggestions.
+> Max 200 lines.
 
 ## Provenance Hierarchy
-Jeder Eintrag MUSS seine Quelle zitieren:
-- `[Source: user-korrektur MMDDYY]` — User hat explizit korrigiert
-- `[Source: empirisch MMDDYY]` — Durch Testen oder Daten verifiziert
-- `[Source: agent-beobachtung MMDDYY]` — Pattern von einem Agent erkannt, vom Auditor bestätigt
-- `[Source: learning-db #ID, approved DATE]` — Aus der SQLite Learning-DB genehmigt
+Every entry MUST cite its source:
+- `[Source: user-correction MMDDYY]` — User explicitly corrected
+- `[Source: empirical MMDDYY]` — Verified through testing or data
+- `[Source: learning-db #ID, approved DATE]` — Approved from the SQLite learning DB
 
 ## Hard Rules
 

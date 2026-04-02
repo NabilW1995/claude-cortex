@@ -1,265 +1,210 @@
 # Claude Cortex — Quickstart Guide
 
-> Das kollektive Gehirn für Claude Code. Learnings, Rules, Hooks und Skills über alle deine Projekte hinweg.
+> Shared learning system, hooks, and agents for Claude Code teams.
 
 ---
 
-## 1. Cortex in ein bestehendes Projekt installieren
+## 1. Install Cortex into an existing project
 
-Öffne ein Terminal in deinem Projekt-Ordner und führe diesen einen Befehl aus:
+Open a terminal in your project folder:
 
 ```bash
 git clone --depth 1 https://github.com/NabilW1995/claude-cortex.git .cortex-temp && node .cortex-temp/scripts/template/install.js . && rm -rf .cortex-temp
 ```
 
-**Was passiert:** Das Script scannt dein Projekt, kopiert die Cortex-Dateien rein (Agents, Rules, Hooks, Skills) und mergt intelligent mit deinen bestehenden Dateien — nichts wird überschrieben.
-
-Danach:
+Then:
 ```bash
-npm install                    # sql.js für die Learning-Datenbank
-npm run db:init                # Learning-Datenbank initialisieren
-browser-use install            # Browser Use CLI (optional, für E2E Tests)
+npm install                    # sql.js for the learning database
+npm run db:init                # Initialize learning database
 ```
 
-Optional — Google Stitch für Design:
+Optional — Google Stitch for design:
 ```bash
-cp .mcp.json.example .mcp.json    # Kopiere die MCP-Config
-# Trage deinen Stitch API-Key ein in .mcp.json
+cp .mcp.json.example .mcp.json    # Copy MCP config, add your Stitch API key
 ```
 
 ---
 
-## 2. Was jetzt automatisch passiert
+## 2. What happens automatically
 
-Ab sofort läuft bei jeder Claude Code Session im Hintergrund:
+After installation, these hooks run in the background on every Claude Code session:
 
-| Wann | Was passiert | Hook |
-|------|-------------|------|
-| **Session-Start** | Alte Gate-Files aufräumen, Hooks prüfen, Learnings laden | session-reset.sh, session-start.js |
-| **Jeder Prompt** | Korrektur-Erkennung, relevante Learnings suchen | prompt-submit.js |
-| **Vor jedem Bash-Befehl** | Gefährliche Commands blockieren (rm -rf, force push, Secrets) | guard-bash.sh |
-| **Vor jedem Write/Edit** | Backup erstellen, Secrets im Code erkennen, TODOs zählen | backup-before-write.sh, completeness-gate.sh |
-| **Nach jedem Write/Edit** | Auto-Lint, Security-Scan, Tests laufen lassen | post-edit-lint.sh, security-scan.sh, auto-test.sh |
-| **Bei Fehler** | Fehler kategorisieren und loggen | log-failures.sh |
-| **Vor Komprimierung** | Session-Stand sichern | pre-compact.sh |
-| **Nach Komprimierung** | Claude bekommt Anweisung wo der Stand ist | post-compact-resume.sh |
-| **Session-Ende** | Learnings exportieren + pushen | session-end.js, auto-push-learnings.js |
+| When | What happens |
+|------|-------------|
+| **Session start** | Load learnings, check .env, send Telegram notification |
+| **Every prompt** | Detect corrections, search relevant learnings |
+| **Before Bash** | Block dangerous commands (rm -rf, force push, secrets) |
+| **After Write/Edit** | Auto-lint, security scan, run related tests |
+| **On error** | Log and categorize failures |
+| **Before compaction** | Save session state |
+| **Session end** | Export learnings, send Telegram summary |
 
-**Du musst nichts davon manuell machen.** Es läuft einfach.
+**You don't need to do anything.** It just works.
 
 ---
 
-## 3. Was Claude jetzt automatisch tut
+## 3. Development Pipeline
 
-Diese Agents werden automatisch aktiviert basierend auf der Situation:
+Every coding task follows this flow automatically:
 
-| Situation | Agent | Was passiert |
-|-----------|-------|-------------|
-| Du sagst "Bau mir ein Feature" | **coder** | 3-Phasen: Recherche → Implementierung → Verifizierung |
-| Code ist fertig geschrieben | **test-runner** | Tests schreiben + laufen lassen (Pflicht!) |
-| Build/Lint prüfen | **build-validator** | Build, Types, Lint checken |
-| Du sagst "Review" | **code-review** | 7-Kategorien Review (Security, Performance, etc.) |
-| Ein Fehler tritt auf | **error-whisperer** | Fehler in einfache Sprache übersetzen |
-| Du steckst 3x fest | **rubber-duck** | Hilft dir das Problem zu formulieren |
-| Du steckst 5x fest | **unsticker** | Root-Cause-Analyse |
-| PR erstellen | **pr-ghostwriter** | PR-Beschreibung schreiben |
-| Design/UI-Aufgabe | Design-Flow | Fragt: Stitch oder Lokal? |
+```
+1. Plan Mode        → Discuss requirements, get approval
+2. core--coder      → Write code + tests, commit
+3. core--test-runner → Run ALL tests, find edge cases
+4. core--code-review → Fresh eyes on quality + security
+5. sanity-check     → Does everything fit together?
+6. Done             → Merge
+```
+
+### Agents (8)
+
+| Agent | Purpose |
+|-------|---------|
+| **core--coder** | Writes code + tests |
+| **core--test-runner** | Tests everything (mandatory after coder) |
+| **core--code-review** | Reviews quality (mandatory after test-runner) |
+| **pre--architect** | Deep analysis before complex features |
+| **fix--error-translator** | Translates errors into simple language |
+| **fix--root-cause-finder** | Finds bug root causes |
+| **start--onboarding** | One-time codebase scan |
+| **util--pr-writer** | Writes PR descriptions |
 
 ---
 
-## 4. Dein täglicher Workflow
+## 4. Daily workflow
 
-### Morgens
+### Morning
 ```
-/start          → Lädt den Stand von gestern, zeigt offene Aufgaben
-```
-
-### Während der Arbeit
-```
-/sync           → Zwischendurch Kurs prüfen (nach 3-4 Stunden)
-/feature        → Neues Feature bauen (mit Branch + Tests)
-/review         → Code prüfen lassen
-/unstick        → Wenn du feststeckst
+/start          → Load yesterday's context, show open tasks
 ```
 
-### Abends
+### During work
 ```
-/wrap-up        → Learnings sichern, morgen vorbereiten
-```
-
-### Bei Bedarf
-```
-/audit          → Learnings genehmigen oder ablehnen
-/debt-map       → Tech-Schulden finden und priorisieren
-/release        → Release Notes generieren
-/standup        → 30-Sekunden Standup
-/handoff        → Session an jemand anderen übergeben
-/template-update → Cortex auf neueste Version updaten
+Plan Mode       → Discuss what to build, then agents handle it
+/audit          → Review and approve learnings
 ```
 
-Alle 22 Commands im Detail: `.claude/command-index.md`
+### Evening
+```
+/wrap-up        → Save learnings, prepare for tomorrow
+```
+
+### As needed
+```
+/onboard        → First time in a new codebase
+/new-project    → Start a new project from scratch
+/template-update → Update Cortex to latest version
+/learn          → Search past learnings
+```
 
 ---
 
-## 5. Learnings — Wie das System lernt
+## 5. Learning System
 
-### Deine Aufgabe: Nur 2 Klicks
+The system learns from every conversation. Your only job:
 
-Das Learning-System läuft fast komplett automatisch. Du musst nur **zwei Dinge** tun:
+**Step 1: Correct when something is wrong**
+- "No, that should be blue, not red"
+- "That doesn't work"
+- "Wrong, I wanted it different"
 
-**Schritt 1: Korrigieren wenn etwas falsch ist**
-Sag einfach was falsch ist — in deinen eigenen Worten:
-- "Nein, das soll blau sein, nicht rot"
-- "Das funktioniert nicht, der Button macht nichts"
-- "Falsch, ich wollte das anders"
+**Step 2: Confirm when it works**
+- "Perfect, exactly like that"
+- "Works now"
 
-**Schritt 2: Bestätigen wenn es funktioniert**
-Wenn Claude es gefixt hat, sag dass es passt:
-- "Perfekt, genau so"
-- "Ja, funktioniert jetzt"
-- "Super, passt"
+Claude extracts the learning, saves it to the database, and asks:
+"Should this become a permanent rule?"
 
-**Was dann automatisch passiert:**
-```
-Du sagst "Nein, falsch"     → Claude erkennt: Korrektur
-  ↓
-Claude fixt es              → Du sagst "Perfekt"
-  ↓
-Claude zeigt dir:           "📝 Learning gespeichert:
-                             Regel: Buttons müssen immer blau sein
-                             Fehler: Button war rot
-                             Korrektur: Button-Farbe auf blau geändert"
-  ↓
-Claude fragt:               "Soll das eine feste Regel werden?"
-  ↓
-Du sagst "Ja"               → Wird zur festen Regel
-Du sagst "Nein"             → Wird nur als Notiz gespeichert
-```
+### How learnings flow
 
-Das ist alles. Du musst keinen Code schreiben, keine Datenbank pflegen, nichts konfigurieren. Einfach korrigieren und bestätigen.
-
-### Was im Hintergrund passiert (automatisch)
-
-| Was | Wann | Wie |
-|-----|------|-----|
-| Learning in DB speichern | Nach deiner Bestätigung | SQLite Datenbank |
-| An Team teilen | Bei Session-Ende oder nach 3h Pause | Git push von team-learnings.json |
-| Relevante Learnings laden | Bei jedem neuen Prompt | Hook durchsucht die DB |
-| Von Teammates importieren | Bei Session-Start | Git pull von team-learnings.json |
-| Alte Learnings vergessen | Nach 6 Monaten ohne Nutzung | Confidence-Decay |
-
-### Über Projekte hinweg
-- Alle Learnings werden in einer **globalen SQLite-Datenbank** gespeichert
-- Auf DEINEM Rechner: Projekt A lernt → Projekt B weiß es sofort (gleiche DB)
-- Für Teammates: `team-learnings.json` wird automatisch committed und gepusht
-
-### Über das Template
-- Learnings fließen in den `team-learnings.json` des Cortex GitHub Repos
-- `/template-update` zieht neue Learnings von allen Projekten ins aktuelle Projekt
+| What | When | How |
+|------|------|-----|
+| Save to DB | After your confirmation | SQLite database |
+| Share with team | On session end | Git push of team-learnings.json |
+| Load relevant ones | On every prompt | Hook searches the DB |
+| Import from teammates | On session start | Git pull of team-learnings.json |
+| Decay unused ones | After 6 months | Confidence decay |
 
 ---
 
-## 6. Cortex updaten
+## 6. Update Cortex
 
-### Manuell
 ```bash
 npm run cortex:update
 ```
-Oder im Chat: `/template-update`
+Or in chat: `/template-update`
 
-### Was beim Update passiert
-1. Neueste Version von GitHub holen
-2. Neue Rules, Hooks, Agents runterladen
-3. CLAUDE.md intelligent mergen (deine Projekt-Sektionen bleiben)
-4. settings.json intelligent mergen (deine Hooks bleiben)
-5. Neue Learnings vom Team importieren
-6. Changelog zeigen
-
-### Automatischer Check
-Alle 30 Minuten prüft ein Hintergrund-Check ob es Updates gibt. Wenn ja, siehst du in der StatusLine eine Benachrichtigung.
+What happens:
+1. Fetches latest version from GitHub
+2. Downloads new rules, hooks, agents
+3. Smartly merges CLAUDE.md (your project sections stay)
+4. Smartly merges settings.json (your hooks stay)
+5. Imports new team learnings
 
 ---
 
-## 7. Neues Projekt von Null starten
+## 7. Start a new project
 
 ```
 /new-project
 ```
 
-Claude führt dich durch ein Interview:
-1. Was willst du bauen? (Web App, API, Mobile, etc.)
-2. Welche Features? (Login, Datenbank, Payments, etc.)
-3. Wie soll es aussehen? (Stitch Design oder lokal)
-4. Tech-Stack Empfehlung mit Begründung
-5. Projekt wird aufgesetzt mit Cortex vorinstalliert
+Claude interviews you:
+1. What do you want to build?
+2. Which features? (auth, database, payments)
+3. Design approach? (Stitch or local)
+4. Tech stack recommendation
+5. Project is scaffolded with Cortex pre-installed
+6. CLAUDE.md Tech Stack is auto-filled
 
 ---
 
-## 8. Design-Workflow
+## 8. Telegram Bot (optional)
 
-Wenn du sagst "Bau mir eine Seite" fragt Claude:
+Connect your project to a Telegram group for team coordination.
+See `docs/QUICKSTART-TELEGRAM.md` for setup.
 
-**Option A: Google Stitch** (für ganze Seiten)
-1. Deine Idee wird in einen präzisen Design-Prompt verwandelt
-2. Premium Design-Regeln werden geladen (kein generisches AI-Design)
-3. Stitch generiert das Design
-4. Du reviewst in Stitch → genehmigst
-5. Claude setzt es in Code um
-6. Visuelles Review via Browser Use Screenshot
-
-**Option B: Lokal** (für schnelle Komponenten)
-1. `frontend-design` + `ui-ux-pro-max` Skills laden
-2. Claude fragt nach Stil, Farben, Stimmung
-3. 2-3 Optionen zur Auswahl
-4. Code schreiben nach Genehmigung
+Features: Live dashboard, session tracking, /tasks, /active, /grab, stale PR alerts.
 
 ---
 
-## 9. Datei-Übersicht
+## 9. File Overview
 
 ```
-Dein Projekt/
-├── CLAUDE.md                     ← Projekt-Regeln (wird mit Cortex gemergt)
-├── CLAUDE.local.md               ← Deine persönlichen Overrides (gitignored)
-├── Task Board.md                 ← Kanban: Today / This Week / Backlog / Done
-├── Scratchpad.md                 ← Schnelle Notizen (bei /sync verarbeitet)
-├── Daily Notes/                  ← Automatische Tagesnotizen
+Your Project/
+├── CLAUDE.md                     ← Project rules + tech stack
+├── CLAUDE.local.md               ← Personal overrides (gitignored)
 ├── .claude/
-│   ├── agents/ (16)              ← Spezialisierte KI-Assistenten
-│   ├── commands/ (22)            ← Slash-Commands (/start, /review, etc.)
-│   ├── skills/ (34)              ← Fähigkeiten (Design, Legal, Product, etc.)
-│   ├── rules/ (13)               ← Regeln (Security, Git, Testing, etc.)
-│   ├── agent-memory/             ← Pro-Agent Gedächtnis
-│   ├── settings.json             ← Hooks + Permissions
-│   ├── knowledge-base.md         ← Genehmigte Regeln
-│   ├── knowledge-nominations.md  ← Offene Learnings
-│   ├── team-learnings.json       ← Team-Sync via Git
-│   ├── command-index.md          ← Alle Commands auf einen Blick
-│   ├── memory.md                 ← Aktueller Session-Stand
-│   └── .claude-template.json     ← Cortex Version + Manifest
+│   ├── agents/ (8)               ← Specialized AI agents
+│   ├── commands/ (7)             ← Slash commands (/start, /audit, etc.)
+│   ├── skills/ (7)               ← Skills (design, scaffolding, learning, etc.)
+│   ├── rules/ (11)               ← Rules (security, git, testing, etc.)
+│   ├── settings.json             ← Hooks + permissions
+│   ├── knowledge-base.md         ← Approved rules
+│   ├── knowledge-nominations.md  ← Pending learnings
+│   ├── team-learnings.json       ← Team sync via git
+│   └── memory.md                 ← Current session state
 ├── scripts/
-│   ├── hooks/ (21)               ← Automatische Sicherheits- & Qualitäts-Checks
-│   ├── db/                       ← SQLite Learning-Datenbank
-│   └── template/                 ← Install/Update/Merge Scripts
-├── .mcp.json                     ← MCP Server (Stitch + Knowledge Graph)
-└── .gitignore                    ← Secrets + Logs geschützt
+│   ├── hooks/                    ← Automatic quality + security checks
+│   ├── bot/                      ← Telegram bot notifications
+│   ├── db/                       ← SQLite learning database
+│   └── template/                 ← Install/update/merge scripts
+├── worker/                       ← Telegram bot Cloudflare Worker
+└── docs/                         ← Quickstarts, design docs, diagrams
 ```
 
 ---
 
-## 10. Häufige Fragen
+## 10. FAQ
 
-**"Überschreibt Cortex meine bestehenden Dateien?"**
-Nein. Das Install-Script mergt intelligent: Deine CLAUDE.md, settings.json und Agents bleiben erhalten. Neue Cortex-Dateien werden hinzugefügt, nicht überschrieben.
+**"Does Cortex overwrite my existing files?"**
+No. The install script merges intelligently. Your CLAUDE.md, settings.json, and agents are preserved.
 
-**"Funktioniert das auf Windows?"**
-Ja. Alle Hooks nutzen `sed` statt `jq` (Windows-kompatibel). `PYTHONIOENCODING=utf-8` ist global gesetzt für Browser Use.
+**"Does it work on Windows?"**
+Yes. All hooks use Windows-compatible commands. `PYTHONIOENCODING=utf-8` is set for Browser Use.
 
-**"Brauche ich Stitch?"**
-Nein, Stitch ist optional. Du kannst auch komplett lokal designen mit `frontend-design` + `ui-ux-pro-max`.
+**"Do I need Stitch?"**
+No. You can design locally with `frontend-design` + `ui-ux-pro-max` skills.
 
-**"Was kostet das?"**
-Claude Cortex selbst ist kostenlos (Open Source). Du brauchst nur einen Claude Code Zugang.
-
-**"Kann ich Skills verbessern?"**
-Ja! Nutze den Skill Creator: `/skill-creator:skill-creator` — er hilft dir jeden Skill zu verbessern und zu testen.
+**"What does it cost?"**
+Cortex is free (open source). You only need a Claude Code subscription.
