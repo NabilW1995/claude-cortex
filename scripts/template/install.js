@@ -170,6 +170,68 @@ function install(targetDir) {
     }
   }
 
+  // 5b. Auto-detect Tech Stack and fill CLAUDE.md
+  if (fs.existsSync(targetCLAUDEPath)) {
+    const targetPkgPath = path.join(targetDir, 'package.json');
+    if (fs.existsSync(targetPkgPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(targetPkgPath, 'utf-8'));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        const stack = [];
+
+        // Framework detection
+        if (deps['next']) stack.push(['Framework', `Next.js ${deps['next'].replace('^', '')}`]);
+        else if (deps['nuxt']) stack.push(['Framework', 'Nuxt']);
+        else if (deps['@sveltejs/kit']) stack.push(['Framework', 'SvelteKit']);
+        else if (deps['astro']) stack.push(['Framework', 'Astro']);
+        else if (deps['vite']) stack.push(['Framework', 'Vite']);
+        else if (deps['express']) stack.push(['Framework', 'Express']);
+
+        // Database detection
+        if (deps['prisma'] || deps['@prisma/client']) stack.push(['Database', 'Prisma']);
+        else if (deps['drizzle-orm']) stack.push(['Database', 'Drizzle']);
+        else if (deps['mongoose']) stack.push(['Database', 'MongoDB (Mongoose)']);
+        else if (deps['better-sqlite3'] || deps['sql.js']) stack.push(['Database', 'SQLite']);
+
+        // Auth detection
+        if (deps['next-auth']) stack.push(['Auth', 'NextAuth.js']);
+        else if (deps['@clerk/nextjs']) stack.push(['Auth', 'Clerk']);
+        else if (deps['better-auth']) stack.push(['Auth', 'Better Auth']);
+        else if (deps['lucia']) stack.push(['Auth', 'Lucia']);
+
+        // UI detection
+        if (deps['@radix-ui/react-slot'] || fs.existsSync(path.join(targetDir, 'components.json'))) stack.push(['UI', 'shadcn/ui']);
+        else if (deps['@mui/material']) stack.push(['UI', 'Material UI']);
+        if (deps['tailwindcss']) stack.push(['CSS', 'Tailwind CSS']);
+
+        // Testing detection
+        if (deps['vitest']) stack.push(['Testing', 'Vitest']);
+        else if (deps['jest']) stack.push(['Testing', 'Jest']);
+
+        // Language detection
+        if (deps['typescript'] || fs.existsSync(path.join(targetDir, 'tsconfig.json'))) stack.push(['Language', 'TypeScript']);
+
+        if (stack.length > 0) {
+          let claudeMd = fs.readFileSync(targetCLAUDEPath, 'utf-8');
+          const stackTable = stack.map(([layer, tech]) => `| ${layer} | ${tech} |`).join('\n');
+          const techSection = `## Tech Stack\n\n| Layer | Technology |\n|-------|------------|\n${stackTable}\n`;
+
+          // Replace existing Tech Stack section or insert before Communication
+          if (claudeMd.includes('## Tech Stack')) {
+            claudeMd = claudeMd.replace(/## Tech Stack[\s\S]*?(?=\n## )/, techSection + '\n');
+          } else if (claudeMd.includes('## Communication')) {
+            claudeMd = claudeMd.replace('## Communication', techSection + '\n## Communication');
+          }
+
+          fs.writeFileSync(targetCLAUDEPath, claudeMd);
+          console.log(`  Tech Stack auto-detected: ${stack.map(s => s[1]).join(', ')}`);
+        }
+      } catch (e) {
+        // Silent fail — tech stack detection is optional
+      }
+    }
+  }
+
   // 6. Merge settings.json
   const { mergeSettings } = require('./merge-settings');
   const templateSettingsPath = path.join(TEMPLATE_DIR, '.claude/settings.json');
