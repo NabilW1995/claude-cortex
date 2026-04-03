@@ -1,6 +1,6 @@
 # Skills Index
 
-> 7 skills available, 27 planned across 9 categories.
+> 8 skills available, 27 planned across 9 categories.
 > Each skill is a structured operational procedure with a SKILL.md definition.
 
 ## How Skills Work
@@ -14,16 +14,17 @@ Every skill:
 
 ## Categories
 
-### Cortex Core (7 skills)
+### Cortex Core (8 skills)
 
 | Skill | Status | Description |
 |-------|--------|-------------|
+| [browser-use](./browser-use/) | ✅ | Browser automation — E2E testing, visual review, form filling, screenshots |
+| [code-quality-rules](./code-quality-rules/) | ✅ | Agent-only domain knowledge — preloaded into coder agent |
 | [continuous-learning](./continuous-learning/) | ✅ | Automatic learning system — detects corrections, extracts lessons, builds persistent knowledge base via SQLite |
 | [frontend-design](./frontend-design/) | ✅ | Create distinctive, production-grade frontend interfaces with high design quality |
 | [project-discovery](./project-discovery/) | ✅ | Interactive interview process to understand what the user wants to build before any code is written |
 | [sanity-check](./sanity-check/) | ✅ | Comprehensive project sanity check — verifies consistency, completeness, and production-readiness |
 | [scaffolding](./scaffolding/) | ✅ | Set up a new project based on discovery results, install Cortex, and prepare for development |
-| [subagent-driven-development](./subagent-driven-development/) | ✅ | Execute implementation plans with independent tasks via parallel subagents |
 | [ui-ux-pro-max](./ui-ux-pro-max/) | ✅ | UI/UX design intelligence — 67 styles, 96 palettes, 57 font pairings, 13 stacks |
 
 ### AI Automation (1 planned)

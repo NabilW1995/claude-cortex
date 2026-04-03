@@ -68,7 +68,6 @@ describe('Claude Cortex Integration Test', () => {
       const rules = fs.readdirSync(path.join(testDir, '.claude/rules'));
       assert.ok(rules.includes('security.md'));
       assert.ok(rules.includes('design-flow.md'));
-      assert.ok(rules.includes('browser-use.md'));
       assert.ok(rules.includes('learning-system.md'));
       assert.ok(rules.includes('testing.md'));
     });

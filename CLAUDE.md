@@ -41,7 +41,7 @@ All other agents dispatch when needed. See `.claude/agents/` for full list.
 | **Fix** | error-translator, root-cause-finder | When errors or bugs occur |
 | **RPI** | requirement-parser, product-manager, ux-designer | During /rpi workflow |
 | **Drift** | 5 parallel agents | During /drift-check |
-| **Utility** | pr-writer, onboarding, daily-start | As needed |
+| **Utility** | pr-writer, onboarding | As needed |
 <!-- CORTEX:AGENTS:END -->
 
 <!-- CORTEX:SKILL_ROUTING:START -->
@@ -110,6 +110,5 @@ Skills trigger automatically based on what you say. No need to memorize commands
 @.claude/rules/learning-system.md — Learning system (correction detection, SQLite DB)
 @.claude/rules/non-programmer.md — Communication rules for non-programmers
 @.claude/rules/accessibility.md — Accessibility standards
-@.claude/rules/browser-use.md — Browser Use CLI commands
 @docs/GUIDE-WORKING-WITH-CLAUDE.md — Team guide for effective AI collaboration
 <!-- CORTEX:REFERENCES:END -->

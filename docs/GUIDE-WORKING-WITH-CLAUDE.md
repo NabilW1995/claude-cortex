@@ -27,10 +27,10 @@
 ### Dein Tag mit Claude
 
 ```
-Morgens:   claude --agent=daily-start   → Automatische Morgenroutine (oder /start)
-Tagsüber:  Plan Mode                    → Besprechen was zu bauen ist, dann Agents arbeiten lassen
-           /audit                       → Neue Learnings prufen und bestatigen
-Abends:    /wrap-up                     → Learnings sichern, fur morgen vorbereiten
+Morgens:   /start          → Ladt Kontext von gestern, zeigt offene Tasks
+Tagsüber:  Plan Mode       → Besprechen was zu bauen ist, dann Agents arbeiten lassen
+           /audit          → Neue Learnings prufen und bestatigen
+Abends:    /wrap-up        → Learnings sichern, fur morgen vorbereiten
 ```
 
 ---

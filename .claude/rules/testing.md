@@ -19,7 +19,7 @@ globs: "**/*.{test,spec}.{ts,tsx,js,jsx,py}"
 - Login/Registration
 - Payment/Checkout (if applicable)
 - The 3 most important user journeys
-- See @.claude/rules/browser-use.md for Browser Use CLI commands.
+- For E2E tests and visual review: use the browser-use skill
 
 ## Testing Rules
 - MUST: Write tests alongside code (code and tests are developed together)
