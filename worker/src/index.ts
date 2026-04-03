@@ -4379,41 +4379,24 @@ function buildSettingsMessage(prefs: UserPreferences): {
 }
 
 /**
- * Send a 3-message workflow tutorial explaining how the team bot works.
+ * Send a single concise Quick Start tutorial message.
  * Used as the final onboarding step for new users.
  */
-async function sendOnboardingTutorial(ctx: Context): Promise<void> {
-  await ctx.reply(
-    "\u{1F4D6} <b>How the Team Bot Works</b>\n" +
-      "\u{2501}".repeat(20) +
-      "\n\n" +
-      "This bot helps your team coordinate work on projects. " +
-      "Here\u2019s the workflow in 3 steps:",
-    { parse_mode: "HTML" }
-  );
+async function sendOnboardingTutorial(
+  ctx: Context,
+  lang: Locale
+): Promise<void> {
+  const tutorialText = [
+    t(lang, "onboard.tutorial_heading"),
+    "",
+    t(lang, "onboard.tutorial_step1"),
+    t(lang, "onboard.tutorial_step2"),
+    t(lang, "onboard.tutorial_step3"),
+    "",
+    t(lang, "onboard.golden_rule"),
+  ].join("\n");
 
-  await ctx.reply(
-    "1\u{FE0F}\u{20E3} <b>Claim a Category</b>\n" +
-      "Pick a work area (e.g., \u201CFrontend\u201D, \u201CAPI\u201D). " +
-      "All issues in that area get assigned to you.\n\n" +
-      "2\u{FE0F}\u{20E3} <b>Work on Your Branch</b>\n" +
-      "Create a feature branch and code. " +
-      "When ready, create a PR \u2014 your team gets a preview link to review.\n\n" +
-      "3\u{FE0F}\u{20E3} <b>Pull After Merge</b>\n" +
-      "After your PR is merged, everyone gets a reminder to pull. " +
-      "This keeps the whole team in sync.",
-    { parse_mode: "HTML" }
-  );
-
-  await ctx.reply(
-    "\u{26A1} <b>The Golden Rule</b>\n" +
-      "\u{2501}".repeat(20) +
-      "\n\n" +
-      "<i>One person per category. Always pull after a merge.</i>\n\n" +
-      "This prevents merge conflicts and keeps the team in sync.\n\n" +
-      "\u{2705} You\u2019re all set! Use the buttons below to get started.",
-    { parse_mode: "HTML" }
-  );
+  await ctx.reply(tutorialText, { parse_mode: "HTML" });
 }
 
 // ---------------------------------------------------------------------------
@@ -5286,7 +5269,7 @@ async function renderHomeScreen(
 
   const keyboard = buildReplyKeyboard(lang);
 
-  await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+  await ctx.reply(t(lang, "onboard.quick_actions"), {
     reply_markup: keyboard,
     parse_mode: "HTML",
   });
@@ -5348,13 +5331,22 @@ function createBot(
       if (!isMember && !onboarded) {
         // Start the 3-step onboarding wizard
         await setOnboardingState(env.PROJECTS, telegramId, "awaiting_github");
-        await ctx.reply(
-          "\u{1F44B} <b>Welcome to the Team Bot!</b>\n\n" +
-            "Let\u2019s get you set up in 3 quick steps.\n\n" +
-            "<b>Step 1/3: GitHub Account</b>\n" +
-            "Please send me your GitHub username:",
-          { parse_mode: "HTML" }
-        );
+        const lang = await getUserLanguage(env.PROJECTS, telegramId);
+        const welcomeText = [
+          t(lang, "onboard.welcome_heading"),
+          t(lang, "onboard.welcome_subtitle"),
+          "",
+          t(lang, "onboard.features_heading"),
+          t(lang, "onboard.feature_claim"),
+          t(lang, "onboard.feature_tasks"),
+          t(lang, "onboard.feature_board"),
+          t(lang, "onboard.feature_idea"),
+          t(lang, "onboard.feature_prompt"),
+          "",
+          t(lang, "onboard.step1_heading"),
+          t(lang, "onboard.step1_prompt"),
+        ].join("\n");
+        await ctx.reply(welcomeText, { parse_mode: "HTML" });
         return;
       }
     }
@@ -5382,7 +5374,7 @@ function createBot(
     // New 6-button reply keyboard
     const keyboard = buildReplyKeyboard(lang);
 
-    await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+    await ctx.reply(t(lang, "onboard.quick_actions"), {
       reply_markup: keyboard,
       parse_mode: "HTML",
     });
@@ -5434,7 +5426,7 @@ function createBot(
     );
     // Re-render the reply keyboard with the new language
     const keyboard = buildReplyKeyboard(args as Locale);
-    await ctx.reply("\u{2328}\u{FE0F} Keyboard updated.", {
+    await ctx.reply(t(args as Locale, "onboard.quick_actions"), {
       reply_markup: keyboard,
       parse_mode: "HTML",
     });
@@ -7005,11 +6997,11 @@ function createBot(
   // Reply keyboard button handlers — v4 (5-button layout)
   // -------------------------------------------------------------------
 
-  bot.hears("\u{1F4CB} Aufgabe nehmen", async (ctx) => {
+  bot.hears(["\u{1F4CB} Aufgabe nehmen", "\u{1F4CB} Claim Task"], async (ctx) => {
     await handleAufgabeNehmen(ctx, project, env, projectId);
   });
 
-  bot.hears("\u{2705} Meine Aufgaben", async (ctx) => {
+  bot.hears(["\u{2705} Meine Aufgaben", "\u{2705} My Tasks"], async (ctx) => {
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
 
@@ -7040,15 +7032,16 @@ function createBot(
     }
   });
 
-  bot.hears("\u{1F4A1} Neue Idee", async (ctx) => {
+  bot.hears(["\u{1F4A1} Neue Idee", "\u{1F4A1} New Idea"], async (ctx) => {
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
 
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
     // Start the guided issue creation wizard
     await setNewIdeaState(env.PROJECTS, telegramId, { step: "awaiting_title" });
     await ctx.reply(
-      "\u{1F4A1} <b>Neue Idee</b>\n\n" +
-        "Schick mir den Titel f\u{00FC}r dein neues Issue:",
+      t(lang, "idea.heading") + "\n\n" +
+        t(lang, "idea.title_prompt"),
       { parse_mode: "HTML" }
     );
   });
@@ -7158,15 +7151,17 @@ function createBot(
     await finalizeNewIdea(ctx, env, telegramId, state, PRIORITY_DEFAULT);
   });
 
-  bot.hears("\u{2753} Hilfe", async (ctx) => {
+  bot.hears(["\u{2753} Hilfe", "\u{2753} Help"], async (ctx) => {
+    const telegramId = ctx.from?.id;
+    const lang = telegramId ? await getUserLanguage(env.PROJECTS, telegramId) : "en" as Locale;
     const keyboard = new InlineKeyboard()
-      .text("\u{1F6AB} Blocker", "help_blocker")
-      .text("\u{1F4CA} Priorit\u{00E4}ten", "help_priorities")
+      .text(t(lang, "help.btn_blocker"), "help_blocker")
+      .text(t(lang, "help.btn_priorities"), "help_priorities")
       .row()
-      .text("\u{1F4C1} Kategorien", "help_categories")
-      .text("\u{1F441} Preview", "help_preview")
+      .text(t(lang, "help.btn_categories"), "help_categories")
+      .text(t(lang, "help.btn_preview"), "help_preview")
       .row()
-      .text("\u{26A0}\u{FE0F} Konflikte", "help_conflicts");
+      .text(t(lang, "help.btn_conflicts"), "help_conflicts");
 
     await ctx.reply(HELP_TEXTS.overview, {
       parse_mode: "HTML",
@@ -7174,7 +7169,7 @@ function createBot(
     });
   });
 
-  bot.hears("\u{1F504} Projekt wechseln", async (ctx) => {
+  bot.hears(["\u{1F504} Projekt wechseln", "\u{1F504} Switch Project"], async (ctx) => {
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
 
@@ -7587,14 +7582,28 @@ function createBot(
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
 
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
     await setOnboardingState(env.PROJECTS, telegramId, "tutorial");
 
-    // Send the 3-message workflow tutorial
-    await sendOnboardingTutorial(ctx);
+    // Send the concise Quick Start tutorial
+    await sendOnboardingTutorial(ctx, lang);
 
     // Mark onboarding as permanently complete
     await markOnboarded(env.PROJECTS, telegramId);
     await clearOnboardingState(env.PROJECTS, telegramId);
+
+    // Show team status so new member has context
+    try {
+      const { text: boardText, keyboard: boardKb } = await renderTeamBoard(env, telegramId);
+      if (boardText) {
+        await ctx.reply(t(lang, "onboard.team_status") + "\n\n" + boardText, {
+          parse_mode: "HTML",
+          reply_markup: boardKb,
+        });
+      }
+    } catch {
+      // Non-critical — skip team board if it fails
+    }
 
     // Project header with inline [Switch] button
     if (telegramId) {
@@ -7614,15 +7623,8 @@ function createBot(
     }
 
     // Show the normal reply keyboard so the user can start working
-    const keyboard = new Keyboard()
-      .text("\u{1F4CB} Aufgabe nehmen").text("\u{2705} Meine Aufgaben")
-      .row()
-      .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
-      .row()
-      .text("\u{2753} Hilfe").text("\u{1F504} Projekt wechseln")
-      .resized()
-      .persistent();
-    await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+    const keyboard = buildReplyKeyboard(lang);
+    await ctx.reply(t(lang, "onboard.quick_actions"), {
       reply_markup: keyboard,
       parse_mode: "HTML",
     });
@@ -8020,14 +8022,14 @@ function createBot(
 
     const members = await getTeamMembers(env.PROJECTS);
     const color = getUserColor(members, telegramId);
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
 
-    await ctx.reply(
-      `${color} <b>GitHub linked!</b>\n\n` +
-        `GitHub: <code>${escapeHtml(username)}</code>\n` +
-        `Telegram: ${escapeHtml(firstName)}\n\n` +
-        "<b>Step 2/3: Notification Settings</b>",
-      { parse_mode: "HTML" }
-    );
+    const linkedText = [
+      `${color} ` + t(lang, "onboard.github_linked", { username: escapeHtml(username), firstName: escapeHtml(firstName) }),
+      "",
+      t(lang, "onboard.step2_heading"),
+    ].join("\n");
+    await ctx.reply(linkedText, { parse_mode: "HTML" });
 
     // Advance to settings step and show the settings panel
     await setOnboardingState(env.PROJECTS, telegramId, "settings");
@@ -8038,7 +8040,7 @@ function createBot(
     const settingsKb = {
       inline_keyboard: [
         ...keyboard.inline_keyboard,
-        [{ text: "\u{27A1}\u{FE0F} Continue to Tutorial", callback_data: "onboard_continue" }],
+        [{ text: t(lang, "onboard.continue_tutorial"), callback_data: "onboard_continue" }],
       ],
     };
 

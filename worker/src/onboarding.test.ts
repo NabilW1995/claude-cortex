@@ -228,43 +228,47 @@ describe("KV Helper Functions — Onboarding State", () => {
 // =========================================================================
 
 describe("sendOnboardingTutorial", () => {
-  it("sends exactly 3 messages as part of the tutorial", async () => {
+  it("sends exactly 1 message (concise Quick Start)", async () => {
     const ctx = createMockContext();
-    await sendOnboardingTutorial(ctx as any);
-    expect(ctx.reply).toHaveBeenCalledTimes(3);
+    await sendOnboardingTutorial(ctx as any, "en");
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
   });
 
-  it("sends all messages in HTML parse mode", async () => {
+  it("sends the message in HTML parse mode", async () => {
     const ctx = createMockContext();
-    await sendOnboardingTutorial(ctx as any);
+    await sendOnboardingTutorial(ctx as any, "en");
     const replyCalls = vi.mocked(ctx.reply as any).mock.calls;
-    for (const call of replyCalls) {
-      expect(call[1]).toEqual(expect.objectContaining({ parse_mode: "HTML" }));
-    }
+    expect(replyCalls[0][1]).toEqual(expect.objectContaining({ parse_mode: "HTML" }));
   });
 
-  it("first message introduces 'How the Team Bot Works'", async () => {
+  it("message contains the Quick Start heading", async () => {
     const ctx = createMockContext();
-    await sendOnboardingTutorial(ctx as any);
-    const firstMessage = vi.mocked(ctx.reply as any).mock.calls[0][0] as string;
-    expect(firstMessage).toContain("How the Team Bot Works");
+    await sendOnboardingTutorial(ctx as any, "en");
+    const message = vi.mocked(ctx.reply as any).mock.calls[0][0] as string;
+    expect(message).toContain("Quick Start Guide");
   });
 
-  it("second message explains the 3-step workflow", async () => {
+  it("message explains the 3-step workflow", async () => {
     const ctx = createMockContext();
-    await sendOnboardingTutorial(ctx as any);
-    const secondMessage = vi.mocked(ctx.reply as any).mock.calls[1][0] as string;
-    expect(secondMessage).toContain("Claim a Category");
-    expect(secondMessage).toContain("Work on Your Branch");
-    expect(secondMessage).toContain("Pull After Merge");
+    await sendOnboardingTutorial(ctx as any, "en");
+    const message = vi.mocked(ctx.reply as any).mock.calls[0][0] as string;
+    expect(message).toContain("Claim Task");
+    expect(message).toContain("My Tasks");
+    expect(message).toContain("auto-releases");
   });
 
-  it("third message contains the golden rule and completion", async () => {
+  it("message contains the golden rule", async () => {
     const ctx = createMockContext();
-    await sendOnboardingTutorial(ctx as any);
-    const thirdMessage = vi.mocked(ctx.reply as any).mock.calls[2][0] as string;
-    expect(thirdMessage).toContain("Golden Rule");
-    expect(thirdMessage).toContain("all set");
+    await sendOnboardingTutorial(ctx as any, "en");
+    const message = vi.mocked(ctx.reply as any).mock.calls[0][0] as string;
+    expect(message).toContain("Golden Rule");
+  });
+
+  it("respects German locale", async () => {
+    const ctx = createMockContext();
+    await sendOnboardingTutorial(ctx as any, "de");
+    const message = vi.mocked(ctx.reply as any).mock.calls[0][0] as string;
+    expect(message).toContain("Schnellstart-Guide");
   });
 });
 
@@ -547,12 +551,12 @@ describe("onboard_continue callback flow", () => {
 
     // Simulate the onboard_continue handler
     await setOnboardingState(kv, telegramId, "tutorial");
-    await sendOnboardingTutorial(ctx as any);
+    await sendOnboardingTutorial(ctx as any, "en");
     await markOnboarded(kv, telegramId);
     await clearOnboardingState(kv, telegramId);
 
-    // Tutorial was sent (3 messages)
-    expect(ctx.reply).toHaveBeenCalledTimes(3);
+    // Tutorial was sent (1 concise message)
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
     // Onboarding is complete
     expect(await isOnboarded(kv, telegramId)).toBe(true);
     expect(await getOnboardingState(kv, telegramId)).toBeNull();
