@@ -22,3 +22,18 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_repo_date ON events(repo, created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_date ON sessions(user_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project, started_at);
+
+-- Time tracking per category session (Issue #60)
+CREATE TABLE IF NOT EXISTS time_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  project TEXT NOT NULL,
+  category TEXT NOT NULL,
+  started_at DATETIME NOT NULL,
+  ended_at DATETIME NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 0,
+  tasks_completed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_time_logs_user_date ON time_logs(user_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_time_logs_project ON time_logs(project, started_at);

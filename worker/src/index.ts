@@ -107,6 +107,30 @@ interface PausedCategory {
   pausedAt: string;
 }
 
+/**
+ * Tracks an active category timer for time-tracking purposes.
+ * Stored in KV under `timer:{telegramId}:{projectId}` so it survives
+ * bot restarts.  (Issue #60)
+ */
+interface TimerState {
+  category: string;
+  startedAt: string;
+}
+
+/**
+ * A conversation thread between two team members via the bot.
+ * Stored in KV with a 24h TTL so threads auto-expire.
+ */
+interface MessageThread {
+  senderTelegramId: number;
+  senderName: string;
+  recipientTelegramId: number;
+  recipientName: string;
+  originalMessage: string;
+  issueNumber?: number;
+  createdAt: string;
+}
+
 interface GitHubIssuesPayload {
   action: string;
   issue: {
@@ -1460,6 +1484,72 @@ async function clearOnboardingState(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for team messaging threads (Issue #59)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a message thread from KV by its key.
+ * Returns null if the thread has expired or doesn't exist.
+ */
+async function getMessageThread(
+  kv: KVNamespace,
+  threadKey: string
+): Promise<MessageThread | null> {
+  const raw = await kv.get(threadKey);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as MessageThread;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store a message thread in KV with a 24h TTL.
+ * Threads auto-expire so stale conversations don't accumulate.
+ */
+async function setMessageThread(
+  kv: KVNamespace,
+  threadKey: string,
+  data: MessageThread
+): Promise<void> {
+  await kv.put(threadKey, JSON.stringify(data), { expirationTtl: 86400 });
+}
+
+// ---------------------------------------------------------------------------
+// Team messaging helpers — @Name parsing (Issue #59)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract @Name mentions from a message.
+ * Only explicit @-tags are matched — no auto-suggestions.
+ */
+function parseAtMentions(text: string): string[] {
+  const mentions: string[] = [];
+  const regex = /(?:^|\s)@([\p{L}\p{N}_]+)/gu;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    mentions.push(match[1]);
+  }
+  return mentions;
+}
+
+/**
+ * Extract #N issue references from a message.
+ * Returns an array of issue numbers.
+ */
+function parseIssueReferences(text: string): number[] {
+  const refs: number[] = [];
+  const regex = /(?:^|\s)#(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    const num = parseInt(match[1], 10);
+    if (!isNaN(num) && num > 0) refs.push(num);
+  }
+  return refs;
+}
+
+// ---------------------------------------------------------------------------
 // "Neue Idee" wizard state — guided issue creation flow
 // ---------------------------------------------------------------------------
 
@@ -1803,6 +1893,57 @@ async function incrementTodayDoneCount(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for category timer (Issue #60)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the active category timer for a user in a project.
+ */
+async function getTimer(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<TimerState | null> {
+  const raw = await kv.get(`timer:${telegramId}:${projectId}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as TimerState;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start a category timer — stores the category name and current timestamp.
+ * Safe: one-category-per-user guard in handleCategoryConfirm prevents double-start.
+ * If a timer already exists (e.g. KV/claim state drift), it is overwritten.
+ */
+async function startTimer(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string,
+  category: string
+): Promise<void> {
+  const state: TimerState = { category, startedAt: new Date().toISOString() };
+  await kv.put(`timer:${telegramId}:${projectId}`, JSON.stringify(state));
+}
+
+/**
+ * Stop a category timer — removes the KV entry and returns the state
+ * so the caller can calculate the duration.
+ */
+async function stopTimer(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<TimerState | null> {
+  const state = await getTimer(kv, telegramId, projectId);
+  if (!state) return null;
+  await kv.delete(`timer:${telegramId}:${projectId}`);
+  return state;
+}
+
+// ---------------------------------------------------------------------------
 // D1 helpers — event logging and session history
 // ---------------------------------------------------------------------------
 
@@ -1907,6 +2048,100 @@ async function getWorkHoursToday(
   } catch {
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// D1 helpers — time tracking (Issue #60)
+// ---------------------------------------------------------------------------
+
+/**
+ * Log a completed category timer session to the time_logs table.
+ * Best-effort — errors are swallowed so they don't break the main flow.
+ */
+async function logTimeEntry(
+  db: D1Database,
+  entry: {
+    userId: number;
+    project: string;
+    category: string;
+    startedAt: string;
+    endedAt: string;
+    durationMinutes: number;
+    tasksCompleted: number;
+  }
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        "INSERT INTO time_logs (user_id, project, category, started_at, ended_at, duration_minutes, tasks_completed) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .bind(
+        String(entry.userId),
+        entry.project,
+        entry.category,
+        entry.startedAt,
+        entry.endedAt,
+        entry.durationMinutes,
+        entry.tasksCompleted
+      )
+      .run();
+  } catch {
+    // Best-effort — don't break main flow
+  }
+}
+
+/**
+ * Total tracked minutes for a user on a specific date (YYYY-MM-DD).
+ */
+async function getDailyHours(
+  db: D1Database,
+  userId: number,
+  date: string
+): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT COALESCE(SUM(duration_minutes), 0) as total FROM time_logs WHERE user_id = ? AND date(started_at) = ?"
+      )
+      .bind(String(userId), date)
+      .first<{ total: number }>();
+    return row?.total || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Total tracked minutes for a user from weekStart onwards (7 days).
+ */
+async function getWeeklyHours(
+  db: D1Database,
+  userId: number,
+  weekStart: string
+): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT COALESCE(SUM(duration_minutes), 0) as total FROM time_logs WHERE user_id = ? AND date(started_at) >= ? AND date(started_at) < date(?, '+7 days')"
+      )
+      .bind(String(userId), weekStart, weekStart)
+      .first<{ total: number }>();
+    return row?.total || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Format a duration in minutes as a human-readable string.
+ * 0 → "0m", 45 → "45m", 90 → "1h 30m", 120 → "2h 0m"
+ */
+function formatDuration(minutes: number): string {
+  const clamped = Math.max(0, Math.round(minutes));
+  if (clamped < 60) return `${clamped}m`;
+  const h = Math.floor(clamped / 60);
+  const m = clamped % 60;
+  return `${h}h ${m}m`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2692,6 +2927,20 @@ async function handleMeineAufgaben(
     lines.push("");
     lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
 
+    // Show daily tracked time (Issue #60)
+    const dailyMinutes0 = await getDailyHours(env.DB, telegramId, new Date().toISOString().slice(0, 10));
+    const currentTimer0 = await getTimer(env.PROJECTS, telegramId, projectId);
+    let runningMinutes0 = 0;
+    if (currentTimer0) {
+      runningMinutes0 = Math.round(
+        (Date.now() - new Date(currentTimer0.startedAt).getTime()) / 60000
+      );
+    }
+    const totalMinutes0 = dailyMinutes0 + runningMinutes0;
+    if (totalMinutes0 > 0) {
+      lines.push(`\u{23F1} Today: <b>${formatDuration(totalMinutes0)}</b>`);
+    }
+
     return { text: lines.join("\n"), keyboard: kb };
   }
 
@@ -2743,9 +2992,23 @@ async function handleMeineAufgaben(
     }
   }
 
-  // Footer: today counter + refresh + pause
+  // Footer: today counter + time tracker + refresh + pause
   lines.push("");
   lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
+
+  // Show daily tracked time (Issue #60)
+  const dailyMinutes = await getDailyHours(env.DB, telegramId, new Date().toISOString().slice(0, 10));
+  const currentTimer = await getTimer(env.PROJECTS, telegramId, projectId);
+  let runningMinutes = 0;
+  if (currentTimer) {
+    runningMinutes = Math.round(
+      (Date.now() - new Date(currentTimer.startedAt).getTime()) / 60000
+    );
+  }
+  const totalMinutes = dailyMinutes + runningMinutes;
+  if (totalMinutes > 0) {
+    lines.push(`\u{23F1} Today: <b>${formatDuration(totalMinutes)}</b>`);
+  }
 
   // Show Pause button when user has a claimed category
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
@@ -3607,6 +3870,9 @@ async function handleCategoryConfirm(
   claimsState.claims.push(claim);
   await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
 
+  // Start category timer (Issue #60)
+  await startTimer(env.PROJECTS, telegramId, projectId, label);
+
   // Remove any paused marker for this category (someone is picking it up)
   await removePausedCategory(env.PROJECTS, projectId, label);
 
@@ -3729,6 +3995,24 @@ async function handleCategoryReleaseConfirm(
   // Remove from KV
   claimsState.claims.splice(claimIndex, 1);
   await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  // Stop category timer and log time (Issue #60)
+  const timerState = await stopTimer(env.PROJECTS, telegramId, projectId);
+  if (timerState) {
+    const endedAt = new Date().toISOString();
+    const durationMinutes = Math.round(
+      (new Date(endedAt).getTime() - new Date(timerState.startedAt).getTime()) / 60000
+    );
+    await logTimeEntry(env.DB, {
+      userId: telegramId,
+      project: projectId,
+      category: timerState.category,
+      startedAt: timerState.startedAt,
+      endedAt,
+      durationMinutes,
+      tasksCompleted: 0,
+    });
+  }
 
   const safeDisplayName = escapeHtml(claim.displayName);
   const safeFirstName = escapeHtml(firstName);
@@ -3876,7 +4160,25 @@ async function handlePauseConfirm(
   // 4. Clear the user's active task
   await clearActiveTask(env.PROJECTS, telegramId, projectId);
 
-  // 5. Confirm to user
+  // 5. Stop category timer and log time (Issue #60)
+  const timerState = await stopTimer(env.PROJECTS, telegramId, projectId);
+  if (timerState) {
+    const endedAt = new Date().toISOString();
+    const durationMinutes = Math.round(
+      (new Date(endedAt).getTime() - new Date(timerState.startedAt).getTime()) / 60000
+    );
+    await logTimeEntry(env.DB, {
+      userId: telegramId,
+      project: projectId,
+      category: timerState.category,
+      startedAt: timerState.startedAt,
+      endedAt,
+      durationMinutes,
+      tasksCompleted: completedCount,
+    });
+  }
+
+  // 6. Confirm to user
   await ctx.editMessageText(
     `\u{23F8} <b>${safeDisplayName}</b> paused by ${safeFirstName}.\n\n` +
       `${completedCount}/${totalCount} tasks completed.\n` +
@@ -3884,7 +4186,7 @@ async function handlePauseConfirm(
     { parse_mode: "HTML" }
   );
 
-  // 6. Notify team in group chat
+  // 7. Notify team in group chat
   await sendTelegram(
     project.botToken,
     project.chatId,
@@ -3892,7 +4194,7 @@ async function handlePauseConfirm(
     project.threadId
   );
 
-  // 7. Notify subscribers that a category is available
+  // 8. Notify subscribers that a category is available
   await notifySubscribers(
     env,
     project.botToken,
@@ -5956,7 +6258,25 @@ function createBot(
     // 4. Clear active task
     await clearActiveTask(env.PROJECTS, telegramId, currentProjectId);
 
-    // 5. Notify team in group chat
+    // 5. Stop category timer and log time (Issue #60)
+    const timerState = await stopTimer(env.PROJECTS, telegramId, currentProjectId);
+    if (timerState) {
+      const endedAt = new Date().toISOString();
+      const durationMinutes = Math.round(
+        (new Date(endedAt).getTime() - new Date(timerState.startedAt).getTime()) / 60000
+      );
+      await logTimeEntry(env.DB, {
+        userId: telegramId,
+        project: currentProjectId,
+        category: timerState.category,
+        startedAt: timerState.startedAt,
+        endedAt,
+        durationMinutes,
+        tasksCompleted: completedCount,
+      });
+    }
+
+    // 6. Notify team in group chat
     await sendTelegram(
       currentConfig.botToken,
       currentConfig.chatId,
@@ -5964,7 +6284,7 @@ function createBot(
       currentConfig.threadId
     );
 
-    // 6. Notify subscribers
+    // 7. Notify subscribers
     await notifySubscribers(
       env,
       currentConfig.botToken,
@@ -5987,6 +6307,39 @@ function createBot(
 
     // Re-render home screen for the new project
     await renderHomeScreen(ctx, env, telegramId);
+  });
+
+  // -------------------------------------------------------------------
+  // Team Messaging — Reply callback (Issue #59)
+  // When a recipient taps [Reply], set a temporary flag so their next
+  // text message is forwarded back to the original sender.
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^msg_reply:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const threadKey = ctx.match![1];
+    const thread = await getMessageThread(env.PROJECTS, threadKey);
+    if (!thread) {
+      await ctx.reply(
+        "This conversation has expired (24h limit). Please start a new message.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Set a 5-minute flag so the next text message is treated as a reply
+    await env.PROJECTS.put(`msg_replying:${telegramId}`, threadKey, {
+      expirationTtl: 300,
+    });
+
+    const safeSenderName = escapeHtml(thread.senderName);
+    await ctx.reply(
+      `Type your reply to <b>${safeSenderName}</b>:`,
+      { parse_mode: "HTML" }
+    );
   });
 
   // -------------------------------------------------------------------
@@ -6049,6 +6402,240 @@ function createBot(
     if (ctx.chat?.type !== "private") return;
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
+
+    // -----------------------------------------------------------------
+    // Team Messaging — reply capture (Issue #59)
+    // If the user previously tapped [Reply], their next message is
+    // forwarded back to the original sender.
+    // -----------------------------------------------------------------
+    const replyingTo = await env.PROJECTS.get(`msg_replying:${telegramId}`);
+    if (replyingTo) {
+      // Clear the replying flag immediately so it doesn't trigger again
+      await env.PROJECTS.delete(`msg_replying:${telegramId}`);
+
+      const thread = await getMessageThread(env.PROJECTS, replyingTo);
+      if (!thread) {
+        await ctx.reply(
+          "This conversation has expired (24h limit). Please start a new message.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Resolve sender's project for the bot token
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.reply(
+          "No project configured. Use /start to set up first.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const replyText = ctx.message.text.trim();
+      const safeReplyText = escapeHtml(replyText);
+      const safeRecipientName = escapeHtml(thread.recipientName);
+      const safeSenderName = escapeHtml(thread.senderName);
+
+      // Build the reply message for the original sender
+      let replyMsg =
+        `<b>Reply from ${safeRecipientName}:</b>\n\n` +
+        `${safeReplyText}`;
+
+      if (thread.issueNumber) {
+        replyMsg += `\n\n<i>Re: #${thread.issueNumber}</i>`;
+      }
+
+      // Look up the original sender's DM chat_id
+      const senderPrefs = await getUserPreferences(env.PROJECTS, thread.senderTelegramId);
+      if (!senderPrefs.dm_chat_id) {
+        await ctx.reply(
+          `Could not deliver reply — ${safeSenderName} hasn't started a DM with the bot yet.`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const status = await sendDM(
+        active.projectConfig.botToken,
+        senderPrefs.dm_chat_id,
+        replyMsg
+      );
+
+      if (status === "sent") {
+        await ctx.reply(
+          `Reply sent to <b>${safeSenderName}</b>.`,
+          { parse_mode: "HTML" }
+        );
+      } else if (status === "blocked") {
+        senderPrefs.dm_chat_id = null;
+        await saveUserPreferences(env.PROJECTS, thread.senderTelegramId, senderPrefs);
+        await ctx.reply(
+          `Could not deliver reply — ${safeSenderName} has blocked the bot.`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.reply(
+          "Failed to send reply. Please try again later.",
+          { parse_mode: "HTML" }
+        );
+      }
+      return;
+    }
+
+    // -----------------------------------------------------------------
+    // Team Messaging — @Name mentions (Issue #59)
+    // Detect @Name in private messages and forward to the mentioned
+    // team member as a DM.
+    // -----------------------------------------------------------------
+    const messageText = ctx.message.text;
+    const mentions = parseAtMentions(messageText);
+    if (mentions.length > 0) {
+      const members = await getTeamMembers(env.PROJECTS);
+      const senderName = ctx.from?.first_name || "Unknown";
+
+      const uniqueMentions = [...new Set(mentions)];
+
+      // Resolve project once for bot token and GitHub access
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.reply(
+          "No project configured. Use /start to set up first.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Check for issue references (#N) and fetch titles once
+      const issueRefs = parseIssueReferences(messageText);
+      let issueContext = "";
+      let firstIssueNumber: number | undefined;
+      if (issueRefs.length > 0 && active.projectConfig.githubToken) {
+        firstIssueNumber = issueRefs[0];
+        try {
+          const issueRes = await githubRequest(
+            "GET",
+            `/repos/${active.projectConfig.githubRepo}/issues/${firstIssueNumber}`,
+            active.projectConfig.githubToken
+          );
+          if (issueRes.ok) {
+            const issueData = (await issueRes.json()) as {
+              title: string;
+              html_url: string;
+            };
+            issueContext =
+              `\n\n<b>Issue #${firstIssueNumber}:</b> ` +
+              `<a href="${issueData.html_url}">${escapeHtml(issueData.title)}</a>`;
+          }
+        } catch {
+          // GitHub API error — send message without issue context
+        }
+      }
+
+      for (const mentionedName of uniqueMentions) {
+        // Case-insensitive match against the member's name field
+        const recipient = members.find(
+          (m) => m.name.toLowerCase() === mentionedName.toLowerCase()
+        );
+
+        if (!recipient) {
+          const memberNames = members.map((m) => m.name).join(", ");
+          await ctx.reply(
+            `User <b>@${escapeHtml(mentionedName)}</b> not found.\n\n` +
+            `Registered members: ${escapeHtml(memberNames || "none")}`,
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Don't allow messaging yourself
+        if (recipient.telegram_id === telegramId) {
+          await ctx.reply(
+            "You can't send a message to yourself.",
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Respect Do Not Disturb mode
+        const recipientDnd = await isUserDND(env.PROJECTS, recipient.telegram_id);
+        if (recipientDnd) {
+          await ctx.reply(
+            `<b>${escapeHtml(recipient.name)}</b> is in Do Not Disturb mode right now.`,
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Check if recipient has a DM chat_id
+        const recipientPrefs = await getUserPreferences(env.PROJECTS, recipient.telegram_id);
+        if (!recipientPrefs.dm_chat_id) {
+          await ctx.reply(
+            `<b>${escapeHtml(recipient.name)}</b> hasn't started a DM with the bot yet. ` +
+            `They need to message the bot first.`,
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Build the forwarded message
+        const safeMessage = escapeHtml(messageText);
+        const safeSender = escapeHtml(senderName);
+        const safeRecipient = escapeHtml(recipient.name);
+
+        // Create a unique thread key for this conversation
+        const threadKey = `thread:${telegramId}:${recipient.telegram_id}:${Date.now()}`;
+
+        // Store the thread in KV with 24h TTL
+        await setMessageThread(env.PROJECTS, threadKey, {
+          senderTelegramId: telegramId,
+          senderName: senderName,
+          recipientTelegramId: recipient.telegram_id,
+          recipientName: recipient.name,
+          originalMessage: messageText,
+          issueNumber: firstIssueNumber,
+          createdAt: new Date().toISOString(),
+        });
+
+        const forwardedMsg =
+          `<b>Message from ${safeSender}:</b>\n\n` +
+          `${safeMessage}` +
+          `${issueContext}`;
+
+        const replyMarkup = {
+          inline_keyboard: [
+            [{ text: "Reply", callback_data: `msg_reply:${threadKey}` }],
+          ],
+        };
+
+        const status = await sendDM(
+          active.projectConfig.botToken,
+          recipientPrefs.dm_chat_id,
+          forwardedMsg,
+          replyMarkup
+        );
+
+        if (status === "sent") {
+          await ctx.reply(
+            `Message sent to <b>${safeRecipient}</b>.`,
+            { parse_mode: "HTML" }
+          );
+        } else if (status === "blocked") {
+          recipientPrefs.dm_chat_id = null;
+          await saveUserPreferences(env.PROJECTS, recipient.telegram_id, recipientPrefs);
+          await ctx.reply(
+            `Could not deliver message — <b>${safeRecipient}</b> has blocked the bot.`,
+            { parse_mode: "HTML" }
+          );
+        } else {
+          await ctx.reply(
+            `Failed to send message to <b>${safeRecipient}</b>. Please try again later.`,
+            { parse_mode: "HTML" }
+          );
+        }
+      }
+      return;
+    }
 
     // "Neue Idee" wizard — title input (checked BEFORE onboarding)
     const ideaState = await getNewIdeaState(env.PROJECTS, telegramId);
@@ -7617,8 +8204,21 @@ export {
   detectFileConflicts,
   isUserDND,
   sendDM,
+  // Team messaging helpers (Issue #59)
+  parseAtMentions,
+  parseIssueReferences,
+  getMessageThread,
+  setMessageThread,
+  // Time tracker helpers (Issue #60)
+  getTimer,
+  startTimer,
+  stopTimer,
+  logTimeEntry,
+  getDailyHours,
+  getWeeklyHours,
+  formatDuration,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
