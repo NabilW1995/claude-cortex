@@ -454,4 +454,4 @@ if (require.main === module) {
   install(targetPath);
 }
 
-module.exports = { install };
+module.exports = { install, getAllFiles };

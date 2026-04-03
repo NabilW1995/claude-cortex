@@ -1,11 +1,17 @@
 {
   "cleanupPeriodDays": 90,
   "env": {
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
     "BASH_MAX_OUTPUT_LENGTH": "150000",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-6"
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-6",
+    "PYTHONIOENCODING": "utf-8",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ENABLE_TOOL_SEARCH": "auto:15"
   },
+  "respectGitignore": true,
+  "plansDirectory": "./plans",
   "attribution": {
     "commit": "Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
     "pr": "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
@@ -32,10 +38,18 @@
       "Bash(ls *)",
       "Bash(browser-use *)"
     ],
+    "ask": [
+      "Bash(rm *)",
+      "Bash(git reset *)",
+      "Bash(git checkout -- *)",
+      "Bash(docker *)",
+      "Bash(kubectl *)"
+    ],
     "deny": [
       "Bash(rm -rf *)",
       "Bash(git push --force *)",
-      "Bash(git reset --hard *)"
+      "Bash(git reset --hard *)",
+      "Bash(chmod 777 *)"
     ]
   },
   "hooks": {
@@ -155,10 +169,54 @@
           {
             "type": "command",
             "command": "node scripts/hooks/sync-team-learnings.js import"
-          },
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
           {
             "type": "command",
             "command": "bash scripts/hooks/post-compact-resume.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/session-end.js"
+          },
+          {
+            "type": "command",
+            "command": "node scripts/hooks/auto-push-learnings.js",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"try{require('./scripts/bot/notify').notifyTaskCompleted&&require('./scripts/bot/notify').notifyTaskCompleted(process.cwd())}catch(e){}\"",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "model": "claude-sonnet-4-6",
+            "prompt": "A tool is requesting permission. Evaluate if this is safe. Context from $ARGUMENTS. ALLOW if: reading files, running tests, npm/node commands, git status/diff/log, formatting code. DENY if: deleting files (rm -rf), force pushing, resetting git, modifying secrets/.env, running unknown scripts from internet. Respond with JSON: {\"decision\": {\"behavior\": \"allow\"}} or {\"decision\": {\"behavior\": \"deny\", \"reason\": \"...\"}}",
+            "timeout": 10
           }
         ]
       }
@@ -168,16 +226,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/hooks/session-end.js"
+            "command": "node scripts/hooks/stop-prompts.js"
           },
           {
             "type": "command",
             "command": "bash scripts/hooks/log-stop-verdict.sh"
-          },
-          {
-            "type": "command",
-            "command": "node scripts/hooks/auto-push-learnings.js",
-            "async": true
           }
         ]
       }

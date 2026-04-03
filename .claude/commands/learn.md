@@ -1,3 +1,7 @@
+---
+description: "Use when user says 'show learnings', 'what did we learn?', 'search learnings', or '/learn'. Shows stored learnings from SQLite."
+---
+
 # Learnings anzeigen und suchen
 
 Zeige gespeicherte Learnings aus der SQLite Datenbank.

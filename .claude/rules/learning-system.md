@@ -1,5 +1,6 @@
 ---
 description: Continuous learning system - correction detection, learning extraction, inline approval, bilingual storage
+globs: "**/*"
 ---
 
 # Learning System (Inline Flow)

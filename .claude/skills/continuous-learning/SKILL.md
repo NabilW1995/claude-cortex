@@ -1,13 +1,6 @@
 ---
 name: continuous-learning
-description: >
-  Automatic learning system that detects corrections, extracts lessons, and builds a persistent
-  knowledge base via SQLite. Use this skill whenever: the user corrects Claude ("nein", "falsch",
-  "das stimmt nicht", "wrong", "not what I meant"), the user confirms a fix worked ("perfekt",
-  "genau", "funktioniert", "works"), when Claude makes the same mistake twice, when the user asks
-  "warum machst du den gleichen Fehler?", when learnings need to be saved or searched, or when
-  the learning system needs to be explained. Also triggers on /learn, /audit, and correction
-  patterns in any language.
+description: "Use whenever: user corrects Claude ('nein','falsch','wrong','not like that'), confirms something works ('perfect','genau so','exactly'), or says 'save as rule'. Triggers on corrections and confirmations in both German and English."
 ---
 
 # Continuous Learning System
@@ -189,9 +182,9 @@ When corrections pile up, the system escalates:
 
 ```
 Correction 1-2:  Normal — Claude tries again
-Correction 3:    🦆 Rubber Duck agent — helps articulate the real problem
-Correction 4:    (Rubber Duck continues)
-Correction 5+:   🔧 Unsticker agent — root-cause analysis
+Correction 3:    pre--architect agent — helps articulate the real problem
+Correction 4:    (pre--architect continues)
+Correction 5+:   fix--root-cause-finder agent — root-cause analysis
 ```
 
 ## Rules
@@ -204,3 +197,10 @@ Correction 5+:   🔧 Unsticker agent — root-cause analysis
 - Don't force more than 10 learnings per session — quality over quantity
 - Ask for approval immediately — don't defer to a separate audit step
 - When a learning is surfaced during a task, acknowledge it briefly: "Basierend auf einem früheren Learning: [rule]"
+
+## Gotchas
+
+- SQLite DB path is ~/.claude-learnings/learnings.db — make sure directory exists
+- Always save learnings bilingually (German + English) for team sharing
+- Confidence decay runs on session start — old unused learnings lose relevance after 6 months
+- Never skip the nomination step — always ask user if learning should become permanent

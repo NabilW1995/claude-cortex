@@ -1,10 +1,29 @@
 {
-  "name": "claude-cortex",
+  "name": "cortex-init",
   "version": "1.0.0",
   "description": "The collective brain for Claude Code — shared learnings, rules, hooks, and skills across all your projects",
   "bin": {
-    "cortex-init": "./bin/cortex-init.js"
+    "cortex-init": "bin/cortex-init.js"
   },
+  "files": [
+    "bin/",
+    ".claude/rules/",
+    ".claude/agents/",
+    ".claude/commands/",
+    ".claude/skills/",
+    ".claude/settings.json",
+    ".claude/knowledge-base.md",
+    ".claude/knowledge-nominations.md",
+    ".claude/team-learnings.json",
+    "scripts/template/",
+    "scripts/hooks/",
+    "scripts/db/",
+    "CLAUDE.md",
+    ".claude-template.json",
+    ".mcp.json.example",
+    ".env.example",
+    "team.json"
+  ],
   "scripts": {
     "db:init": "node scripts/db/init-db.js",
     "db:reset": "node scripts/db/init-db.js --reset",
@@ -17,14 +36,31 @@
     "cortex:update": "node scripts/template/update.js",
     "cortex:sync-check": "node scripts/template/sync-check.js",
     "cortex:version": "node -e \"console.log(require('./.claude-template.json').version)\"",
-    "postinstall": "npm run db:init"
+    "test": "vitest run",
+    "postinstall": "node -e \"try{if(require('fs').existsSync('.claude-template.json'))require('child_process').execSync('node scripts/db/init-db.js',{stdio:'inherit'})}catch(e){}\""
   },
   "dependencies": {
     "sql.js": "^1.11.0"
   },
   "devDependencies": {
-    "excalidraw-cli": "^0.0.2"
+    "vitest": "^3.1.1"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NabilW1995/claude-cortex.git"
+  },
+  "homepage": "https://github.com/NabilW1995/claude-cortex",
+  "author": "Nabil W",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cortex",
+    "ai-agents",
+    "hooks",
+    "skills",
+    "learning-system"
+  ],
   "engines": {
     "node": ">=18.0.0"
   }

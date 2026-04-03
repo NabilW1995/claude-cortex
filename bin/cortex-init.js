@@ -1,29 +1,71 @@
 #!/usr/bin/env node
 /**
- * cortex-init — One-command Cortex installation
+ * cortex-init — One-command Cortex installation and update
  *
  * Usage:
- *   npx cortex-init          (install into current directory)
- *   npx cortex-init my-app   (install into ./my-app)
+ *   npx cortex-init              Install into current directory
+ *   npx cortex-init my-app       Install into ./my-app
+ *   npx cortex-init --update     Update existing installation
+ *   npx cortex-init --version    Show version
+ *   npx cortex-init --help       Show help
  *
- * What it does:
- *   1. Clones the Cortex template (shallow)
- *   2. Runs install.js to merge into target project
- *   3. Cleans up the clone
- *   4. Runs npm install + db:init
+ * How it works:
+ *   The npm package itself contains all template files (agents, hooks, rules, skills).
+ *   On install: copies template files into your project and merges CLAUDE.md + settings.json.
+ *   On update: overwrites template-owned files, merges shared files, preserves your content.
  */
 
-const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { execSync } = require('child_process');
 
-const targetDir = process.argv[2] || '.';
+// The npm package root IS the template source — no git clone needed
+const PACKAGE_ROOT = path.resolve(__dirname, '..');
+const PKG = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf-8'));
+
+// Parse arguments
+const args = process.argv.slice(2);
+const flags = args.filter(a => a.startsWith('-'));
+const positional = args.filter(a => !a.startsWith('-'));
+
+const showHelp = flags.includes('--help') || flags.includes('-h');
+const showVersion = flags.includes('--version') || flags.includes('-v');
+const doUpdate = flags.includes('--update') || flags.includes('-u');
+
+// --help
+if (showHelp) {
+  console.log(`
+  Claude Cortex v${PKG.version}
+
+  Usage:
+    npx cortex-init              Install into current directory
+    npx cortex-init <dir>        Install into specified directory
+    npx cortex-init --update     Update existing Cortex installation
+    npx cortex-init --version    Show version
+    npx cortex-init --help       Show this help
+
+  What it does:
+    Install: Copies agents, hooks, rules, and skills into your project.
+             Merges CLAUDE.md and settings.json intelligently.
+    Update:  Overwrites template files, merges shared files,
+             preserves your project-specific content.
+
+  After install, open Claude Code and run /start
+`);
+  process.exit(0);
+}
+
+// --version
+if (showVersion) {
+  console.log(PKG.version);
+  process.exit(0);
+}
+
+const targetDir = positional[0] || '.';
 const absTarget = path.resolve(targetDir);
-const tempDir = path.join(absTarget, '.cortex-temp');
-const repo = 'https://github.com/NabilW1995/claude-cortex.git';
 
 console.log('');
-console.log('  Claude Cortex — Installer');
+console.log(`  Claude Cortex v${PKG.version}`);
 console.log('  =========================');
 console.log('');
 
@@ -34,40 +76,34 @@ if (!fs.existsSync(absTarget)) {
 }
 
 try {
-  // Step 1: Clone
-  console.log('  1/4 Downloading Cortex...');
-  execSync(`git clone --depth 1 ${repo} "${tempDir}"`, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  if (doUpdate) {
+    // UPDATE PATH
+    console.log(`  Updating Cortex in: ${absTarget}\n`);
+    const { updateFromLocal } = require('../scripts/template/update.js');
+    updateFromLocal(PACKAGE_ROOT, absTarget);
+  } else {
+    // INSTALL PATH
+    console.log(`  Installing Cortex into: ${absTarget}\n`);
+    const { install } = require('../scripts/template/install.js');
+    install(absTarget);
+  }
 
-  // Step 2: Install
-  console.log('  2/4 Installing...');
-  execSync(`node "${path.join(tempDir, 'scripts/template/install.js')}" "${absTarget}"`, {
-    stdio: 'inherit',
-  });
+  // Post-install: npm install + db:init
+  if (fs.existsSync(path.join(absTarget, 'package.json'))) {
+    console.log('  Installing dependencies...');
+    execSync('npm install', { cwd: absTarget, stdio: 'inherit' });
 
-  // Step 3: Cleanup
-  console.log('  3/4 Cleaning up...');
-  fs.rmSync(tempDir, { recursive: true, force: true });
-
-  // Step 4: npm install + db:init
-  console.log('  4/4 Installing dependencies...');
-  execSync('npm install', { cwd: absTarget, stdio: 'inherit' });
-
-  try {
-    execSync('npm run db:init', { cwd: absTarget, stdio: 'inherit' });
-  } catch {
-    // db:init might fail if no sql.js yet — that's OK
+    try {
+      execSync('npm run db:init', { cwd: absTarget, stdio: 'inherit' });
+    } catch {
+      // db:init might fail if sql.js isn't ready yet — that's OK
+    }
   }
 
   console.log('');
   console.log('  Done! Open Claude Code and run /start');
   console.log('');
 } catch (e) {
-  console.error(`  Installation failed: ${e.message}`);
-  // Cleanup on failure
-  if (fs.existsSync(tempDir)) {
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-  }
+  console.error(`  ${doUpdate ? 'Update' : 'Installation'} failed: ${e.message}`);
   process.exit(1);
 }

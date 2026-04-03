@@ -2,97 +2,102 @@
 
 Shared learning system, hooks, and agents for Claude Code teams.
 
+<!-- CORTEX:TOP_RULES:START -->
 ## Top Rules
 
+<important>
 - MUST: Explain every change in simple, non-technical language (3-5 sentences)
 - MUST: Ask before deleting files or removing features
 - MUST: Follow the full pipeline: Coder → Test-Runner → Code-Review → Sanity Check
 - MUST: Never commit directly to main/master — always use feature branches
+- MUST: Before saying "done" — run tests, verify changes work, show proof to the user
+- MUST: For multi-step tasks — ask the user after each milestone before continuing
+</important>
+<!-- CORTEX:TOP_RULES:END -->
 
+<!-- CORTEX:PIPELINE:START -->
 ## Development Pipeline
 
-Every coding task follows this flow. No exceptions.
+```
+Plan Mode → core--coder → core--test-runner → core--code-review → sanity-check → Done
+```
 
-```
-1. Plan Mode        → Discuss requirements, design, get approval
-2. core--coder      → Write code + basic tests, commit
-3. core--test-runner → Run ALL tests, find edge cases
-4. core--code-review → Fresh eyes on quality + security
-5. sanity-check     → Does everything fit together?
-6. Done             → Merge
-```
+The pipeline runs automatically. Agents dispatch themselves based on the task.
+For complex features: `/rpi-research` → `/rpi-plan` → `/rpi-implement`
 
 Details: @.claude/rules/agent-routing.md
+<!-- CORTEX:PIPELINE:END -->
 
-## Agents (8)
+<!-- CORTEX:AGENTS:START -->
+## Agents
 
-| Agent | Purpose |
-|-------|---------|
-| **core--coder** | Writes code + tests. Dispatch for tasks >10 lines. |
-| **core--test-runner** | Tests everything. MANDATORY after every coder task. |
-| **core--code-review** | Reviews code quality. MANDATORY after test-runner. |
-| **pre--architect** | Deep analysis before complex features. |
-| **fix--error-translator** | Translates errors into simple explanations + fixes. |
-| **fix--root-cause-finder** | Finds the root cause of bugs, not just symptoms. |
-| **start--onboarding** | One-time codebase scan for new projects. |
-| **util--pr-writer** | Writes PR descriptions from git diff. |
+The pipeline agents (coder, test-runner, code-review) dispatch automatically.
+All other agents dispatch when needed. See `.claude/agents/` for full list.
 
+| Category | Agents | When |
+|----------|--------|------|
+| **Core Pipeline** | coder, test-runner, code-review | Every coding task (automatic) |
+| **Analysis** | pre--architect | Before complex features |
+| **Fix** | error-translator, root-cause-finder | When errors or bugs occur |
+| **RPI** | requirement-parser, product-manager, ux-designer | During /rpi workflow |
+| **Drift** | 5 parallel agents | During /drift-check |
+| **Utility** | pr-writer, onboarding | As needed |
+<!-- CORTEX:AGENTS:END -->
+
+<!-- CORTEX:SKILL_ROUTING:START -->
 ## Skill Routing
 
-| User says... | Action |
+Skills trigger automatically based on what you say. No need to memorize commands.
+
+| You say... | What happens |
 |---|---|
-| "Build feature X", code task | → Plan Mode → core--coder pipeline |
-| UI/Design/Website | → Design flow (@.claude/rules/design-flow.md) |
-| "New project" | → project-discovery → scaffolding |
-| "Colors/fonts/style?" | → ui-ux-pro-max skill |
-| Error/Bug | → fix--error-translator + fix--root-cause-finder |
-| "Check everything" | → sanity-check skill |
+| "Build feature X" / "Ich hab eine Idee" | → /build-feature (Plan → Strategy → Execute) |
+| "Check everything" / "Passt alles?" | → sanity-check |
+| "New project" / "Neues Projekt" | → project-discovery → scaffolding |
+| Design / Colors / UI | → frontend-design + ui-ux-pro-max |
+| Error / Bug | → error-translator + root-cause-finder |
+| "Test in browser" / "Screenshot" | → browser-use |
+<!-- CORTEX:SKILL_ROUTING:END -->
 
 ## Tech Stack
 
-<!-- Update this when installing Cortex into a new project -->
+<!-- Auto-detected by install.js from package.json. This is a placeholder. -->
+<!-- The installer replaces this with the actual project stack. -->
 | Layer | Technology |
 |-------|-----------|
-| Runtime | Node.js (>=18) |
-| Language | TypeScript / JavaScript |
-| Database | SQLite (sql.js) for learnings, Cloudflare D1 for bot analytics |
-| Bot Framework | grammy (Telegram), Cloudflare Workers |
-| Bot Hosting | Cloudflare Workers + KV + D1 |
-| Testing | Vitest / Jest |
-| Linting | ESLint / Biome |
-| Version Control | Git + GitHub |
-| CI/CD | GitHub Actions (planned), Coolify on Hetzner (planned) |
-| Design | Google Stitch, Tailwind CSS |
+| Runtime | (auto-detected) |
+| Language | (auto-detected) |
+| Testing | (auto-detected) |
 
-## Commands (9)
+<!-- CORTEX:COMMANDS:START -->
+## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `/start` | Morning routine — load context, show open tasks |
-| `/wrap-up` | End of day — save learnings, prepare for tomorrow |
-| `/health` | Verify Cortex is correctly installed and working |
-| `/changelog` | Generate changelog from git history |
-| `/audit` | Review and approve pending learnings |
-| `/learn` | Search past learnings |
-| `/onboard` | First-time codebase scan |
-| `/new-project` | Start a new project from scratch |
-| `/metrics` | Code metrics — LOC, complexity, coverage, deps |
-| `/template-update` | Update Cortex to latest version |
+**Daily:** `/start` · `/wrap-up` · `/audit` · `/learn`
+**Build:** `/build-feature` · `/rpi-research` · `/rpi-plan` · `/rpi-implement`
+**Quality:** `/health` · `/sanity-check` · `/metrics` · `/drift-check`
+**Loops:** `/loop-simplify` · `/loop-watch-tests` · `/loop-health`
+**Setup:** `/new-project` · `/onboard` · `/template-update` · `/changelog`
+<!-- CORTEX:COMMANDS:END -->
 
+<!-- CORTEX:COMMUNICATION:START -->
 ## Communication
 
 - Explain EVERY code change: what changed + why, in simple language
 - Use analogies for technical concepts
 - Ask before making assumptions
 - Warn before breaking changes — wait for explicit approval
+<!-- CORTEX:COMMUNICATION:END -->
 
+<!-- CORTEX:GIT:START -->
 ## Git
 
 - Branch naming: feature/description, fix/description
 - Commit messages: <type>: <description> (feat, fix, refactor, docs, test, chore)
 - MUST: Review `git diff` before committing — check for hardcoded values and secrets
 - MUST: Checkpoint commit before large refactors
+<!-- CORTEX:GIT:END -->
 
+<!-- CORTEX:REFERENCES:START -->
 ## Reference Rules
 
 @.claude/rules/agent-routing.md — Development pipeline and agent dispatch rules
@@ -105,4 +110,5 @@ Details: @.claude/rules/agent-routing.md
 @.claude/rules/learning-system.md — Learning system (correction detection, SQLite DB)
 @.claude/rules/non-programmer.md — Communication rules for non-programmers
 @.claude/rules/accessibility.md — Accessibility standards
-@.claude/rules/browser-use.md — Browser Use CLI commands
+@docs/GUIDE-WORKING-WITH-CLAUDE.md — Team guide for effective AI collaboration
+<!-- CORTEX:REFERENCES:END -->

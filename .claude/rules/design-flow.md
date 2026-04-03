@@ -1,5 +1,6 @@
 ---
 description: Design workflow - Stitch vs Local, step-by-step process for UI/design tasks
+globs: "**/*"
 ---
 
 # Design Flow (MUST follow for every UI/design task)

@@ -1,6 +1,6 @@
 ---
 description: Frontend and backend web development patterns
-globs: "src/**/*"
+globs: "**/*.{js,ts,tsx,jsx,vue,svelte,html,css}"
 ---
 
 # Web Development Rules
@@ -35,4 +35,4 @@ globs: "src/**/*"
 - No synchronous API calls in the UI
 
 ## Browser Use CLI (Testing & Review)
-See @.claude/rules/browser-use.md for Browser Use CLI commands.
+For E2E tests and visual review: use the browser-use skill.

@@ -1,6 +1,6 @@
 ---
 description: Accessibility (a11y) rules for web applications
-globs: "src/**/*.{tsx,jsx,html,vue,svelte}"
+globs: "**/*.{tsx,jsx,html,vue,svelte}"
 ---
 
 # Accessibility

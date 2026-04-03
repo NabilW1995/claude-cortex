@@ -1,15 +1,14 @@
 ---
 name: sanity-check
-description: >
-  Comprehensive project sanity check — verifies that everything is consistent, complete, and production-ready.
-  Use this skill whenever the user asks things like: "Have we forgotten anything?", "Does everything fit together?",
-  "Can we test that everything works?", "What problems could come up?", "Is this ready?", "Sanity check",
-  "Passt alles?", "Haben wir was vergessen?", "Was könnte schiefgehen?", "Ist das wirklich fertig?",
-  "Check mal ob alles passt", "Können wir das so lassen?", "Klappt der ganze Flow?",
-  "Sind irgendwelche Buttons nicht verbunden?", "Funktioniert alles zusammen?",
-  "Haben wir irgendwas vergessen?". Also use when a feature is complete and the user
-  wants validation before committing or creating a PR. This skill runs in the current conversation context
-  and has access to everything discussed so far.
+description: "Use when user says 'check everything', 'does it fit together', 'production ready?', 'have we forgotten anything?', 'sanity check', 'passt alles zusammen?', 'alles checken'"
+context: fork
+allowed-tools: Read, Grep, Glob, Bash(npm test *), Bash(node --test *)
+hooks:
+  PreToolUse:
+    - matcher: "Write|Edit"
+      hooks:
+        - type: prompt
+          prompt: "Sanity check is READ-ONLY. BLOCK this write/edit operation. The sanity check should only READ and REPORT, never modify files."
 ---
 
 # Sanity Check
@@ -192,3 +191,18 @@ Present results clearly, for non-programmers:
 - For WARN/FAIL items, always include a concrete fix suggestion
 - If you're unsure about something, say so — don't guess
 - The goal is confidence: after this check, the user should feel safe shipping
+
+## Dynamic Context
+
+Current branch:
+!`git branch --show-current 2>/dev/null || echo "not in git repo"`
+
+Uncommitted changes:
+!`git status --short 2>/dev/null | head -10`
+
+## Gotchas
+
+- Large repos may hit context limits — use context:fork to run in isolation
+- Check both code AND configuration (.env.example, .gitignore, CLAUDE.md)
+- Don't just check syntax — verify that features actually connect end-to-end
+- Always check for hardcoded secrets, even in test files

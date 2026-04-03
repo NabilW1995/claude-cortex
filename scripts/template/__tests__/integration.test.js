@@ -68,7 +68,6 @@ describe('Claude Cortex Integration Test', () => {
       const rules = fs.readdirSync(path.join(testDir, '.claude/rules'));
       assert.ok(rules.includes('security.md'));
       assert.ok(rules.includes('design-flow.md'));
-      assert.ok(rules.includes('browser-use.md'));
       assert.ok(rules.includes('learning-system.md'));
       assert.ok(rules.includes('testing.md'));
     });
@@ -101,8 +100,8 @@ describe('Claude Cortex Integration Test', () => {
       assert.ok(content.includes('timezone issues'), 'gotchas preserved');
       assert.ok(content.includes('npm start'), 'project commands preserved');
       // Template sections added with markers
-      assert.ok(content.includes('CORTEX:REFS:START'), 'reference docs marker added');
-      assert.ok(content.includes('CORTEX:WICHTIG:START'), 'wichtig marker added');
+      assert.ok(content.includes('CORTEX:REFERENCES:START'), 'reference docs marker added');
+      assert.ok(content.includes('CORTEX:TOP_RULES:START'), 'top rules marker added');
     });
 
     it('merges settings.json preserving project hooks and permissions', () => {
