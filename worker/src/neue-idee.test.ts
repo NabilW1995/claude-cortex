@@ -524,7 +524,7 @@ describe("createIdeaIssue", () => {
 
   it("returns null when project has no GitHub token", async () => {
     const project = makeProject({ githubToken: undefined });
-    const result = await createIdeaIssue(project, "Test", null, "priority:medium");
+    const result = await createIdeaIssue(project, "Test", "", null, "priority:medium");
     expect(result).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -538,7 +538,7 @@ describe("createIdeaIssue", () => {
       })
     );
 
-    await createIdeaIssue(project, "New feature", null, "priority:high");
+    await createIdeaIssue(project, "New feature", "", null, "priority:high");
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -555,7 +555,7 @@ describe("createIdeaIssue", () => {
       })
     );
 
-    await createIdeaIssue(project, "Add login form", null, "priority:high");
+    await createIdeaIssue(project, "Add login form", "", null, "priority:high");
 
     const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(options.body as string);
@@ -572,7 +572,7 @@ describe("createIdeaIssue", () => {
       })
     );
 
-    await createIdeaIssue(project, "Dashboard fix", "area:dashboard", "priority:medium");
+    await createIdeaIssue(project, "Dashboard fix", "", "area:dashboard", "priority:medium");
 
     const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(options.body as string);
@@ -590,7 +590,7 @@ describe("createIdeaIssue", () => {
       })
     );
 
-    await createIdeaIssue(project, "Quick fix", null, "priority:low");
+    await createIdeaIssue(project, "Quick fix", "", null, "priority:low");
 
     const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(options.body as string);
@@ -610,7 +610,7 @@ describe("createIdeaIssue", () => {
       )
     );
 
-    const result = await createIdeaIssue(project, "Test", null, "priority:medium");
+    const result = await createIdeaIssue(project, "Test", "", null, "priority:medium");
     expect(result).not.toBeNull();
     expect(result!.number).toBe(99);
     expect(result!.html_url).toBe("https://github.com/test-org/test-repo/issues/99");
@@ -622,7 +622,7 @@ describe("createIdeaIssue", () => {
       new Response("Unprocessable Entity", { status: 422 })
     );
 
-    const result = await createIdeaIssue(project, "Test", null, "priority:medium");
+    const result = await createIdeaIssue(project, "Test", "", null, "priority:medium");
     expect(result).toBeNull();
   });
 
@@ -632,7 +632,7 @@ describe("createIdeaIssue", () => {
       new Response("Internal Server Error", { status: 500 })
     );
 
-    const result = await createIdeaIssue(project, "Test", null, "priority:medium");
+    const result = await createIdeaIssue(project, "Test", "", null, "priority:medium");
     expect(result).toBeNull();
   });
 
@@ -645,7 +645,7 @@ describe("createIdeaIssue", () => {
       })
     );
 
-    await createIdeaIssue(project, "Test", null, "priority:medium");
+    await createIdeaIssue(project, "Test", "", null, "priority:medium");
 
     const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const headers = options.headers as Record<string, string>;
