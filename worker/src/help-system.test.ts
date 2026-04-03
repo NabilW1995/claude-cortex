@@ -209,8 +209,8 @@ describe("HELP_TEXTS categories content", () => {
 // =========================================================================
 
 describe("HELP_TEXTS preview content", () => {
-  it("has a 'Preview & Merge' heading (HTML-escaped ampersand)", () => {
-    expect(HELP_TEXTS.preview).toContain("Preview &amp; Merge");
+  it("has a 'Preview & Merge' heading", () => {
+    expect(HELP_TEXTS.preview).toContain("Preview & Merge");
   });
 
   it("mentions Pull Request (PR)", () => {

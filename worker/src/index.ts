@@ -12,6 +12,7 @@
 
 import { Bot, webhookCallback, Keyboard, InlineKeyboard } from "grammy";
 import type { Context } from "grammy";
+import { t, getUserLanguage, setUserLanguage, type Locale } from "./i18n";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -257,70 +258,104 @@ const PRIORITY_DEFAULT = "priority:medium";
 // ---------------------------------------------------------------------------
 
 /**
- * Central registry of all help texts displayed in the bot's help view.
- * Each key maps to a focused explanation shown via inline keyboard navigation.
- * All texts use HTML parse_mode and are written in German (matching the bot UI).
+ * Build a localized help text for the given topic key.
+ * Replaces the old static HELP_TEXTS constant with i18n-aware strings.
+ */
+function getHelpText(key: string, lang: Locale): string {
+  switch (key) {
+    case "overview":
+      return [
+        t(lang, "help.heading"),
+        "",
+        `<b>Workflow:</b>`,
+        t(lang, "help.workflow_1"),
+        t(lang, "help.workflow_2"),
+        t(lang, "help.workflow_3"),
+        t(lang, "help.workflow_4"),
+        "",
+        t(lang, "help.golden_rule"),
+        "",
+        t(lang, "help.choose_topic"),
+      ].join("\n");
+    case "blocker":
+      return [
+        t(lang, "help.blocker_heading"),
+        "",
+        t(lang, "help.blocker_desc"),
+        t(lang, "help.blocker_effect"),
+        t(lang, "help.blocker_label"),
+        t(lang, "help.blocker_resolved"),
+        "",
+        t(lang, "help.blocker_tip"),
+      ].join("\n");
+    case "priorities":
+      return [
+        t(lang, "help.priorities_heading"),
+        "",
+        t(lang, "help.priorities_desc"),
+        t(lang, "help.priority_blocker"),
+        t(lang, "help.priority_high"),
+        t(lang, "help.priority_medium"),
+        t(lang, "help.priority_low"),
+        "",
+        t(lang, "help.priorities_sort"),
+      ].join("\n");
+    case "categories":
+      return [
+        t(lang, "help.categories_heading"),
+        "",
+        t(lang, "help.categories_desc"),
+        t(lang, "help.categories_rule"),
+        "",
+        t(lang, "help.categories_how"),
+        t(lang, "help.categories_step1"),
+        t(lang, "help.categories_step2"),
+        t(lang, "help.categories_step3"),
+        "",
+        t(lang, "help.categories_tip"),
+      ].join("\n");
+    case "preview":
+      return [
+        t(lang, "help.preview_heading"),
+        "",
+        t(lang, "help.preview_desc"),
+        t(lang, "help.preview_link"),
+        "",
+        t(lang, "help.preview_process"),
+        t(lang, "help.preview_step1"),
+        t(lang, "help.preview_step2"),
+        t(lang, "help.preview_step3"),
+        t(lang, "help.preview_step4"),
+        t(lang, "help.preview_step5"),
+      ].join("\n");
+    case "conflicts":
+      return [
+        t(lang, "help.conflicts_heading"),
+        "",
+        t(lang, "help.conflicts_desc"),
+        t(lang, "help.conflicts_rule"),
+        t(lang, "help.conflicts_group"),
+        t(lang, "help.conflicts_benefit"),
+        "",
+        t(lang, "help.conflicts_fallback"),
+        t(lang, "help.conflicts_tip"),
+      ].join("\n");
+    default:
+      return "Unknown help topic.";
+  }
+}
+
+/**
+ * Legacy HELP_TEXTS object — kept for backward compatibility with tests.
+ * Returns German texts (matching the original hardcoded behavior).
  */
 const HELP_TEXTS = {
-  overview:
-    "\u{2753} <b>Hilfe</b>\n\n" +
-    "<b>Workflow:</b>\n" +
-    "1\u{FE0F}\u{20E3} Kategorie w\u{00E4}hlen (<i>Aufgabe nehmen</i>)\n" +
-    "2\u{FE0F}\u{20E3} Tasks bearbeiten (<i>Meine Aufgaben</i>)\n" +
-    "3\u{FE0F}\u{20E3} Preview erstellen &amp; mergen\n" +
-    "4\u{FE0F}\u{20E3} Nach Merge: pull nicht vergessen!\n\n" +
-    "\u{1F3C6} <b>Golden Rule:</b> Eine Kategorie pro Person = keine Merge-Konflikte!\n\n" +
-    "W\u{00E4}hle ein Thema f\u{00FC}r mehr Details:",
-
-  blocker:
-    "\u{1F6AB} <b>Blocker</b>\n\n" +
-    "Ein Blocker ist ein kritisches Problem, das <b>alle anderen Aufgaben stoppt</b>. " +
-    "Solange ein Blocker offen ist, kann niemand neue Kategorien beanspruchen.\n\n" +
-    "Blocker werden als GitHub-Issue mit dem Label <code>priority:blocker</code> erstellt. " +
-    "Sobald das Issue geschlossen wird, l\u{00E4}uft alles wieder normal weiter.\n\n" +
-    "\u{1F4A1} <b>Tipp:</b> Blocker nur f\u{00FC}r echte Showstopper verwenden \u{2014} " +
-    "nicht f\u{00FC}r normale Bugs.",
-
-  priorities:
-    "\u{1F4CA} <b>Priorit\u{00E4}ten</b>\n\n" +
-    "Es gibt 4 Stufen, von dringend bis niedrig:\n\n" +
-    "\u{1F6A8} <b>Blocker</b> \u{2014} Stoppt alles, muss sofort gel\u{00F6}st werden\n" +
-    "\u{1F534} <b>High</b> \u{2014} Wichtig, sollte als n\u{00E4}chstes bearbeitet werden\n" +
-    "\u{1F7E1} <b>Medium</b> \u{2014} Normaler Task (Standard)\n" +
-    "\u{26AA} <b>Low</b> \u{2014} Kann warten, nice-to-have\n\n" +
-    "Tasks werden automatisch nach Priorit\u{00E4}t sortiert. " +
-    "H\u{00F6}here Priorit\u{00E4}t = weiter oben in der Liste.",
-
-  categories:
-    "\u{1F4C1} <b>Kategorien</b>\n\n" +
-    "Kategorien basieren auf den <code>area:</code>-Labels deiner GitHub-Issues. " +
-    "Jede Person beansprucht <b>genau eine Kategorie</b> \u{2014} das verhindert Merge-Konflikte.\n\n" +
-    "<b>So funktioniert\u{2019}s:</b>\n" +
-    "\u{2022} <i>Aufgabe nehmen</i> \u{2192} Kategorie w\u{00E4}hlen \u{2192} Issues werden dir zugewiesen\n" +
-    "\u{2022} Wenn du fertig bist: Kategorie freigeben, damit andere sie nehmen k\u{00F6}nnen\n" +
-    "\u{2022} Du kannst deine Kategorie jederzeit pausieren oder wechseln\n\n" +
-    "\u{1F4A1} <b>Tipp:</b> Pr\u{00FC}fe im Team Board, welche Kategorien frei sind.",
-
-  preview:
-    "\u{1F441} <b>Preview &amp; Merge</b>\n\n" +
-    "Wenn dein Code fertig ist, erstellst du einen Pull Request (PR) auf GitHub. " +
-    "Der Bot zeigt dir einen Preview-Link, damit du deine \u{00C4}nderungen testen kannst.\n\n" +
-    "<b>Ablauf:</b>\n" +
-    "1. Code pushen \u{2192} PR erstellen\n" +
-    "2. Preview-Link pr\u{00FC}fen\n" +
-    "3. Im Team Board: Review anfordern\n" +
-    "4. Nach Approval: Merge durchf\u{00FC}hren\n" +
-    "5. <b>Wichtig:</b> Nach dem Merge lokal <code>git pull</code> nicht vergessen!",
-
-  conflicts:
-    "\u{26A0}\u{FE0F} <b>Konflikte</b>\n\n" +
-    "Merge-Konflikte entstehen, wenn zwei Personen <b>dieselben Dateien</b> gleichzeitig bearbeiten. " +
-    "Deshalb gilt die Golden Rule: <b>Eine Kategorie pro Person.</b>\n\n" +
-    "Kategorien gruppieren Issues, die \u{00E4}hnliche Dateien betreffen. " +
-    "Wenn jeder seine eigene Kategorie hat, arbeitet ihr an verschiedenen Dateien \u{2014} " +
-    "und Konflikte werden vermieden.\n\n" +
-    "\u{1F4A1} <b>Falls es doch kracht:</b> Sprecht euch im Team ab, wer welche Datei anpasst. " +
-    "Der Bot zeigt euch im Team Board, wer welche Kategorie hat.",
+  get overview() { return getHelpText("overview", "de"); },
+  get blocker() { return getHelpText("blocker", "de"); },
+  get priorities() { return getHelpText("priorities", "de"); },
+  get categories() { return getHelpText("categories", "de"); },
+  get preview() { return getHelpText("preview", "de"); },
+  get conflicts() { return getHelpText("conflicts", "de"); },
 };
 
 // ---------------------------------------------------------------------------
@@ -328,27 +363,26 @@ const HELP_TEXTS = {
 // ---------------------------------------------------------------------------
 
 /**
- * Contextual tips shown inline below handler responses.
- * Each tip is shown at most once per hour per user (KV-deduped).
- * All tips are in German, HTML-formatted, and italicized.
+ * Returns a localized contextual tip string for the given key.
+ * The tip keys map to i18n keys with the "tip." prefix.
+ */
+function getTipText(tipKey: string, lang: Locale): string {
+  return t(lang, `tip.${tipKey}`);
+}
+
+/**
+ * Legacy CONTEXTUAL_TIPS object — kept for backward compatibility with tests.
+ * Returns German texts (matching the original hardcoded behavior).
  */
 const CONTEXTUAL_TIPS: Record<string, string> = {
-  category_taken:
-    "\u{1F4A1} <i>Tipp: Jede Kategorie geh\u{00F6}rt einer Person \u{2014} so vermeiden wir Merge-Konflikte.</i>",
-  blocker_active:
-    "\u{1F4A1} <i>Tipp: Solange ein Blocker offen ist, sind alle Kategorie-Claims pausiert.</i>",
-  already_has_category:
-    "\u{1F4A1} <i>Tipp: Gib deine aktuelle Kategorie frei, bevor du eine neue nimmst.</i>",
-  self_approve_large_pr:
-    "\u{1F4A1} <i>Tipp: Bei gro\u{00DF}en PRs ist ein Peer-Review empfohlen, auch wenn Self-Approve m\u{00F6}glich ist.</i>",
-  all_tasks_done:
-    "\u{1F389} <i>Alle Aufgaben erledigt! Nimm eine neue Kategorie oder erstelle neue Ideen.</i>",
-  no_tasks_assigned:
-    "\u{1F4A1} <i>Tipp: Nutze \"Aufgabe nehmen\" um eine Kategorie zu beanspruchen.</i>",
-  forgot_to_pull:
-    "\u{1F4A1} <i>Tipp: Nach jedem Merge \u{2014} git pull nicht vergessen!</i>",
-  category_empty:
-    "\u{1F4A1} <i>Tipp: Diese Kategorie hat keine offenen Issues. Erstelle neue Ideen mit \"Neue Idee\"!</i>",
+  get category_taken() { return getTipText("category_taken", "de"); },
+  get blocker_active() { return getTipText("blocker_active", "de"); },
+  get already_has_category() { return getTipText("already_has_category", "de"); },
+  get self_approve_large_pr() { return getTipText("self_approve_large", "de"); },
+  get all_tasks_done() { return getTipText("all_tasks_done", "de"); },
+  get no_tasks_assigned() { return getTipText("no_tasks_assigned", "de"); },
+  get forgot_to_pull() { return getTipText("forgot_to_pull", "de"); },
+  get category_empty() { return getTipText("category_empty", "de"); },
 };
 
 // ---------------------------------------------------------------------------
@@ -386,16 +420,18 @@ async function setTipShown(
  * Return a contextual tip string (with leading newlines) if the tip has
  * not been shown to this user recently, or an empty string if it was
  * already displayed within the dedup window.
+ * Accepts an optional lang parameter for localized tips.
  */
 async function getTip(
   kv: KVNamespace,
   telegramId: number,
-  tipKey: string
+  tipKey: string,
+  lang: Locale = "de"
 ): Promise<string> {
   const shown = await getTipShown(kv, telegramId, tipKey);
   if (shown) return "";
   await setTipShown(kv, telegramId, tipKey);
-  return "\n\n" + CONTEXTUAL_TIPS[tipKey];
+  return "\n\n" + getTipText(tipKey, lang);
 }
 
 // ---------------------------------------------------------------------------
@@ -3357,7 +3393,8 @@ async function autoReleaseDoneCategory(
 async function handleMeineAufgaben(
   env: Env,
   telegramId: number,
-  firstName: string
+  firstName: string,
+  lang: Locale = "en"
 ): Promise<{ text: string; keyboard: InlineKeyboard }> {
   const kb = new InlineKeyboard();
   const safeFirstName = escapeHtml(firstName);
@@ -3366,7 +3403,7 @@ async function handleMeineAufgaben(
   const active = await resolveActiveProject(env, telegramId);
   if (!active) {
     return {
-      text: `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>\n${"━".repeat(16)}\n\nNo project configured yet.`,
+      text: `${t(lang, "tasks.heading", { name: safeFirstName })}\n${"━".repeat(16)}\n\nNo project configured yet.`,
       keyboard: kb,
     };
   }
@@ -3375,7 +3412,7 @@ async function handleMeineAufgaben(
 
   if (!project.githubToken) {
     return {
-      text: `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>\n${"━".repeat(16)}\n\n📌 No GitHub token configured.`,
+      text: `${t(lang, "tasks.heading", { name: safeFirstName })}\n${"━".repeat(16)}\n\nNo GitHub token configured.`,
       keyboard: kb,
     };
   }
@@ -3388,7 +3425,7 @@ async function handleMeineAufgaben(
   if (!githubUsername) {
     return {
       text:
-        `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>\n${"━".repeat(16)}\n\n` +
+        `${t(lang, "tasks.heading", { name: safeFirstName })}\n${"━".repeat(16)}\n\n` +
         "You are not registered yet.\n" +
         "Use /register &lt;github-username&gt; to link your account.",
       keyboard: kb,
@@ -3404,7 +3441,7 @@ async function handleMeineAufgaben(
 
   if (!response.ok) {
     return {
-      text: `\u{2705} <b>Meine Aufgaben</b>\n\n⚠️ GitHub API error: ${response.status}`,
+      text: `${t(lang, "tasks.heading_error")}\n\nGitHub API error: ${response.status}`,
       keyboard: kb,
     };
   }
@@ -3456,7 +3493,7 @@ async function handleMeineAufgaben(
 
   // Build the message
   const lines: string[] = [
-    `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>`,
+    t(lang, "tasks.heading", { name: safeFirstName }),
     "━".repeat(16),
   ];
 
@@ -3474,22 +3511,22 @@ async function handleMeineAufgaben(
 
     // Show completed tasks even when no open tasks remain (Issue #68)
     if (closedIssues.length > 0) {
-      lines.push("All open tasks are done! \u{1F389}");
+      lines.push(t(lang, "tasks.all_done"));
       lines.push("");
-      lines.push(`\u{2705} <b>Recently completed (${closedIssues.length}):</b>`);
+      lines.push(t(lang, "tasks.recently_completed", { count: closedIssues.length }));
       for (const issue of closedIssues) {
         lines.push(
           `\u{2611}\u{FE0F} <s>#${issue.number} ${escapeHtml(issue.title)}</s>`
         );
       }
     } else {
-      lines.push("No tasks assigned to you.");
+      lines.push(t(lang, "tasks.no_tasks"));
     }
 
     lines.push("");
-    lines.push("Use \u{1F4CB} <b>Aufgabe nehmen</b> to claim a category first!");
+    lines.push(t(lang, "claim.use_claim_task"));
     lines.push("");
-    lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
+    lines.push(t(lang, "tasks.today_completed", { count: todayDone }));
 
     // Show daily tracked time (Issue #60)
     const dailyMinutes0 = await getDailyHours(env.DB, telegramId, new Date().toISOString().slice(0, 10));
@@ -3502,11 +3539,11 @@ async function handleMeineAufgaben(
     }
     const totalMinutes0 = dailyMinutes0 + runningMinutes0;
     if (totalMinutes0 > 0) {
-      lines.push(`\u{23F1} Today: <b>${formatDuration(totalMinutes0)}</b>`);
+      lines.push(t(lang, "tasks.today_time", { duration: formatDuration(totalMinutes0) }));
     }
 
     // Suggest claiming a category when the user has no tasks
-    const noTasksTip = await getTip(env.PROJECTS, telegramId, "no_tasks_assigned");
+    const noTasksTip = await getTip(env.PROJECTS, telegramId, "no_tasks_assigned", lang);
     if (noTasksTip) lines.push(noTasksTip.trim());
 
     return { text: lines.join("\n"), keyboard: kb };
@@ -4392,7 +4429,8 @@ async function buildCategoryPicker(
   project: ProjectConfig,
   projectId: string,
   claimsState: CategoryClaimsState,
-  showCompleted: boolean = false
+  showCompleted: boolean = false,
+  lang: Locale = "en"
 ): Promise<{ text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } | null> {
   const categories = await fetchOpenIssuesByCategory(project);
   const members = await getTeamMembers(env.PROJECTS);
@@ -4406,8 +4444,8 @@ async function buildCategoryPicker(
 
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
   const lines: string[] = [
-    "\u{1F4CB} <b>Aufgabe nehmen</b>",
-    "Pick a category to claim all its open issues:",
+    t(lang, "picker.heading"),
+    t(lang, "picker.subtitle"),
   ];
 
   // Open categories as buttons
@@ -4425,9 +4463,9 @@ async function buildCategoryPicker(
         const claimerColor = getUserColor(members, claimer.telegramId);
         buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
       } else if (paused) {
-        buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} paused by ${paused.pausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`;
+        buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} ${t(lang, "picker.paused_by", { name: paused.pausedBy, done: paused.completedTasks, total: paused.totalTasks })}`;
       } else {
-        buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
+        buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} ${t(lang, "picker.free")}`;
       }
 
       buttons.push([{
@@ -4444,7 +4482,7 @@ async function buildCategoryPicker(
       const closedByCategory = await fetchClosedIssuesByCategory(project, completedLabels);
 
       lines.push("");
-      lines.push(`\u{2501} <b>Erledigt (${completedLabels.length})</b> \u{2501}`);
+      lines.push(t(lang, "picker.completed_section", { count: completedLabels.length }));
 
       for (const label of completedLabels.sort()) {
         const displayName = label.replace("area:", "");
@@ -4454,17 +4492,17 @@ async function buildCategoryPicker(
           lines.push(`  \u{2022} #${issue.number} ${escapeHtml(issue.title)}`);
         }
         if (closedIssues.length === 0) {
-          lines.push("  <i>No closed issues found</i>");
+          lines.push(`  <i>${t(lang, "picker.no_closed_issues")}</i>`);
         }
       }
 
-      buttons.push([{ text: "\u{1F4CA} Erledigte ausblenden", callback_data: "cat_hide_completed" }]);
+      buttons.push([{ text: t(lang, "picker.hide_completed"), callback_data: "cat_hide_completed" }]);
     } else {
-      buttons.push([{ text: `\u{1F4CA} Erledigte anzeigen (${completedLabels.length})`, callback_data: "cat_show_completed" }]);
+      buttons.push([{ text: t(lang, "picker.show_completed", { count: completedLabels.length }), callback_data: "cat_show_completed" }]);
     }
   }
 
-  buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
+  buttons.push([{ text: t(lang, "picker.cancel"), callback_data: "cat_cancel" }]);
 
   return { text: lines.join("\n"), buttons };
 }
@@ -4481,24 +4519,26 @@ async function handleCategoryAssign(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
+  const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
   // Warn about blocker but allow override
   const blockers = await isBlockerActive(project);
   if (blockers.length > 0 && !ctx.callbackQuery?.data?.includes("cat_override")) {
     const blockerList = blockers
       .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
       .join("\n");
-    const blockerTip = await getTip(env.PROJECTS, telegramId, "blocker_active");
+    const blockerTip = await getTip(env.PROJECTS, telegramId, "blocker_active", lang);
     await ctx.editMessageText(
-      `\u{1F6A8} <b>Blocker active</b>\n\n` +
-        `The following blocker issue(s) should be resolved first:\n${blockerList}\n\n` +
-        `\u{26A0}\u{FE0F} <i>You can still claim a category, but be aware of potential merge conflicts.</i>` +
+      `${t(lang, "blocker.heading")}\n\n` +
+        `${t(lang, "blocker.resolve_first")}\n${blockerList}\n\n` +
+        t(lang, "blocker.soft_warning") +
         blockerTip,
       {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "\u{26A0}\u{FE0F} Trotzdem arbeiten", callback_data: "cat_override" }],
-            [{ text: "\u{274C} Abbrechen", callback_data: "cat_cancel" }],
+            [{ text: t(lang, "picker.override_blocker"), callback_data: "cat_override" }],
+            [{ text: t(lang, "picker.cancel"), callback_data: "cat_cancel" }],
           ],
         },
       }
@@ -4511,18 +4551,19 @@ async function handleCategoryAssign(
   const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
 
   if (existingClaim) {
-    const alreadyTip = await getTip(env.PROJECTS, telegramId, "already_has_category");
+    const alreadyTip = await getTip(env.PROJECTS, telegramId, "already_has_category", lang);
     const text =
-      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(existingClaim.displayName)}</b> ` +
-      `(${existingClaim.assignedIssues.length} issues).\n\n` +
-      "Release your current category first before claiming a new one." +
+      t(lang, "claim.already_have", {
+        category: escapeHtml(existingClaim.displayName),
+        count: existingClaim.assignedIssues.length,
+      }) +
       alreadyTip;
 
     const keyboard = {
       inline_keyboard: [
         [
-          { text: "\u{1F5D1} Release Category", callback_data: "cat_release" },
-          { text: "\u{274C} Cancel", callback_data: "cat_cancel" },
+          { text: t(lang, "claim.release_btn"), callback_data: "cat_release" },
+          { text: t(lang, "picker.cancel"), callback_data: "cat_cancel" },
         ],
       ],
     };
@@ -4532,10 +4573,10 @@ async function handleCategoryAssign(
   }
 
   // Build category picker with open + optional completed categories
-  const result = await buildCategoryPicker(env, project, projectId, claimsState);
+  const result = await buildCategoryPicker(env, project, projectId, claimsState, false, lang);
   if (!result) {
     await ctx.editMessageText(
-      "\u{1F4C2} No categories found.\n\nAdd labels with the <code>area:</code> prefix to your GitHub issues to create categories.",
+      t(lang, "picker.no_categories"),
       { parse_mode: "HTML" }
     );
     return;
@@ -5117,6 +5158,8 @@ async function handleAufgabeNehmen(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
+  const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
   // Warn about blocker but allow override via inline button
   const blockers = await isBlockerActive(project);
   if (blockers.length > 0) {
@@ -5124,15 +5167,15 @@ async function handleAufgabeNehmen(
       .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
       .join("\n");
     await ctx.reply(
-      `\u{1F6A8} <b>Blocker active</b>\n\n` +
-        `The following blocker issue(s) should be resolved first:\n${blockerList}\n\n` +
-        `\u{26A0}\u{FE0F} <i>You can still claim a category, but be aware of potential merge conflicts.</i>`,
+      `${t(lang, "blocker.heading")}\n\n` +
+        `${t(lang, "blocker.resolve_first")}\n${blockerList}\n\n` +
+        t(lang, "blocker.soft_warning"),
       {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "\u{26A0}\u{FE0F} Trotzdem arbeiten", callback_data: "cat_override" }],
-            [{ text: "\u{274C} Abbrechen", callback_data: "cat_cancel" }],
+            [{ text: t(lang, "picker.override_blocker"), callback_data: "cat_override" }],
+            [{ text: t(lang, "picker.cancel"), callback_data: "cat_cancel" }],
           ],
         },
       }
@@ -5145,16 +5188,16 @@ async function handleAufgabeNehmen(
   const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
 
   if (existingClaim) {
-    const text =
-      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(existingClaim.displayName)}</b> ` +
-      `(${existingClaim.assignedIssues.length} issues).\n\n` +
-      "Release your current category first before claiming a new one.";
+    const text = t(lang, "claim.already_have", {
+      category: escapeHtml(existingClaim.displayName),
+      count: existingClaim.assignedIssues.length,
+    });
 
     const keyboard = {
       inline_keyboard: [
         [
-          { text: "\u{1F5D1} Release Category", callback_data: "cat_release" },
-          { text: "\u{274C} Cancel", callback_data: "cat_cancel" },
+          { text: t(lang, "claim.release_btn"), callback_data: "cat_release" },
+          { text: t(lang, "picker.cancel"), callback_data: "cat_cancel" },
         ],
       ],
     };
@@ -5164,10 +5207,10 @@ async function handleAufgabeNehmen(
   }
 
   // Build category picker with open + optional completed categories
-  const result = await buildCategoryPicker(env, project, projectId, claimsState);
+  const result = await buildCategoryPicker(env, project, projectId, claimsState, false, lang);
   if (!result) {
     await ctx.reply(
-      "\u{1F4C2} No categories found.\n\nAdd labels with the <code>area:</code> prefix to your GitHub issues to create categories.",
+      t(lang, "picker.no_categories"),
       { parse_mode: "HTML" }
     );
     return;
@@ -5195,6 +5238,24 @@ async function getProjectList(env: Env): Promise<Array<{ id: string; config: Pro
 }
 
 // ---------------------------------------------------------------------------
+// Localized reply keyboard builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the 6-button reply keyboard with localized button labels.
+ */
+function buildReplyKeyboard(lang: Locale): ReturnType<Keyboard["resized"]> {
+  return new Keyboard()
+    .text(t(lang, "btn.claim_task")).text(t(lang, "btn.my_tasks"))
+    .row()
+    .text(t(lang, "btn.team_board")).text(t(lang, "btn.new_idea"))
+    .row()
+    .text(t(lang, "btn.help")).text(t(lang, "btn.switch_project"))
+    .resized()
+    .persistent();
+}
+
+// ---------------------------------------------------------------------------
 // Home screen helper — re-used by /start, onboarding, and project switch
 // ---------------------------------------------------------------------------
 
@@ -5208,6 +5269,7 @@ async function renderHomeScreen(
   env: Env,
   telegramId: number
 ): Promise<void> {
+  const lang = await getUserLanguage(env.PROJECTS, telegramId);
   const active = await resolveActiveProject(env, telegramId);
   if (active) {
     const projectName = escapeHtml(active.projectId);
@@ -5222,14 +5284,7 @@ async function renderHomeScreen(
     );
   }
 
-  const keyboard = new Keyboard()
-    .text("\u{1F4CB} Aufgabe nehmen").text("\u{2705} Meine Aufgaben")
-    .row()
-    .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
-    .row()
-    .text("\u{2753} Hilfe").text("\u{1F504} Projekt wechseln")
-    .resized()
-    .persistent();
+  const keyboard = buildReplyKeyboard(lang);
 
   await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
     reply_markup: keyboard,
@@ -5305,6 +5360,7 @@ function createBot(
     }
 
     // Normal flow for registered / already-onboarded users
+    const lang = telegramId ? await getUserLanguage(env.PROJECTS, telegramId) : "en" as Locale;
 
     // Project header with inline [Switch] button
     if (telegramId) {
@@ -5324,14 +5380,7 @@ function createBot(
     }
 
     // New 6-button reply keyboard
-    const keyboard = new Keyboard()
-      .text("\u{1F4CB} Aufgabe nehmen").text("\u{2705} Meine Aufgaben")
-      .row()
-      .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
-      .row()
-      .text("\u{2753} Hilfe").text("\u{1F504} Projekt wechseln")
-      .resized()
-      .persistent();
+    const keyboard = buildReplyKeyboard(lang);
 
     await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
       reply_markup: keyboard,
@@ -5357,6 +5406,38 @@ function createBot(
   // /wer — show who is currently working (German alias)
   bot.command("wer", async () => {
     await handleWerCommand(env, project, projectId);
+  });
+
+  // /language [en|de] — view or switch the bot UI language
+  bot.command("language", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const args = ((ctx.match as string) || "").trim().toLowerCase();
+    if (!args) {
+      const currentLang = await getUserLanguage(env.PROJECTS, telegramId);
+      await ctx.reply(
+        t(currentLang, "lang.current", { lang: currentLang === "en" ? "English" : "Deutsch" }),
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    if (args !== "en" && args !== "de") {
+      const currentLang = await getUserLanguage(env.PROJECTS, telegramId);
+      await ctx.reply(t(currentLang, "lang.unsupported"));
+      return;
+    }
+    await setUserLanguage(env.PROJECTS, telegramId, args as Locale);
+    const langName = args === "en" ? "English" : "Deutsch";
+    await ctx.reply(
+      t(args as Locale, "lang.switched", { lang: langName }),
+      { parse_mode: "HTML" }
+    );
+    // Re-render the reply keyboard with the new language
+    const keyboard = buildReplyKeyboard(args as Locale);
+    await ctx.reply("\u{2328}\u{FE0F} Keyboard updated.", {
+      reply_markup: keyboard,
+      parse_mode: "HTML",
+    });
   });
 
   // /new <title> — create a new GitHub issue

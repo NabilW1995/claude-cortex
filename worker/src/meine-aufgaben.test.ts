@@ -337,7 +337,7 @@ describe("handleMeineAufgaben", () => {
     const env = createMockEnv({});
     const { text } = await handleMeineAufgaben(env, 12345, "Test");
     expect(text).toContain("No project configured");
-    expect(text).toContain("Meine Aufgaben");
+    expect(text).toContain("My Tasks");
     expect(text).toContain("Test"); // firstName is included
   });
 
@@ -391,7 +391,7 @@ describe("handleMeineAufgaben", () => {
 
     const { text } = await handleMeineAufgaben(env, 12345, "Test");
     expect(text).toContain("No tasks assigned to you");
-    expect(text).toContain("Aufgabe nehmen");
+    expect(text).toContain("Claim Task");
     expect(text).toContain("Today completed: <b>0</b>");
   });
 

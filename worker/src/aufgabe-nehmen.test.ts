@@ -742,7 +742,7 @@ describe("handleAufgabeNehmen", () => {
     await handleAufgabeNehmen(ctx as any, project, env as any, "test-project");
 
     const replyText = (ctx.reply as any).mock.calls[0][0] as string;
-    expect(replyText).toContain("Aufgabe nehmen");
+    expect(replyText).toContain("Claim Task");
     expect(replyText).toContain("Pick a category");
 
     // Check buttons
@@ -1639,7 +1639,7 @@ describe("buildCategoryPicker", () => {
     expect(result).not.toBeNull();
 
     // Text should contain completed section with issues
-    expect(result!.text).toContain("Erledigt");
+    expect(result!.text).toContain("Done");
     expect(result!.text).toContain("ui");
     expect(result!.text).toContain("#10");
     expect(result!.text).toContain("Login redesign");
