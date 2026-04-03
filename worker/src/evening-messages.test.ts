@@ -832,7 +832,7 @@ describe("sendGroupEveningMessage", () => {
     expect(body.text).toContain("Total events:");
   });
 
-  it("includes learnings placeholder mentioning Issue #64", async () => {
+  it("includes team learnings section (Issue #64)", async () => {
     const project = makeProject();
     const env = createMockEnv(
       [{ id: "test-project", config: project }],
@@ -847,8 +847,7 @@ describe("sendGroupEveningMessage", () => {
       (c: unknown[]) => String(c[0]).includes("api.telegram.org") && String(c[0]).includes("/sendMessage")
     );
     const body = JSON.parse((telegramCalls[0][1] as RequestInit).body as string);
-    expect(body.text).toContain("Team learnings: coming soon");
-    expect(body.text).toContain("Issue #64");
+    expect(body.text).toContain("No team learnings captured today.");
   });
 
   it("shows open PRs with 'Preview links waiting for review' section", async () => {

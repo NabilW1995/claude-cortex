@@ -2419,6 +2419,80 @@ async function calculateVelocitySnapshot(
 }
 
 // ---------------------------------------------------------------------------
+// D1 helpers — learning bridge (Issue #64)
+// ---------------------------------------------------------------------------
+
+/** Save a new learning to D1. Returns the new row id. */
+async function saveLearning(
+  db: D1Database,
+  userId: string,
+  project: string,
+  content: string,
+  scope: string = "private"
+): Promise<number> {
+  const result = await db
+    .prepare(
+      "INSERT INTO learnings_telegram (user_id, project, content, scope) VALUES (?, ?, ?, ?)"
+    )
+    .bind(userId, project, content, scope)
+    .run();
+  return result.meta.last_row_id as number;
+}
+
+/** Update the scope of an existing learning. */
+async function updateLearningScope(
+  db: D1Database,
+  learningId: number,
+  scope: "team" | "private",
+  userId: string
+): Promise<void> {
+  await db
+    .prepare("UPDATE learnings_telegram SET scope = ? WHERE id = ? AND user_id = ?")
+    .bind(scope, learningId, userId)
+    .run();
+}
+
+/** Fetch today's "team" learnings for the evening group digest. */
+async function getTodayTeamLearnings(
+  db: D1Database,
+  project: string
+): Promise<Array<{ content: string; user_id: string }>> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT content, user_id FROM learnings_telegram
+         WHERE project = ? AND scope = 'team' AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 20`
+      )
+      .bind(project)
+      .all<{ content: string; user_id: string }>();
+    return result.results || [];
+  } catch {
+    return [];
+  }
+}
+
+/** Fetch today's learnings for a specific user (all scopes). */
+async function getTodayUserLearnings(
+  db: D1Database,
+  userId: string
+): Promise<Array<{ content: string; scope: string }>> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT content, scope FROM learnings_telegram
+         WHERE user_id = ? AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 20`
+      )
+      .bind(userId)
+      .all<{ content: string; scope: string }>();
+    return result.results || [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Project config from KV
 // ---------------------------------------------------------------------------
 
@@ -5963,6 +6037,41 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // Learning Bridge — scope selection callback (Issue #64)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^learning_scope:(\d+):(team|private)$/, async (ctx) => {
+    const match = ctx.match!;
+    const learningId = parseInt(match[1], 10);
+    const scope = match[2];
+
+    try {
+      const callerTelegramId = ctx.from?.id;
+      if (!callerTelegramId) {
+        await ctx.answerCallbackQuery({ text: "Could not identify user." });
+        return;
+      }
+      await updateLearningScope(env.DB, learningId, scope as "team" | "private", String(callerTelegramId));
+
+      const scopeLabel = scope === "team" ? "\u{1F465} For everyone" : "\u{1F512} Only for me";
+
+      await ctx.editMessageText(
+        "\u{1F4DD} <b>Learning saved!</b>\n\n" +
+        `Scope: ${scopeLabel}\n\n` +
+        "<i>This learning will appear in your evening summary.</i>" +
+        (scope === "team" ? "\n<i>It will also be shared in the team digest.</i>" : ""),
+        { parse_mode: "HTML" }
+      );
+      await ctx.answerCallbackQuery("Learning scope updated!");
+    } catch (err) {
+      console.error("learning_scope callback error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not update learning scope." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
   // Preview & Merge — Create Preview, Approve, Request Changes (#56)
   // -------------------------------------------------------------------
 
@@ -6962,6 +7071,58 @@ function createBot(
           { parse_mode: "HTML" }
         );
       }
+      return;
+    }
+
+    // -----------------------------------------------------------------
+    // Learning Bridge — @Claude detection (Issue #64)
+    // If the message starts with @Claude, extract the learning and save
+    // to D1 with inline scope buttons.
+    // -----------------------------------------------------------------
+    const claudePrefix = /^@claude\b/i;
+    if (claudePrefix.test(ctx.message.text)) {
+      const learningContent = ctx.message.text.replace(claudePrefix, "").trim();
+
+      if (learningContent.length > 500) {
+        await ctx.reply(
+          "\u{274C} Learning is too long (max 500 characters). Please shorten it.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      if (!learningContent) {
+        await ctx.reply(
+          "\u{1F4DD} <b>Learning Bridge</b>\n\n" +
+          "Send a message starting with <code>@Claude</code> followed by what you learned.\n\n" +
+          "Example: <code>@Claude Always validate user input on both client and server</code>",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Resolve active project for context
+      const active = await resolveActiveProject(env, telegramId);
+      const projectId = active ? active.projectId : "unknown";
+
+      // Save learning with default "private" scope — user picks via buttons
+      const learningId = await saveLearning(
+        env.DB,
+        String(telegramId),
+        projectId,
+        learningContent
+      );
+
+      const scopeKb = new InlineKeyboard()
+        .text("\u{1F465} For everyone", `learning_scope:${learningId}:team`)
+        .text("\u{1F512} Only for me", `learning_scope:${learningId}:private`);
+
+      await ctx.reply(
+        "\u{1F4DD} <b>Learning captured!</b>\n\n" +
+        `<i>${escapeHtml(learningContent)}</i>\n\n` +
+        "Who should see this learning?",
+        { parse_mode: "HTML", reply_markup: scopeKb }
+      );
       return;
     }
 
@@ -8753,6 +8914,11 @@ export {
   sendPrivateEveningDM,
   sendGroupEveningMessage,
   sendEveningDigest,
+  // Learning bridge helpers (Issue #64)
+  saveLearning,
+  updateLearningScope,
+  getTodayTeamLearnings,
+  getTodayUserLearnings,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot };
 
@@ -9683,16 +9849,38 @@ async function sendPrivateEveningDM(
     lines.push("");
   }
 
-  // Learnings section — accepts forwarded data or shows placeholder
-  if (learnings && learnings.length > 0) {
-    lines.push("\u{1F4DA} <b>Today's learnings:</b>");
-    for (const learning of learnings.slice(0, 5)) {
-      lines.push(`  \u{2022} ${escapeHtml(learning)}`);
+  // Learnings section — pull from D1 first, fall back to forwarded data (Issue #64)
+  try {
+    const userLearnings = await getTodayUserLearnings(env.DB, String(member.telegram_id));
+    if (userLearnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+      for (const l of userLearnings.slice(0, 5)) {
+        const scopeIcon = l.scope === "team" ? "\u{1F465}" : "\u{1F512}";
+        lines.push(`  \u{2022} ${scopeIcon} ${escapeHtml(l.content)}`);
+      }
+      lines.push("");
+    } else if (learnings && learnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+      for (const learning of learnings.slice(0, 5)) {
+        lines.push(`  \u{2022} ${escapeHtml(learning)}`);
+      }
+      lines.push("");
+    } else {
+      lines.push("\u{1F4DA} <i>No learnings captured today.</i>");
+      lines.push("");
     }
-    lines.push("");
-  } else {
-    lines.push("\u{1F4DA} <i>No learnings captured today.</i>");
-    lines.push("");
+  } catch {
+    // Fallback to the old behavior if D1 query fails
+    if (learnings && learnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+      for (const learning of learnings.slice(0, 5)) {
+        lines.push(`  \u{2022} ${escapeHtml(learning)}`);
+      }
+      lines.push("");
+    } else {
+      lines.push("\u{1F4DA} <i>No learnings captured today.</i>");
+      lines.push("");
+    }
   }
 
   // Category suggestion if user has no active claim
@@ -9868,9 +10056,27 @@ async function sendGroupEveningMessage(env: Env): Promise<void> {
     console.error("[EveningGroup] Today stats failed:", e);
   }
 
-  // --- Learnings placeholder (for future Issue #64 integration) ---
+  // --- Team learnings from D1 (Issue #64) ---
   lines.push("");
-  lines.push("\u{1F4DA} <i>Team learnings: coming soon (Issue #64)</i>");
+  try {
+    const allTeamLearnings: Array<{ content: string; user_id: string }> = [];
+    for (const p of projects) {
+      const pLearnings = await getTodayTeamLearnings(env.DB, p.id);
+      allTeamLearnings.push(...pLearnings);
+    }
+
+    if (allTeamLearnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Team learnings today:</b>");
+      for (const l of allTeamLearnings.slice(0, 10)) {
+        const memberName = members.find((m) => String(m.telegram_id) === l.user_id)?.name || l.user_id;
+        lines.push(`  \u{2022} ${escapeHtml(memberName)}: ${escapeHtml(l.content)}`);
+      }
+    } else {
+      lines.push("\u{1F4DA} <i>No team learnings captured today.</i>");
+    }
+  } catch {
+    lines.push("\u{1F4DA} <i>Team learnings: error loading</i>");
+  }
 
   await sendToLoginChannel(env, lines.join("\n"));
 }

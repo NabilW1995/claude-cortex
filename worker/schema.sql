@@ -54,3 +54,16 @@ CREATE TABLE IF NOT EXISTS velocity (
 );
 
 CREATE INDEX IF NOT EXISTS idx_velocity_project_week ON velocity(project, week_start);
+
+-- Telegram learning bridge (Issue #64)
+CREATE TABLE IF NOT EXISTS learnings_telegram (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  project TEXT NOT NULL,
+  content TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'private',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_learnings_telegram_user ON learnings_telegram(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_learnings_telegram_scope ON learnings_telegram(scope, created_at);
