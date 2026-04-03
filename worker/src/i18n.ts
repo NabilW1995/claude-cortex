@@ -192,6 +192,19 @@ const en: Record<string, string> = {
   "lang.switched": "\u{2705} Language switched to <b>{lang}</b>.",
   "lang.usage": "Usage: /language en or /language de",
   "lang.unsupported": "Unsupported language. Available: en, de",
+
+  // Roles — Admin / Member system
+  "roles.admin_only": "\u{26D4} This command is for admins only.",
+  "roles.promote_usage": "Usage: /promote @username",
+  "roles.demote_usage": "Usage: /demote @username",
+  "roles.user_not_found": "User \"{name}\" not found in the team.",
+  "roles.promoted": "\u{2705} <b>{name}</b> is now an admin.",
+  "roles.demoted": "\u{2705} <b>{name}</b> is now a regular member.",
+  "roles.cannot_demote_self": "\u{26A0}\u{FE0F} You can't demote yourself \u{2014} ask another admin.",
+  "roles.last_admin": "\u{26A0}\u{FE0F} Can't demote the last admin. Promote someone else first.",
+  "roles.already_admin": "\u{2139}\u{FE0F} {name} is already an admin.",
+  "roles.already_member": "\u{2139}\u{FE0F} {name} is already a regular member.",
+  "roles.first_admin": "\u{1F451} You're the first team member \u{2014} you've been made admin automatically!",
 };
 
 const de: Record<string, string> = {
@@ -367,6 +380,19 @@ const de: Record<string, string> = {
   "lang.switched": "\u{2705} Sprache ge\u00e4ndert zu <b>{lang}</b>.",
   "lang.usage": "Nutzung: /language en oder /language de",
   "lang.unsupported": "Nicht unterst\u00fctzte Sprache. Verf\u00fcgbar: en, de",
+
+  // Roles — Admin / Member system
+  "roles.admin_only": "\u{26D4} Dieser Befehl ist nur f\u00fcr Admins.",
+  "roles.promote_usage": "Nutzung: /promote @username",
+  "roles.demote_usage": "Nutzung: /demote @username",
+  "roles.user_not_found": "User \"{name}\" nicht im Team gefunden.",
+  "roles.promoted": "\u{2705} <b>{name}</b> ist jetzt Admin.",
+  "roles.demoted": "\u{2705} <b>{name}</b> ist jetzt normales Mitglied.",
+  "roles.cannot_demote_self": "\u{26A0}\u{FE0F} Du kannst dich nicht selbst degradieren \u{2014} frag einen anderen Admin.",
+  "roles.last_admin": "\u{26A0}\u{FE0F} Der letzte Admin kann nicht degradiert werden. Bef\u00f6rdere erst jemand anderen.",
+  "roles.already_admin": "\u{2139}\u{FE0F} {name} ist bereits Admin.",
+  "roles.already_member": "\u{2139}\u{FE0F} {name} ist bereits normales Mitglied.",
+  "roles.first_admin": "\u{1F451} Du bist das erste Teammitglied \u{2014} du wurdest automatisch zum Admin!",
 };
 
 // ---------------------------------------------------------------------------

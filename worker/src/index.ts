@@ -37,11 +37,14 @@ interface ProjectConfig {
   members: Array<{ name: string; github: string; telegram: string }>;
 }
 
+type UserRole = "admin" | "member";
+
 interface TeamMember {
   telegram_id: number;
   telegram_username: string;
   github: string;
   name: string;
+  role?: UserRole; // undefined treated as "member" for backward compat
 }
 
 interface ActiveSession {
@@ -1615,6 +1618,37 @@ async function upsertTeamMember(
   }
 
   await kv.put("team-members", JSON.stringify(members));
+}
+
+// ---------------------------------------------------------------------------
+// Role helpers — Admin / Member system
+// ---------------------------------------------------------------------------
+
+function getUserRole(member: TeamMember | undefined): UserRole {
+  return member?.role === "admin" ? "admin" : "member";
+}
+
+async function isAdmin(kv: KVNamespace, telegramId: number): Promise<boolean> {
+  const members = await getTeamMembers(kv);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  return getUserRole(member) === "admin";
+}
+
+async function setUserRole(
+  kv: KVNamespace,
+  telegramId: number,
+  role: UserRole
+): Promise<void> {
+  const members = await getTeamMembers(kv);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  if (!member) return;
+  member.role = role;
+  await kv.put("team-members", JSON.stringify(members));
+}
+
+async function countAdmins(kv: KVNamespace): Promise<number> {
+  const members = await getTeamMembers(kv);
+  return members.filter((m) => m.role === "admin").length;
 }
 
 // ---------------------------------------------------------------------------
@@ -5586,6 +5620,10 @@ function createBot(
       return;
     }
 
+    // Auto-promote first team member to admin
+    const existingMembers = await getTeamMembers(env.PROJECTS);
+    const isFirstMember = existingMembers.length === 0;
+
     // Save to central team registry
     await upsertTeamMember(env.PROJECTS, {
       telegram_id: telegramId,
@@ -5594,19 +5632,127 @@ function createBot(
       name: firstName,
     });
 
+    if (isFirstMember) {
+      await setUserRole(env.PROJECTS, telegramId, "admin");
+    }
+
     // Retrieve updated member list to show the assigned color
     const members = await getTeamMembers(env.PROJECTS);
     const color = getUserColor(members, telegramId);
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
 
-    await ctx.reply(
+    let replyText =
       `${color} <b>Registered!</b>\n\n` +
-        `Telegram: @${telegramUsername || firstName}\n` +
-        `GitHub: ${githubUsername.replace(/^@/, "")}\n\n` +
-        `You can now use:\n` +
-        `\u{1F4CB} /tasks \u{2014} see open tasks\n` +
-        `\u{1F4CC} /grab #1 #2 \u{2014} claim tasks\n` +
-        `\u{2705} /done #5 \u{2014} mark task done\n` +
-        `\u{1F4CA} /dashboard \u{2014} live dashboard`,
+      `Telegram: @${telegramUsername || firstName}\n` +
+      `GitHub: ${githubUsername.replace(/^@/, "")}\n\n` +
+      `You can now use:\n` +
+      `\u{1F4CB} /tasks \u{2014} see open tasks\n` +
+      `\u{1F4CC} /grab #1 #2 \u{2014} claim tasks\n` +
+      `\u{2705} /done #5 \u{2014} mark task done\n` +
+      `\u{1F4CA} /dashboard \u{2014} live dashboard`;
+
+    if (isFirstMember) {
+      replyText += `\n\n${t(lang, "roles.first_admin")}`;
+    }
+
+    await ctx.reply(replyText, { parse_mode: "HTML" });
+  });
+
+  // /promote @username — promote a team member to admin (admin-only)
+  bot.command("promote", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+    if (!(await isAdmin(env.PROJECTS, telegramId))) {
+      await ctx.reply(t(lang, "roles.admin_only"));
+      return;
+    }
+
+    const args = ((ctx.match as string) || "").trim();
+    if (!args) {
+      await ctx.reply(t(lang, "roles.promote_usage"));
+      return;
+    }
+
+    const targetName = args.replace(/^@/, "");
+    const members = await getTeamMembers(env.PROJECTS);
+    const target = members.find(
+      (m) =>
+        m.name?.toLowerCase() === targetName.toLowerCase() ||
+        m.telegram_username?.toLowerCase() === targetName.toLowerCase() ||
+        m.github?.toLowerCase() === targetName.toLowerCase()
+    );
+
+    if (!target) {
+      await ctx.reply(t(lang, "roles.user_not_found", { name: targetName }));
+      return;
+    }
+
+    if (getUserRole(target) === "admin") {
+      await ctx.reply(t(lang, "roles.already_admin", { name: target.name || targetName }));
+      return;
+    }
+
+    await setUserRole(env.PROJECTS, target.telegram_id, "admin");
+    await ctx.reply(
+      t(lang, "roles.promoted", { name: target.name || targetName }),
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // /demote @username — demote an admin to regular member (admin-only)
+  bot.command("demote", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+    if (!(await isAdmin(env.PROJECTS, telegramId))) {
+      await ctx.reply(t(lang, "roles.admin_only"));
+      return;
+    }
+
+    const args = ((ctx.match as string) || "").trim();
+    if (!args) {
+      await ctx.reply(t(lang, "roles.demote_usage"));
+      return;
+    }
+
+    const targetName = args.replace(/^@/, "");
+    const members = await getTeamMembers(env.PROJECTS);
+    const target = members.find(
+      (m) =>
+        m.name?.toLowerCase() === targetName.toLowerCase() ||
+        m.telegram_username?.toLowerCase() === targetName.toLowerCase() ||
+        m.github?.toLowerCase() === targetName.toLowerCase()
+    );
+
+    if (!target) {
+      await ctx.reply(t(lang, "roles.user_not_found", { name: targetName }));
+      return;
+    }
+
+    if (getUserRole(target) === "member") {
+      await ctx.reply(t(lang, "roles.already_member", { name: target.name || targetName }));
+      return;
+    }
+
+    // Prevent self-demotion
+    if (target.telegram_id === telegramId) {
+      await ctx.reply(t(lang, "roles.cannot_demote_self"));
+      return;
+    }
+
+    // Prevent demoting the last admin
+    const adminCount = await countAdmins(env.PROJECTS);
+    if (adminCount <= 1) {
+      await ctx.reply(t(lang, "roles.last_admin"));
+      return;
+    }
+
+    await setUserRole(env.PROJECTS, target.telegram_id, "member");
+    await ctx.reply(
+      t(lang, "roles.demoted", { name: target.name || targetName }),
       { parse_mode: "HTML" }
     );
   });
@@ -8013,6 +8159,10 @@ function createBot(
     const telegramUsername = ctx.from?.username || "";
     const firstName = ctx.from?.first_name || "Unknown";
 
+    // Auto-promote first team member to admin
+    const existingMembers = await getTeamMembers(env.PROJECTS);
+    const isFirstMember = existingMembers.length === 0;
+
     await upsertTeamMember(env.PROJECTS, {
       telegram_id: telegramId,
       telegram_username: telegramUsername || firstName,
@@ -8020,15 +8170,22 @@ function createBot(
       name: firstName,
     });
 
+    if (isFirstMember) {
+      await setUserRole(env.PROJECTS, telegramId, "admin");
+    }
+
     const members = await getTeamMembers(env.PROJECTS);
     const color = getUserColor(members, telegramId);
     const lang = await getUserLanguage(env.PROJECTS, telegramId);
 
-    const linkedText = [
+    const linkedParts = [
       `${color} ` + t(lang, "onboard.github_linked", { username: escapeHtml(username), firstName: escapeHtml(firstName) }),
-      "",
-      t(lang, "onboard.step2_heading"),
-    ].join("\n");
+    ];
+    if (isFirstMember) {
+      linkedParts.push("", t(lang, "roles.first_admin"));
+    }
+    linkedParts.push("", t(lang, "onboard.step2_heading"));
+    const linkedText = linkedParts.join("\n");
     await ctx.reply(linkedText, { parse_mode: "HTML" });
 
     // Advance to settings step and show the settings panel
@@ -8678,7 +8835,15 @@ async function handleRegisterMember(
     name: payload.name || payload.telegram_username || "unknown",
   };
 
+  // Auto-promote first team member to admin
+  const existingMembers = await getTeamMembers(env.PROJECTS);
+  const isFirstMember = existingMembers.length === 0;
+
   await upsertTeamMember(env.PROJECTS, member);
+
+  if (isFirstMember) {
+    await setUserRole(env.PROJECTS, member.telegram_id, "admin");
+  }
 
   return new Response(
     JSON.stringify({ ok: true, member }),
@@ -9631,8 +9796,13 @@ export {
   updateLearningScope,
   getTodayTeamLearnings,
   getTodayUserLearnings,
+  // Role system helpers (Admin/Member)
+  getUserRole,
+  isAdmin,
+  setUserRole,
+  countAdmins,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot, UserRole };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
