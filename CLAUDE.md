@@ -12,6 +12,7 @@ Shared learning system, hooks, and agents for Claude Code teams.
 - MUST: Never commit directly to main/master — always use feature branches
 - MUST: Before saying "done" — run tests, verify changes work, show proof to the user
 - MUST: For multi-step tasks — ask the user after each milestone before continuing
+- MUST: NEVER use bare `cd worker` or `cd` to other dirs — use subshells `(cd worker && cmd)` instead. Breaking this crashes all hooks.
 </important>
 <!-- CORTEX:TOP_RULES:END -->
 
