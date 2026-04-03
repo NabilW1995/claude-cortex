@@ -551,7 +551,7 @@ async function githubRequest(
 async function fetchOpenIssuesByCategory(
   project: ProjectConfig,
   prefix: string = "area:"
-): Promise<Map<string, Array<{ number: number; title: string; html_url: string }>>> {
+): Promise<Map<string, Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }> }>>> {
   if (!project.githubToken) return new Map();
 
   const res = await githubRequest(
@@ -573,13 +573,13 @@ async function fetchOpenIssuesByCategory(
   // Filter out PRs (GitHub API returns PRs as issues)
   const realIssues = issues.filter((i) => !i.pull_request);
 
-  const grouped = new Map<string, Array<{ number: number; title: string; html_url: string }>>();
+  const grouped = new Map<string, Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }> }>>();
 
   for (const issue of realIssues) {
     for (const label of issue.labels) {
       if (label.name.startsWith(prefix)) {
         const existing = grouped.get(label.name) || [];
-        existing.push({ number: issue.number, title: issue.title, html_url: issue.html_url });
+        existing.push({ number: issue.number, title: issue.title, html_url: issue.html_url, labels: issue.labels });
         grouped.set(label.name, existing);
       }
     }
@@ -2156,6 +2156,7 @@ async function handleCategoryAssign(
 
   // Fetch categories from GitHub
   const categories = await fetchOpenIssuesByCategory(project);
+  const members = await getTeamMembers(env.PROJECTS);
 
   if (categories.size === 0) {
     await ctx.editMessageText(
@@ -2165,29 +2166,27 @@ async function handleCategoryAssign(
     return;
   }
 
-  // Build category picker buttons
+  // Build category picker buttons with color indicators
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
   const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
-  // Mark already-claimed categories
-  const row: Array<{ text: string; callback_data: string }> = [];
   for (const [label, issues] of sortedCategories) {
     const displayName = label.replace("area:", "");
     const claimer = claimsState.claims.find((c) => c.category === label);
-    const claimerText = claimer ? ` \u{1F512}${claimer.telegramName}` : "";
 
-    row.push({
-      text: `${displayName} (${issues.length})${claimerText}`,
-      callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
-    });
-
-    // Two buttons per row
-    if (row.length === 2) {
-      buttons.push([...row]);
-      row.length = 0;
+    let buttonText: string;
+    if (claimer) {
+      const claimerColor = getUserColor(members, claimer.telegramId);
+      buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
+    } else {
+      buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
     }
+
+    buttons.push([{
+      text: buttonText,
+      callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
+    }]);
   }
-  if (row.length > 0) buttons.push([...row]);
 
   buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
 
@@ -2232,7 +2231,7 @@ async function handleCategoryPick(
     return;
   }
 
-  // Fetch issues for this category
+  // Fetch issues for this category, now including labels for priority sorting
   const categories = await fetchOpenIssuesByCategory(project);
   const issues = categories.get(label) || [];
 
@@ -2244,10 +2243,17 @@ async function handleCategoryPick(
     return;
   }
 
+  // Sort by priority (blocker → high → medium → low)
+  const sorted = sortByPriority(issues);
+
   const displayName = label.replace("area:", "");
-  const issueList = issues
+  const issueList = sorted
     .slice(0, 10)
-    .map((i) => `\u{2022} #${i.number} ${escapeHtml(i.title)}`)
+    .map((i) => {
+      const priority = getIssuePriority(i.labels);
+      const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+      return `${emoji} #${i.number} ${escapeHtml(i.title)}`;
+    })
     .join("\n");
   const overflow = issues.length > 10 ? `\n...and ${issues.length - 10} more` : "";
 
@@ -2357,18 +2363,28 @@ async function handleCategoryConfirm(
 
   await ctx.editMessageText(successText, { parse_mode: "HTML" });
 
-  // Send DM with full task list + links
+  // Send DM with full task list, priority emojis, links, and branch name
   const prefs = await getUserPreferences(env.PROJECTS, telegramId);
   if (prefs.dm_chat_id) {
-    const dmIssueList = issues
-      .filter((i) => result.success.includes(i.number))
-      .map((i) => `\u{2022} <a href="${i.html_url}">#${i.number} ${escapeHtml(i.title)}</a>`)
+    const assignedIssues = sortByPriority(
+      issues.filter((i) => result.success.includes(i.number))
+    );
+    const dmIssueList = assignedIssues
+      .map((i) => {
+        const priority = getIssuePriority(i.labels);
+        const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+        return `${emoji} <a href="${i.html_url}">#${i.number} ${escapeHtml(i.title)}</a>`;
+      })
       .join("\n");
+
+    // Branch name: feature/{category}, lowercased, spaces → dashes
+    const branchName = `feature/${displayName.toLowerCase().replace(/\s+/g, "-")}`;
 
     const dmStatus = await sendDM(
       project.botToken,
       prefs.dm_chat_id,
-      `\u{1F4C2} <b>Category Assigned: ${safeDisplayName}</b>\n\n` +
+      `\u{1F4C2} <b>Category Assigned: ${safeDisplayName}</b>\n` +
+        `\u{1F4C2} Branch: <code>${escapeHtml(branchName)}</code>\n\n` +
         `You now own ${result.success.length} issues:\n${dmIssueList}\n\n` +
         "Use /done #N when you finish an issue."
     );
@@ -2515,6 +2531,103 @@ async function handleCategoryStatus(
     parse_mode: "HTML",
     reply_markup: keyboard,
   });
+}
+
+/**
+ * Handle the "Aufgabe nehmen" reply keyboard button.
+ * Mirrors handleCategoryAssign but uses ctx.reply() instead of
+ * ctx.editMessageText(), since reply keyboard buttons produce new messages
+ * rather than inline callback edits.
+ */
+async function handleAufgabeNehmen(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  // Block category claims when a blocker issue is active
+  const blockers = await isBlockerActive(project);
+  if (blockers.length > 0) {
+    const blockerList = blockers
+      .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
+      .join("\n");
+    await ctx.reply(
+      `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
+        `The following blocker issue(s) must be resolved first:\n${blockerList}\n\n` +
+        "Category claims will be available again once all blockers are closed.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Check if user already has a category claimed
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (existingClaim) {
+    const text =
+      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(existingClaim.displayName)}</b> ` +
+      `(${existingClaim.assignedIssues.length} issues).\n\n` +
+      "Release your current category first before claiming a new one.";
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "\u{1F5D1} Release Category", callback_data: "cat_release" },
+          { text: "\u{274C} Cancel", callback_data: "cat_cancel" },
+        ],
+      ],
+    };
+
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+
+  // Fetch categories from GitHub
+  const categories = await fetchOpenIssuesByCategory(project);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  if (categories.size === 0) {
+    await ctx.reply(
+      "\u{1F4C2} No categories found.\n\nAdd labels with the <code>area:</code> prefix to your GitHub issues to create categories.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Build category picker buttons with color indicators
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+  const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  for (const [label, issues] of sortedCategories) {
+    const displayName = label.replace("area:", "");
+    const claimer = claimsState.claims.find((c) => c.category === label);
+
+    let buttonText: string;
+    if (claimer) {
+      // Claimed — show lock icon + claimer's color + name
+      const claimerColor = getUserColor(members, claimer.telegramId);
+      buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
+    } else {
+      // Free — show green indicator
+      buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
+    }
+
+    buttons.push([{
+      text: buttonText,
+      callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
+    }]);
+  }
+
+  buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
+
+  await ctx.reply(
+    "\u{1F4CB} <b>Aufgabe nehmen</b>\n\nPick a category to claim all its open issues:",
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -3530,7 +3643,7 @@ function createBot(
   // -------------------------------------------------------------------
 
   bot.hears("\u{1F4CB} Aufgabe nehmen", async (ctx) => {
-    await ctx.reply("\u{1F6A7} <b>Aufgabe nehmen</b> \u{2014} coming soon!", { parse_mode: "HTML" });
+    await handleAufgabeNehmen(ctx, project, env, projectId);
   });
 
   bot.hears("\u{2705} Meine Aufgaben", async (ctx) => {
@@ -4913,6 +5026,7 @@ export {
   getTeamMembers,
   upsertTeamMember,
   getUserPreferences,
+  saveUserPreferences,
   buildSettingsMessage,
   escapeHtml,
   githubRequest,
@@ -4929,8 +5043,20 @@ export {
   PRIORITY_LEVELS,
   PRIORITY_EMOJIS,
   PRIORITY_DEFAULT,
+  // Category assignment helpers (Issue #48)
+  getCategoryClaims,
+  saveCategoryClaims,
+  fetchOpenIssuesByCategory,
+  assignIssuesToUser,
+  unassignIssuesFromUser,
+  getUserColor,
+  getUserColorByName,
+  handleAufgabeNehmen,
+  handleCategoryPick,
+  handleCategoryConfirm,
+  handleCategoryAssign,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
