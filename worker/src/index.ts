@@ -54,6 +54,45 @@ interface DashboardState {
   lastUpdated: string;
 }
 
+// ---------------------------------------------------------------------------
+// User Preferences & Category Assignment types
+// ---------------------------------------------------------------------------
+
+interface UserPreferences {
+  commits: boolean;
+  previews: boolean;
+  tasks: boolean;
+  pr_reviews: boolean;
+  sessions: boolean;
+  dm_chat_id: number | null;
+  updated_at: string;
+}
+
+const DEFAULT_PREFERENCES: UserPreferences = {
+  commits: false,
+  previews: false,
+  tasks: true,
+  pr_reviews: false,
+  sessions: false,
+  dm_chat_id: null,
+  updated_at: new Date().toISOString(),
+};
+
+interface CategoryClaim {
+  telegramId: number;
+  telegramName: string;
+  githubUsername: string;
+  category: string;
+  displayName: string;
+  assignedIssues: number[];
+  claimedAt: string;
+}
+
+interface CategoryClaimsState {
+  claims: CategoryClaim[];
+  lastUpdated: string;
+}
+
 interface GitHubIssuesPayload {
   action: string;
   issue: {
@@ -95,6 +134,7 @@ interface GitHubReviewPayload {
   pull_request: {
     number: number;
     title: string;
+    user: { login: string };
   };
   sender: { login: string };
 }
@@ -226,6 +266,17 @@ async function isUserDND(kv: KVNamespace, telegramId: number): Promise<boolean> 
   return dnd !== null; // KV TTL auto-deletes when DND expires
 }
 
+/**
+ * Escape user-controlled strings for safe insertion into Telegram HTML messages.
+ * Telegram's HTML mode only requires &, <, > to be escaped.
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 // ---------------------------------------------------------------------------
 // Telegram helpers (for OUTGOING messages from hooks/GitHub/cron)
 // ---------------------------------------------------------------------------
@@ -298,6 +349,107 @@ async function sendTelegramThreaded(
 }
 
 // ---------------------------------------------------------------------------
+// DM helper — send private messages to individual team members
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a private message (DM) to a Telegram user by their chat_id.
+ * Returns a status string so callers can distinguish permanent failures
+ * (user blocked the bot → 403) from transient errors.
+ *
+ * - 'sent'    — message delivered successfully
+ * - 'blocked' — user blocked the bot (HTTP 403); caller should clear dm_chat_id
+ * - 'error'   — transient failure (network, rate-limit, etc.); safe to retry later
+ */
+async function sendDM(
+  botToken: string,
+  chatId: number,
+  text: string,
+  replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> }
+): Promise<"sent" | "blocked" | "error"> {
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(body),
+      }
+    );
+    const result = (await res.json()) as { ok: boolean };
+    if (result.ok) return "sent";
+    // 403 = bot was blocked by user or chat was deleted
+    if (res.status === 403) return "blocked";
+    return "error";
+  } catch {
+    return "error";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DM Notification Engine — send DMs to subscribers of a notification type
+// ---------------------------------------------------------------------------
+
+/**
+ * Iterate team members, check their preferences and DND status, and send
+ * DMs to everyone subscribed to a given notification type.
+ *
+ * IMPORTANT: The textFn callback is responsible for escaping user-controlled
+ * strings with escapeHtml() — this function sends the text as-is with
+ * parse_mode: "HTML".
+ *
+ * @param env - Worker environment (KV, DB)
+ * @param botToken - Telegram bot token
+ * @param prefField - Which preference field to check (e.g. "commits", "pr_reviews")
+ * @param textFn - Function that returns the message text for a given member
+ * @param exclude - Optional telegram_id to skip (e.g. the actor who triggered the event)
+ */
+async function notifySubscribers(
+  env: Env,
+  botToken: string,
+  prefField: keyof UserPreferences,
+  textFn: (member: TeamMember) => string,
+  exclude?: number
+): Promise<void> {
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the actor who triggered the event
+    if (exclude && member.telegram_id === exclude) continue;
+
+    // Check DND status
+    const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+    if (dnd) continue;
+
+    // Load preferences
+    const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+
+    // Check if this notification type is enabled
+    if (!prefs[prefField]) continue;
+
+    // Need a dm_chat_id to send DMs
+    if (!prefs.dm_chat_id) continue;
+
+    const text = textFn(member);
+    const status = await sendDM(botToken, prefs.dm_chat_id, text);
+
+    if (status === "blocked") {
+      // User blocked the bot — clear dm_chat_id so we stop trying
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // User color assignment (for dashboard)
 // ---------------------------------------------------------------------------
 
@@ -364,6 +516,125 @@ async function githubRequest(
   }
 
   return fetch(`${GITHUB_API}${path}`, options);
+}
+
+// ---------------------------------------------------------------------------
+// GitHub helpers for category-based assignment
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch all open issues and group them by `area:*` labels.
+ * Returns a Map where keys are the full label name (e.g. "area:dashboard")
+ * and values are arrays of issues with that label.
+ */
+async function fetchOpenIssuesByCategory(
+  project: ProjectConfig,
+  prefix: string = "area:"
+): Promise<Map<string, Array<{ number: number; title: string; html_url: string }>>> {
+  if (!project.githubToken) return new Map();
+
+  const res = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&per_page=100`,
+    project.githubToken
+  );
+
+  if (!res.ok) return new Map();
+
+  const issues = (await res.json()) as Array<{
+    number: number;
+    title: string;
+    html_url: string;
+    labels: Array<{ name: string }>;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out PRs (GitHub API returns PRs as issues)
+  const realIssues = issues.filter((i) => !i.pull_request);
+
+  const grouped = new Map<string, Array<{ number: number; title: string; html_url: string }>>();
+
+  for (const issue of realIssues) {
+    for (const label of issue.labels) {
+      if (label.name.startsWith(prefix)) {
+        const existing = grouped.get(label.name) || [];
+        existing.push({ number: issue.number, title: issue.title, html_url: issue.html_url });
+        grouped.set(label.name, existing);
+      }
+    }
+  }
+
+  return grouped;
+}
+
+/**
+ * Batch-assign multiple issues to a GitHub user.
+ * Returns which issue numbers succeeded and which failed.
+ */
+async function assignIssuesToUser(
+  project: ProjectConfig,
+  issueNumbers: number[],
+  githubUsername: string
+): Promise<{ success: number[]; failed: number[] }> {
+  const success: number[] = [];
+  const failed: number[] = [];
+
+  if (!project.githubToken) return { success, failed: issueNumbers };
+
+  for (const num of issueNumbers) {
+    try {
+      const res = await githubRequest(
+        "POST",
+        `/repos/${project.githubRepo}/issues/${num}/assignees`,
+        project.githubToken,
+        { assignees: [githubUsername] }
+      );
+      if (res.ok) {
+        success.push(num);
+      } else {
+        failed.push(num);
+      }
+    } catch {
+      failed.push(num);
+    }
+  }
+
+  return { success, failed };
+}
+
+/**
+ * Batch-unassign multiple issues from a GitHub user.
+ * Returns which issue numbers succeeded and which failed.
+ */
+async function unassignIssuesFromUser(
+  project: ProjectConfig,
+  issueNumbers: number[],
+  githubUsername: string
+): Promise<{ success: number[]; failed: number[] }> {
+  const success: number[] = [];
+  const failed: number[] = [];
+
+  if (!project.githubToken) return { success, failed: issueNumbers };
+
+  for (const num of issueNumbers) {
+    try {
+      const res = await githubRequest(
+        "DELETE",
+        `/repos/${project.githubRepo}/issues/${num}/assignees`,
+        project.githubToken,
+        { assignees: [githubUsername] }
+      );
+      if (res.ok) {
+        success.push(num);
+      } else {
+        failed.push(num);
+      }
+    } catch {
+      failed.push(num);
+    }
+  }
+
+  return { success, failed };
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +899,70 @@ async function saveDashboardState(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for user preferences (DM notification settings)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read user preferences from KV. Returns defaults if nothing is stored.
+ */
+async function getUserPreferences(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<UserPreferences> {
+  const raw = await kv.get(`prefs:${telegramId}`);
+  if (!raw) return { ...DEFAULT_PREFERENCES };
+  try {
+    return JSON.parse(raw) as UserPreferences;
+  } catch {
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+/**
+ * Save user preferences to KV.
+ */
+async function saveUserPreferences(
+  kv: KVNamespace,
+  telegramId: number,
+  prefs: UserPreferences
+): Promise<void> {
+  prefs.updated_at = new Date().toISOString();
+  await kv.put(`prefs:${telegramId}`, JSON.stringify(prefs));
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for category claims
+// ---------------------------------------------------------------------------
+
+/**
+ * Read category claims for a project from KV.
+ */
+async function getCategoryClaims(
+  kv: KVNamespace,
+  projectId: string
+): Promise<CategoryClaimsState> {
+  const raw = await kv.get(`${projectId}:category_claims`);
+  if (!raw) return { claims: [], lastUpdated: "" };
+  try {
+    return JSON.parse(raw) as CategoryClaimsState;
+  } catch {
+    return { claims: [], lastUpdated: "" };
+  }
+}
+
+/**
+ * Save category claims for a project to KV.
+ */
+async function saveCategoryClaims(
+  kv: KVNamespace,
+  projectId: string,
+  state: CategoryClaimsState
+): Promise<void> {
+  state.lastUpdated = new Date().toISOString();
+  await kv.put(`${projectId}:category_claims`, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // D1 helpers — event logging and session history
 // ---------------------------------------------------------------------------
@@ -800,6 +1135,19 @@ async function renderDashboard(
     }
   } else {
     lines.push("\u{1F465} <b>Online:</b> nobody right now");
+  }
+
+  // Category claims section
+  const catClaims = await getCategoryClaims(env.PROJECTS, projectId);
+  if (catClaims.claims.length > 0) {
+    lines.push("");
+    lines.push("\u{1F4C2} <b>Category Claims:</b>");
+    for (const claim of catClaims.claims) {
+      const color = getUserColor(members, claim.telegramId);
+      lines.push(
+        `${color} ${escapeHtml(claim.displayName)} \u{2192} ${escapeHtml(claim.telegramName)} (${claim.assignedIssues.length} issues)`
+      );
+    }
   }
 
   // Fetch GitHub issues
@@ -1163,6 +1511,10 @@ async function sendProjectControlMessage(
       [
         { text: "\u{1F4C8} Weekly Report", callback_data: "project_weekly" },
       ],
+      [
+        { text: "\u{1F4C2} Assign Category", callback_data: "cat_assign" },
+        { text: "\u{1F4CA} Category Status", callback_data: "cat_status" },
+      ],
     ],
   };
 
@@ -1438,6 +1790,441 @@ async function handleProjectPRs(
 }
 
 // ---------------------------------------------------------------------------
+// Settings Wizard — message builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the settings message text and inline keyboard for the notification
+ * preferences panel. Shows toggle buttons with checkmarks/X marks.
+ */
+function buildSettingsMessage(prefs: UserPreferences): {
+  text: string;
+  keyboard: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+} {
+  const on = "\u{2705}";  // green checkmark
+  const off = "\u{274C}"; // red X
+
+  const text =
+    "\u{2699}\u{FE0F} <b>Notification Settings</b>\n" +
+    "\u{2501}".repeat(20) + "\n\n" +
+    `\u{1F512} Task Assignments \u{2014} always on\n` +
+    `${prefs.commits ? on : off} Commit Notifications\n` +
+    `${prefs.previews ? on : off} Preview Deployments\n` +
+    `${prefs.pr_reviews ? on : off} PR Review Requests\n` +
+    `${prefs.sessions ? on : off} Teammate Online/Offline\n\n` +
+    "Tap a button to toggle notifications on/off:";
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: `${prefs.commits ? on : off} Commits`, callback_data: "pref_toggle:commits" },
+        { text: `${prefs.previews ? on : off} Previews`, callback_data: "pref_toggle:previews" },
+      ],
+      [
+        { text: `${prefs.pr_reviews ? on : off} PR Reviews`, callback_data: "pref_toggle:pr_reviews" },
+        { text: `${prefs.sessions ? on : off} Online/Offline`, callback_data: "pref_toggle:sessions" },
+      ],
+      [
+        { text: "\u{1F4E6} Recent Commits", callback_data: "info:commits" },
+        { text: "\u{1F310} Previews", callback_data: "info:previews" },
+      ],
+      [
+        { text: "\u{1F465} Who is Online?", callback_data: "info:online" },
+      ],
+    ],
+  };
+
+  return { text, keyboard };
+}
+
+// ---------------------------------------------------------------------------
+// Category handler functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Show the category picker with issue counts per area: label.
+ */
+async function handleCategoryAssign(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  // Check if user already has a category claimed
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (existingClaim) {
+    const text =
+      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(existingClaim.displayName)}</b> ` +
+      `(${existingClaim.assignedIssues.length} issues).\n\n` +
+      "Release your current category first before claiming a new one.";
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "\u{1F5D1} Release Category", callback_data: "cat_release" },
+          { text: "\u{274C} Cancel", callback_data: "cat_cancel" },
+        ],
+      ],
+    };
+
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+
+  // Fetch categories from GitHub
+  const categories = await fetchOpenIssuesByCategory(project);
+
+  if (categories.size === 0) {
+    await ctx.editMessageText(
+      "\u{1F4C2} No categories found.\n\nAdd labels with the <code>area:</code> prefix to your GitHub issues to create categories.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Build category picker buttons
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+  const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  // Mark already-claimed categories
+  const row: Array<{ text: string; callback_data: string }> = [];
+  for (const [label, issues] of sortedCategories) {
+    const displayName = label.replace("area:", "");
+    const claimer = claimsState.claims.find((c) => c.category === label);
+    const claimerText = claimer ? ` \u{1F512}${claimer.telegramName}` : "";
+
+    row.push({
+      text: `${displayName} (${issues.length})${claimerText}`,
+      callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
+    });
+
+    // Two buttons per row
+    if (row.length === 2) {
+      buttons.push([...row]);
+      row.length = 0;
+    }
+  }
+  if (row.length > 0) buttons.push([...row]);
+
+  buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
+
+  await ctx.editMessageText(
+    "\u{1F4C2} <b>Choose a Category</b>\n\nPick a category to claim all its open issues:",
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } }
+  );
+}
+
+/**
+ * Show confirmation with the list of issues that will be assigned.
+ */
+async function handleCategoryPick(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string,
+  label: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  // Re-check race condition: is this category still available?
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaimer = claimsState.claims.find((c) => c.category === label);
+
+  if (existingClaimer) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} <b>${escapeHtml(label.replace("area:", ""))}</b> was just claimed by ${escapeHtml(existingClaimer.telegramName)}!`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Check if the caller already has a category
+  const callerClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (callerClaim) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(callerClaim.displayName)}</b>. Release it first.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Fetch issues for this category
+  const categories = await fetchOpenIssuesByCategory(project);
+  const issues = categories.get(label) || [];
+
+  if (issues.length === 0) {
+    await ctx.editMessageText(
+      `\u{1F4C2} No open issues with label <code>${escapeHtml(label)}</code>.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const displayName = label.replace("area:", "");
+  const issueList = issues
+    .slice(0, 10)
+    .map((i) => `\u{2022} #${i.number} ${escapeHtml(i.title)}`)
+    .join("\n");
+  const overflow = issues.length > 10 ? `\n...and ${issues.length - 10} more` : "";
+
+  const text =
+    `\u{1F4C2} <b>${escapeHtml(displayName)}</b> \u{2014} ${issues.length} issues\n\n` +
+    `These issues will be assigned to you:\n${issueList}${overflow}\n\n` +
+    "Confirm?";
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\u{2705} Confirm", callback_data: `cat_confirm:${label}` },
+        { text: "\u{2B05} Back", callback_data: "cat_assign" },
+      ],
+    ],
+  };
+
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+}
+
+/**
+ * Confirm category claim: assign issues on GitHub, save to KV, notify.
+ */
+async function handleCategoryConfirm(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string,
+  label: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  const firstName = ctx.from?.first_name || "Unknown";
+  if (!telegramId) return;
+
+  // Race-condition protection: re-read KV before confirming
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaimer = claimsState.claims.find((c) => c.category === label);
+  if (existingClaimer) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} Too late! <b>${escapeHtml(label.replace("area:", ""))}</b> was claimed by ${escapeHtml(existingClaimer.telegramName)}.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Double-check caller doesn't already have a category
+  const callerClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (callerClaim) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(callerClaim.displayName)}</b>.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Look up GitHub username
+  const members = await getTeamMembers(env.PROJECTS);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  const githubUsername = member?.github || firstName;
+
+  // Fetch issues for this label
+  const categories = await fetchOpenIssuesByCategory(project);
+  const issues = categories.get(label) || [];
+  const issueNumbers = issues.map((i) => i.number);
+
+  // Assign on GitHub
+  const result = await assignIssuesToUser(project, issueNumbers, githubUsername);
+
+  const displayName = label.replace("area:", "");
+  const safeDisplayName = escapeHtml(displayName);
+  const safeFirstName = escapeHtml(firstName);
+
+  // Save claim to KV
+  const claim: CategoryClaim = {
+    telegramId,
+    telegramName: firstName,
+    githubUsername,
+    category: label,
+    displayName,
+    assignedIssues: result.success,
+    claimedAt: new Date().toISOString(),
+  };
+  claimsState.claims.push(claim);
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  // Update the message in the group
+  const successText =
+    `\u{2705} <b>${safeDisplayName}</b> \u{2192} ${safeFirstName}\n\n` +
+    `${result.success.length} issues assigned` +
+    (result.failed.length > 0 ? `, ${result.failed.length} failed` : "") +
+    ".";
+
+  await ctx.editMessageText(successText, { parse_mode: "HTML" });
+
+  // Send DM with full task list + links
+  const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+  if (prefs.dm_chat_id) {
+    const dmIssueList = issues
+      .filter((i) => result.success.includes(i.number))
+      .map((i) => `\u{2022} <a href="${i.html_url}">#${i.number} ${escapeHtml(i.title)}</a>`)
+      .join("\n");
+
+    const dmStatus = await sendDM(
+      project.botToken,
+      prefs.dm_chat_id,
+      `\u{1F4C2} <b>Category Assigned: ${safeDisplayName}</b>\n\n` +
+        `You now own ${result.success.length} issues:\n${dmIssueList}\n\n` +
+        "Use /done #N when you finish an issue."
+    );
+    if (dmStatus === "blocked") {
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+    }
+  }
+
+  // Post to group
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `\u{1F4C2} ${safeDisplayName} \u{2192} ${safeFirstName} (${result.success.length} issues)`,
+    project.threadId
+  );
+}
+
+/**
+ * Show release confirmation for the user's current category.
+ */
+async function handleCategoryRelease(
+  ctx: Context,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (!claim) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} You don't have a category claimed.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const text =
+    `\u{1F5D1} Release <b>${escapeHtml(claim.displayName)}</b>?\n\n` +
+    `${claim.assignedIssues.length} issues will be unassigned from you on GitHub.`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\u{2705} Yes, release", callback_data: "cat_release_confirm" },
+        { text: "\u{274C} Cancel", callback_data: "cat_cancel" },
+      ],
+    ],
+  };
+
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+}
+
+/**
+ * Confirm release: unassign on GitHub, remove from KV.
+ */
+async function handleCategoryReleaseConfirm(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  const firstName = ctx.from?.first_name || "Unknown";
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+
+  if (claimIndex < 0) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} No category to release.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const claim = claimsState.claims[claimIndex];
+
+  // Unassign on GitHub
+  await unassignIssuesFromUser(project, claim.assignedIssues, claim.githubUsername);
+
+  // Remove from KV
+  claimsState.claims.splice(claimIndex, 1);
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  const safeDisplayName = escapeHtml(claim.displayName);
+  const safeFirstName = escapeHtml(firstName);
+
+  await ctx.editMessageText(
+    `\u{1F5D1} <b>${safeDisplayName}</b> released by ${safeFirstName}.\n` +
+      `${claim.assignedIssues.length} issues unassigned.`,
+    { parse_mode: "HTML" }
+  );
+
+  // Post to group
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `\u{1F5D1} ${safeDisplayName} released by ${safeFirstName}`,
+    project.threadId
+  );
+}
+
+/**
+ * Show who has which category.
+ */
+async function handleCategoryStatus(
+  ctx: Context,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  if (claimsState.claims.length === 0) {
+    await ctx.editMessageText(
+      "\u{1F4CA} <b>Category Status</b>\n\nNo categories claimed yet.\nUse the \u{1F4C2} Assign Category button to get started.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const lines: string[] = ["\u{1F4CA} <b>Category Status</b>", ""];
+
+  for (const claim of claimsState.claims) {
+    const color = getUserColor(members, claim.telegramId);
+    lines.push(
+      `${color} <b>${escapeHtml(claim.displayName)}</b> \u{2192} ${escapeHtml(claim.telegramName)} ` +
+        `(${claim.assignedIssues.length} issues, since ${claim.claimedAt.substring(0, 10)})`
+    );
+  }
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "\u{1F504} Refresh", callback_data: "cat_status" }],
+    ],
+  };
+
+  await ctx.editMessageText(lines.join("\n"), {
+    parse_mode: "HTML",
+    reply_markup: keyboard,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // grammy bot factory — creates a bot instance with all handlers registered
 // ---------------------------------------------------------------------------
 
@@ -1458,6 +2245,22 @@ function createBot(
   // Global error handler — prevents errors from leaking to Telegram users
   bot.catch((err) => {
     console.error(`[Bot Error] ${err.message}`);
+  });
+
+  // -------------------------------------------------------------------
+  // Private-chat middleware — auto-save dm_chat_id on first DM
+  // -------------------------------------------------------------------
+
+  bot.use(async (ctx, next) => {
+    if (ctx.chat?.type === "private" && ctx.from?.id) {
+      const telegramId = ctx.from.id;
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      if (!prefs.dm_chat_id || prefs.dm_chat_id !== ctx.chat.id) {
+        prefs.dm_chat_id = ctx.chat.id;
+        await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+      }
+    }
+    await next();
   });
 
   // -------------------------------------------------------------------
@@ -1695,6 +2498,36 @@ function createBot(
     } else {
       await sendProjectControlMessage(project, env, projectId);
       await ctx.reply("\u{2705} Project Control Panel sent and pinned.");
+    }
+  });
+
+  // /settings — open notification preferences
+  bot.command("settings", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    if (ctx.chat?.type === "private") {
+      // In private chat: show settings panel directly
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      const { text, keyboard } = buildSettingsMessage(prefs);
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } else {
+      // In group: ask the user to go to DM
+      await ctx.reply(
+        "\u{2699}\u{FE0F} Send me /settings in a private chat to manage your notifications.",
+        { parse_mode: "HTML" }
+      );
+
+      // Also try to send a DM with the settings panel
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      if (prefs.dm_chat_id) {
+        const { text, keyboard } = buildSettingsMessage(prefs);
+        const dmStatus = await sendDM(project.botToken, prefs.dm_chat_id, text, keyboard);
+        if (dmStatus === "blocked") {
+          prefs.dm_chat_id = null;
+          await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+        }
+      }
     }
   });
 
@@ -2110,6 +2943,136 @@ function createBot(
           `\u{274C} Could not assign issue. Check GitHub permissions.`, project.threadId);
       }
     }
+  });
+
+  // -------------------------------------------------------------------
+  // Preference toggle callbacks (Settings Wizard)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^pref_toggle:(commits|previews|pr_reviews|sessions)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const field = ctx.match![1] as keyof UserPreferences;
+    const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+
+    // Flip the boolean
+    (prefs as unknown as Record<string, unknown>)[field] = !prefs[field];
+    await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+
+    // Re-render the settings message in place
+    const { text, keyboard } = buildSettingsMessage(prefs);
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {
+      // Message unchanged or expired — safe to ignore
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // On-demand info callbacks (Settings Wizard)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("info:commits", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+
+    // Query D1 events table for recent pushes
+    const lines: string[] = ["\u{1F4E6} <b>Recent Commits</b>", ""];
+    try {
+      const events = await env.DB.prepare(
+        `SELECT actor, target, metadata, created_at
+         FROM events
+         WHERE event_type LIKE 'push%'
+         ORDER BY created_at DESC LIMIT 10`
+      ).all<{ actor: string; target: string; metadata: string; created_at: string }>();
+
+      if (events.results && events.results.length > 0) {
+        for (const e of events.results) {
+          let commitCount = "";
+          try {
+            const meta = JSON.parse(e.metadata || "{}");
+            commitCount = meta.commit_count ? ` (${meta.commit_count} commits)` : "";
+          } catch {}
+          lines.push(`\u{2022} ${e.actor} \u{2192} ${e.target}${commitCount}`);
+          lines.push(`  ${e.created_at}`);
+        }
+      } else {
+        lines.push("No recent push events recorded.");
+      }
+    } catch {
+      lines.push("Could not load commit data.");
+    }
+
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+  });
+
+  bot.callbackQuery("info:previews", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await ctx.reply("\u{1F310} No active previews right now.\n\nThis feature will show deployment preview links in a future update.");
+  });
+
+  bot.callbackQuery("info:online", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+
+    const sessions = await getActiveSessions(env.PROJECTS, projectId);
+    const members = await getTeamMembers(env.PROJECTS);
+
+    if (sessions.length === 0) {
+      await ctx.reply("\u{1F465} Nobody is currently online.");
+      return;
+    }
+
+    const lines: string[] = ["\u{1F465} <b>Currently Online</b>", ""];
+    for (const s of sessions) {
+      const color = getUserColorByName(members, s.user);
+      lines.push(`${color} ${s.user} (since ${s.since})`);
+    }
+
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+  });
+
+  // -------------------------------------------------------------------
+  // Category assignment callbacks
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("cat_assign", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryAssign(ctx, project, env, projectId);
+  });
+
+  bot.callbackQuery(/^cat_pick:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const label = ctx.match![1];
+    await handleCategoryPick(ctx, project, env, projectId, label);
+  });
+
+  bot.callbackQuery(/^cat_confirm:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const label = ctx.match![1];
+    await handleCategoryConfirm(ctx, project, env, projectId, label);
+  });
+
+  bot.callbackQuery("cat_cancel", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      await ctx.editMessageText("\u{274C} Cancelled.", { parse_mode: "HTML" });
+    } catch {}
+  });
+
+  bot.callbackQuery("cat_release", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryRelease(ctx, env, projectId);
+  });
+
+  bot.callbackQuery("cat_release_confirm", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryReleaseConfirm(ctx, project, env, projectId);
+  });
+
+  bot.callbackQuery("cat_status", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryStatus(ctx, env, projectId);
   });
 
   // -------------------------------------------------------------------
@@ -2820,25 +3783,30 @@ async function handleGitHubIssues(
       break;
 
     case "assigned": {
-      // Batching: bulk assigning many issues at once gets collapsed into one message
+      // Send assignment DM directly to the assignee (tasks = always on)
       if (issue.assignee) {
-        const detail = `#${issue.number} "${issue.title}" \u{2192} @${issue.assignee.login}`;
-        const batch = await checkAndBatch(
-          env.PROJECTS,
-          projectId,
-          "assigned",
-          sender.login,
-          detail
-        );
+        const assignMembers = await getTeamMembers(env.PROJECTS);
+        const assignee = assignMembers.find((m) => m.github === issue.assignee!.login);
 
-        if (batch.shouldSend && batch.batchMessage) {
-          // Buffer flushed — send the batch summary
-          message = `\u{1F464} ${batch.batchMessage}`;
-        } else if (batch.shouldSend) {
-          // First event — send normally (no batch yet)
-          message = `\u{1F464} Issue #${issue.number} assigned to @${issue.assignee.login}`;
+        if (assignee) {
+          const assigneeDnd = await isUserDND(env.PROJECTS, assignee.telegram_id);
+          if (!assigneeDnd) {
+            const assigneePrefs = await getUserPreferences(env.PROJECTS, assignee.telegram_id);
+            if (assigneePrefs.dm_chat_id) {
+              const dmStatus = await sendDM(
+                project.botToken,
+                assigneePrefs.dm_chat_id,
+                `\u{1F4CC} Issue #${issue.number} assigned to you: "${escapeHtml(issue.title)}"\n\u{1F517} ${issue.html_url}`
+              );
+              if (dmStatus === "blocked") {
+                assigneePrefs.dm_chat_id = null;
+                await saveUserPreferences(env.PROJECTS, assignee.telegram_id, assigneePrefs);
+              }
+            }
+          }
         }
-        // else: shouldSend is false — event is buffered, don't send
+
+        // No group message for assignments
         eventType = "issues.assigned";
       }
       break;
@@ -2948,8 +3916,8 @@ async function handleGitHubPR(
         break;
       }
       message =
-        `\u{1F500} New PR #${pr.number}: "${pr.title}" by @${sender.login}\n` +
-        `\u{1F4CA} ${pr.changed_files} files | +${pr.additions}/-${pr.deletions} | ${pr.head.ref} \u{2192} ${pr.base.ref}\n` +
+        `\u{1F500} New PR #${pr.number}: "${escapeHtml(pr.title)}" by @${escapeHtml(sender.login)}\n` +
+        `\u{1F4CA} ${pr.changed_files} files | +${pr.additions}/-${pr.deletions} | ${escapeHtml(pr.head.ref)} \u{2192} ${escapeHtml(pr.base.ref)}\n` +
         `\u{1F517} ${pr.html_url}`;
       eventType = "pr.opened";
       break;
@@ -2964,7 +3932,7 @@ async function handleGitHubPR(
     case "closed":
       if (pr.merged) {
         message =
-          `\u{1F389} PR #${pr.number} merged! "${pr.title}" \u{2192} ${pr.base.ref}\n` +
+          `\u{1F389} PR #${pr.number} merged! "${escapeHtml(pr.title)}" \u{2192} ${escapeHtml(pr.base.ref)}\n` +
           `\u{1F517} ${pr.html_url}`;
         eventType = "pr.merged";
       } else {
@@ -2989,33 +3957,19 @@ async function handleGitHubPR(
       return new Response("OK");
     }
 
-    // Contextual buttons for PR events
-    const needsReview = action === "opened" || action === "ready_for_review";
-    const prButtons: Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined =
-      needsReview
-        ? [[
-            { text: "\u{1F44B} I'll review this", callback_data: `claim_review:${pr.number}` },
-            { text: "\u{1F517} Open on GitHub", url: pr.html_url },
-          ]]
-        : action === "closed"
-          ? [[{ text: "\u{1F517} View on GitHub", url: pr.html_url }]]
-          : undefined;
+    // Send PR notifications via DM to subscribers (not to group)
+    // Look up the sender's telegram_id to exclude them
+    const prMembers = await getTeamMembers(env.PROJECTS);
+    const senderMember = prMembers.find((m) => m.github === sender.login);
+    const finalMessage = message; // capture for closure
 
-    const isThreadStarter = needsReview;
-    const existingThread = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
-
-    if (isThreadStarter && !existingThread) {
-      const sentId = await sendTelegramThreaded(
-        project.botToken, project.chatId, message, project.threadId, null, prButtons
-      );
-      if (sentId) {
-        await saveThreadMessageId(env.PROJECTS, projectId, "pr", pr.number, sentId);
-      }
-    } else {
-      await sendTelegramThreaded(
-        project.botToken, project.chatId, message, project.threadId, existingThread
-      );
-    }
+    await notifySubscribers(
+      env,
+      project.botToken,
+      "pr_reviews",
+      () => finalMessage,
+      senderMember?.telegram_id
+    );
   }
 
   // Log ALL events to D1 for reports (even filtered/draft ones)
@@ -3028,7 +3982,7 @@ async function handleGitHubPR(
 
 /**
  * Handle GitHub "pull_request_review" events.
- * Sends Telegram notifications for approved and changes_requested reviews.
+ * Sends DM to PR author for approved/changes_requested reviews.
  * Plain "commented" reviews are ignored to reduce noise.
  */
 async function handleGitHubReview(
@@ -3051,12 +4005,12 @@ async function handleGitHubReview(
   if (action === "submitted") {
     switch (review.state) {
       case "approved":
-        message = `\u{2705} @${review.user.login} approved PR #${pr.number}`;
+        message = `\u{2705} @${escapeHtml(review.user.login)} approved PR #${pr.number}`;
         eventType = "review.approved";
         break;
 
       case "changes_requested":
-        message = `\u{274C} @${review.user.login} requested changes on PR #${pr.number}`;
+        message = `\u{274C} @${escapeHtml(review.user.login)} requested changes on PR #${pr.number}`;
         eventType = "review.changes_requested";
         break;
 
@@ -3072,15 +4026,23 @@ async function handleGitHubReview(
   }
 
   if (message) {
-    // Reviews belong to PRs — reply to the PR's existing thread
-    const replyTo = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
-    await sendTelegramThreaded(
-      project.botToken,
-      project.chatId,
-      message,
-      project.threadId,
-      replyTo
-    );
+    // Send review notification as DM to the PR author (always on — task-relevant)
+    const reviewMembers = await getTeamMembers(env.PROJECTS);
+    const prAuthor = reviewMembers.find((m) => m.github === pr.user.login);
+
+    if (prAuthor) {
+      const dnd = await isUserDND(env.PROJECTS, prAuthor.telegram_id);
+      if (!dnd) {
+        const authorPrefs = await getUserPreferences(env.PROJECTS, prAuthor.telegram_id);
+        if (authorPrefs.dm_chat_id) {
+          const dmStatus = await sendDM(project.botToken, authorPrefs.dm_chat_id, message);
+          if (dmStatus === "blocked") {
+            authorPrefs.dm_chat_id = null;
+            await saveUserPreferences(env.PROJECTS, prAuthor.telegram_id, authorPrefs);
+          }
+        }
+      }
+    }
   }
 
   // Log ALL review events to D1 for reports
@@ -3117,9 +4079,13 @@ async function handleGitHubPush(
   const eventType = isMainBranch ? "push.main" : "push.branch";
 
   if (isMainBranch && commits.length > 0) {
-    const message =
-      `\u{1F680} ${commits.length} new commit${commits.length === 1 ? "" : "s"} on ${branch} by @${pusher.name}`;
-    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+    // Send commit notifications via DM to subscribers (not to group)
+    await notifySubscribers(
+      env,
+      project.botToken,
+      "commits",
+      () => `\u{1F680} ${commits.length} new commit${commits.length === 1 ? "" : "s"} on ${escapeHtml(branch)} by @${escapeHtml(pusher.name)}`
+    );
   }
 
   // Log ALL push events to D1 (even non-main branches) for reports
@@ -3305,6 +4271,7 @@ async function handleSession(
   if (update.type === "start") {
     // Preserve original "since" time if user is already active (context compression re-fires start)
     const existingStart = sessions.find((s) => s.user === update.user)?.since;
+    const isNewSession = !existingStart;
     const filtered = sessions.filter((s) => s.user !== update.user);
     filtered.push({
       user: update.user,
@@ -3314,6 +4281,16 @@ async function handleSession(
     await setActiveSessions(env.PROJECTS, projectId, filtered);
     // Log session start to D1 for work hours tracking
     await logSessionStart(env.DB, update.user, projectId);
+
+    // Notify session subscribers via DM (only for genuinely new sessions)
+    if (isNewSession) {
+      await notifySubscribers(
+        env,
+        project.botToken,
+        "sessions",
+        () => `\u{1F7E2} ${escapeHtml(update.user)} is now online (${escapeHtml(projectId)})`
+      );
+    }
   } else if (update.type === "heartbeat") {
     // Refresh session TTL (keeps user "online") but preserve original "since" time
     const existingSince = sessions.find((s) => s.user === update.user)?.since;
@@ -3343,6 +4320,14 @@ async function handleSession(
       (s) => s.user !== update.user
     );
     await saveDashboardState(env.PROJECTS, projectId, dashState);
+
+    // Notify session subscribers via DM
+    await notifySubscribers(
+      env,
+      project.botToken,
+      "sessions",
+      () => `\u{1F534} ${escapeHtml(update.user)} went offline (${escapeHtml(projectId)})`
+    );
   } else {
     return new Response("Invalid session type", { status: 400 });
   }

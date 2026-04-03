@@ -2,18 +2,22 @@
 /**
  * Telegram Notify Module for Cortex Team Bot
  *
- * Sends session start/end notifications to a Telegram group/forum.
+ * Registers sessions with the Worker and updates the live dashboard.
+ * No direct Telegram group messages — the Worker handles all group/DM notifications.
+ * Login channel messages (TELEGRAM_LOGIN_CHAT_ID) are still sent directly.
  * Uses only Node.js built-in modules (no external dependencies).
- * All errors are handled silently — Telegram is optional, never blocks the session.
+ * All errors are handled silently — notifications are optional, never block the session.
  *
  * CLI usage:
  *   node notify.js session-start
  *   node notify.js session-end
+ *   node notify.js heartbeat
  *
  * Environment (from .env in project root):
- *   TELEGRAM_BOT_TOKEN  — Bot API token from @BotFather
- *   TELEGRAM_CHAT_ID    — Target chat/group ID
- *   TELEGRAM_THREAD_ID  — (optional) Forum topic thread ID
+ *   TELEGRAM_BOT_TOKEN    — Bot API token from @BotFather
+ *   TELEGRAM_CHAT_ID      — Target chat/group ID
+ *   CORTEX_WORKER_URL     — Worker URL for session registration + dashboard
+ *   CORTEX_PROJECT_ID     — Project identifier for Worker
  */
 
 const fs = require('fs');
@@ -421,11 +425,9 @@ function sendTelegram(token, chatId, text, threadId) {
 // ---------------------------------------------------------------------------
 
 /**
- * Send a "session started" notification to Telegram.
- * Sends TWO messages when loginThreadId is configured:
- *   1. Login topic: short "{user} ist online" message
- *   2. Project topic: full message with open tasks
- * If loginThreadId is not set, only the project topic message is sent.
+ * Handle session start: register with Worker, update dashboard, send login channel message.
+ * No direct Telegram group messages — the Worker handles group notifications via DMs.
+ * Login channel messages (TELEGRAM_LOGIN_CHAT_ID) are kept for now.
  */
 /**
  * Quick network check — try to reach Telegram API.
@@ -513,37 +515,13 @@ async function notifySessionStart(projectDir) {
     } catch (e) {
       console.error(`[Notify] Dashboard update failed: ${e.message}`);
     }
-  } else {
-    // Fallback: send plain text if Worker not configured
-    const lines = [];
-    lines.push(`\uD83D\uDC4B <b>${escapeHtml(user)}</b> is online \u2014 working on <b>${escapeHtml(projectName)}</b>`);
-    const { issues, error } = getOpenIssues(projectDir);
-    if (issues.length > 0) {
-      lines.push('');
-      lines.push(`\uD83D\uDCCB <b>Open Tasks</b> (${issues.length}):`);
-      for (const issue of issues) {
-        const assigneeNames = (issue.assignees || []).map(a => a.login).join(', ');
-        const assigneeLabel = assigneeNames ? assigneeNames : 'open';
-        lines.push(`\u2022 #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(assigneeLabel)}]`);
-      }
-    } else if (error) {
-      lines.push(`\n(${error})`);
-    }
-    try {
-      await sendTelegram(config.token, config.chatId, lines.join('\n'), config.threadId);
-      console.error('[Notify] Session start message sent (fallback)');
-    } catch (e) {
-      console.error(`[Notify] Session start failed: ${e.message}`);
-    }
   }
+  // No fallback to direct Telegram group messages — Worker handles all group messaging
 }
 
 /**
- * Send a "session ended" notification to Telegram.
- * Sends TWO messages when loginThreadId is configured:
- *   1. Login topic: short "{user} hat die Session beendet" message
- *   2. Project topic: full message with stats + commits
- * If loginThreadId is not set, only the project topic message is sent.
+ * Handle session end: notify Worker, update dashboard.
+ * No direct Telegram group messages — the Worker handles group notifications via DMs.
  *
  * @param {string} projectDir - Project root directory
  * @param {object} stats      - Optional session stats { prompts_count, corrections_count }
@@ -552,9 +530,6 @@ async function notifySessionEnd(projectDir, stats) {
   const config = loadBotConfig(projectDir);
   if (!config) return;
   if (!(await isOnline())) return; // Skip if offline
-
-  const user = getCurrentUser();
-  const projectName = path.basename(projectDir);
 
   // No "ended" message to Login channel — sessions auto-expire via TTL.
   // Context compressions trigger session-end hooks falsely, so we skip this.
@@ -567,65 +542,8 @@ async function notifySessionEnd(projectDir, stats) {
     } catch {}
   }
 
-  // --- Project group/topic: session summary message ---
-  const repoUrl = getGitHubRepoUrl(projectDir);
-  const lines = [];
-  lines.push(`\u2705 <b>${escapeHtml(user)}</b> has ended the session (<b>${escapeHtml(projectName)}</b>)`);
-
-  // Session stats (if available)
-  if (stats && (stats.prompts_count || stats.corrections_count)) {
-    lines.push('');
-    const prompts = stats.prompts_count || 0;
-    const corrections = stats.corrections_count || 0;
-    lines.push(`\uD83D\uDCCA <b>Stats:</b> ${prompts} prompts | ${corrections} corrections`);
-  }
-
-  // Categorized commits from the last 8 hours
-  const { features, fixes, other } = getCategorizedCommits(projectDir);
-
-  // Format commit entry (no commit links — they 404 on unpushed branches)
-  const fmtCommit = (entry) => `\u2022 ${escapeHtml(entry.msg)}`;
-
-  if (features.length > 0) {
-    lines.push('');
-    lines.push(`\uD83D\uDE80 <b>Features added:</b>`);
-    for (const f of features) lines.push(fmtCommit(f));
-  }
-
-  if (fixes.length > 0) {
-    lines.push('');
-    lines.push(`\uD83D\uDD27 <b>Fixes:</b>`);
-    for (const f of fixes) lines.push(fmtCommit(f));
-  }
-
-  if (other.length > 0) {
-    lines.push('');
-    lines.push(`\uD83D\uDCDD <b>Other changes:</b>`);
-    for (const o of other) lines.push(fmtCommit(o));
-  }
-
-  // Branch status
-  const branchInfo = getBranchInfo(projectDir);
-  if (branchInfo.branch !== 'unknown') {
-    lines.push('');
-    if (branchInfo.isMain) {
-      lines.push(`\uD83C\uDF3F <b>Branch:</b> ${escapeHtml(branchInfo.branch)} \u2014 merged`);
-    } else {
-      const aheadText = branchInfo.commitsAhead > 0
-        ? `${branchInfo.commitsAhead} commits ahead, ` : '';
-      const branchLink = repoUrl ? `<a href="${repoUrl}/tree/${branchInfo.branch}">${escapeHtml(branchInfo.branch)}</a>` : escapeHtml(branchInfo.branch);
-      lines.push(`\uD83D\uDCCB <b>Branch:</b> ${branchLink} (${aheadText}not merged)`);
-    }
-  }
-
-  const projectText = lines.join('\n');
-
-  try {
-    await sendTelegram(config.token, config.chatId, projectText, config.threadId);
-    console.error('[Notify] Session end message sent');
-  } catch (e) {
-    console.error(`[Notify] Session end failed: ${e.message}`);
-  }
+  // No direct Telegram group messages — Worker handles all group messaging via notifySubscribers()
+  // Session end data (commits, stats, branch) is already available to the Worker via the session endpoint
 }
 
 // ---------------------------------------------------------------------------
