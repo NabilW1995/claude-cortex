@@ -839,6 +839,179 @@ function formatPriority(priority: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt generator — builds a Claude Code prompt from a GitHub issue
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the description (text before "## Acceptance criteria") and
+ * the acceptance criteria section from a GitHub issue body.
+ */
+function parseIssueBody(body: string): {
+  description: string;
+  acceptanceCriteria: string;
+} {
+  if (!body) return { description: "", acceptanceCriteria: "" };
+
+  const acHeading = /^##\s+Acceptance\s+[Cc]riteria/m;
+  const acMatch = acHeading.exec(body);
+
+  let description: string;
+  let acceptanceCriteria: string;
+
+  if (acMatch) {
+    // Everything before the AC heading is the description
+    description = body.slice(0, acMatch.index).trim();
+
+    // AC section runs until the next ## heading or end of body
+    const afterAc = body.slice(acMatch.index + acMatch[0].length);
+    const nextHeading = /^##\s+/m.exec(afterAc);
+    acceptanceCriteria = nextHeading
+      ? afterAc.slice(0, nextHeading.index).trim()
+      : afterAc.trim();
+  } else {
+    // No AC section — use first ~300 chars as description
+    description = body.length > 300 ? body.slice(0, 300) + "..." : body;
+    acceptanceCriteria = "";
+  }
+
+  return { description, acceptanceCriteria };
+}
+
+/**
+ * Try to find relevant source files via GitHub Code Search.
+ * Uses 2-3 keywords from the issue title as the search query.
+ * Returns file paths or null if the search fails.
+ */
+async function findRelevantFiles(
+  repo: string,
+  issueTitle: string,
+  githubToken: string
+): Promise<string[] | null> {
+  // Extract meaningful keywords: drop short words and common stop words
+  const stopWords = new Set([
+    "the", "and", "for", "with", "from", "this", "that", "into", "when",
+    "add", "fix", "new", "use", "get", "set", "update", "create", "make",
+    "bug", "feature", "issue", "task", "implement", "should", "must",
+  ]);
+
+  const keywords = issueTitle
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w.toLowerCase()))
+    .slice(0, 3);
+
+  if (keywords.length === 0) return null;
+
+  const query = encodeURIComponent(`${keywords.join(" ")} repo:${repo}`);
+
+  try {
+    const res = await githubRequest(
+      "GET",
+      `/search/code?q=${query}&per_page=5`,
+      githubToken
+    );
+
+    if (!res.ok) return null;
+
+    const data = (await res.json()) as {
+      items?: Array<{ path: string }>;
+    };
+
+    if (!data.items || data.items.length === 0) return null;
+
+    // Deduplicate file paths
+    const paths = [...new Set(data.items.map((item) => item.path))];
+    return paths;
+  } catch {
+    // Code search can fail (rate limit, indexing not ready) — graceful fallback
+    return null;
+  }
+}
+
+/**
+ * Generate a Claude Code prompt for a GitHub issue.
+ * The prompt is plain text designed to be pasted into VS Code's Claude Code.
+ * It includes the issue context, acceptance criteria, and relevant files.
+ */
+async function generateClaudePrompt(
+  project: ProjectConfig,
+  issueNumber: number,
+  category: string | null
+): Promise<string> {
+  if (!project.githubToken) {
+    return `Implement issue #${issueNumber}\n\nNo GitHub token configured — please check the issue manually.`;
+  }
+
+  // Fetch full issue details
+  const issueRes = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues/${issueNumber}`,
+    project.githubToken
+  );
+
+  if (!issueRes.ok) {
+    return `Implement issue #${issueNumber}\n\nCould not fetch issue details (HTTP ${issueRes.status}).`;
+  }
+
+  const issue = (await issueRes.json()) as {
+    title: string;
+    body: string | null;
+    labels: Array<{ name: string }>;
+    html_url: string;
+  };
+
+  const { description, acceptanceCriteria } = parseIssueBody(issue.body || "");
+
+  // Branch name: use category if available, otherwise issue number
+  const branchName = category
+    ? `feature/${category.toLowerCase().replace(/\s+/g, "-")}`
+    : `feature/issue-${issueNumber}`;
+
+  // Try to find relevant files via code search
+  const relevantFiles = await findRelevantFiles(
+    project.githubRepo,
+    issue.title,
+    project.githubToken
+  );
+
+  const filesSection = relevantFiles
+    ? relevantFiles.map((f) => `- ${f}`).join("\n")
+    : "No specific files identified — explore the codebase";
+
+  // Build the prompt as plain text (will be placed inside a <pre> block)
+  const lines: string[] = [
+    `Implement: #${issueNumber} ${issue.title}`,
+    `Branch: ${branchName}`,
+    `Link: ${issue.html_url}`,
+    "",
+  ];
+
+  if (description) {
+    lines.push("Description:");
+    lines.push(description);
+    lines.push("");
+  }
+
+  if (acceptanceCriteria) {
+    lines.push("Acceptance Criteria:");
+    lines.push(acceptanceCriteria);
+    lines.push("");
+  }
+
+  lines.push("Relevant Files:");
+  lines.push(filesSection);
+  lines.push("");
+  lines.push("Instructions:");
+  lines.push(`1. Check out branch: git checkout -b ${branchName}`);
+  lines.push("2. Read the relevant files above before making changes");
+  lines.push("3. Implement all acceptance criteria");
+  lines.push("4. Write tests for new functionality");
+  lines.push("5. Run tests before committing");
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers for message threading (PR/Issue reply chains)
 // ---------------------------------------------------------------------------
 
@@ -4408,6 +4581,50 @@ function createBot(
       const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
       await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
       try { await ctx.answerCallbackQuery(); } catch {}
+
+      // Generate and send Claude Code prompt as DM (non-blocking)
+      try {
+        const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+        if (prefs.dm_chat_id) {
+          // Find the user's category claim to use for branch naming
+          const claimsState = await getCategoryClaims(env.PROJECTS, active.projectId);
+          const userClaim = claimsState.claims.find(
+            (c) => c.telegramId === telegramId
+          );
+          const category = userClaim?.displayName || null;
+
+          const prompt = await generateClaudePrompt(
+            active.projectConfig,
+            issueNumber,
+            category
+          );
+
+          // Truncate prompt to stay within Telegram's 4096-char message limit
+          const MAX_PROMPT_CHARS = 3400;
+          const safePrompt = prompt.length > MAX_PROMPT_CHARS
+            ? prompt.slice(0, MAX_PROMPT_CHARS) + "\n... (truncated)"
+            : prompt;
+
+          const dmText =
+            `\u{1F680} <b>Claude Code Prompt for #${issueNumber}</b>\n\n` +
+            `<pre>${escapeHtml(safePrompt)}</pre>\n\n` +
+            `<i>\u{1F4A1} Long-press the code block above to copy, then paste into VS Code.</i>`;
+
+          const dmStatus = await sendDM(
+            active.projectConfig.botToken,
+            prefs.dm_chat_id,
+            dmText
+          );
+
+          if (dmStatus === "blocked") {
+            prefs.dm_chat_id = null;
+            await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+          }
+        }
+      } catch (promptErr) {
+        // Prompt generation is best-effort — don't fail the task start
+        console.error("generateClaudePrompt DM error:", promptErr);
+      }
     } catch (err) {
       console.error("mytasks_start error:", err);
       try {
@@ -6675,6 +6892,10 @@ export {
   renderHomeScreen,
   // Team Board (Issue #54)
   renderTeamBoard,
+  // Prompt generator (Issue #54 — Claude Code prompts from issues)
+  parseIssueBody,
+  findRelevantFiles,
+  generateClaudePrompt,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
 
