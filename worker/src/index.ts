@@ -3263,6 +3263,61 @@ async function handleProjectMyTasks(
 }
 
 /**
+ * Check if all issues in a user's category claim are closed on GitHub.
+ * If yes, auto-release the claim and stop the timer.
+ * Returns true if the category was released (all tasks done).
+ */
+async function autoReleaseDoneCategory(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string,
+  telegramId: number
+): Promise<boolean> {
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (!myClaim || myClaim.assignedIssues.length === 0) return false;
+
+  // Check if ALL assigned issues are still open
+  let allClosed = true;
+  for (const issueNum of myClaim.assignedIssues) {
+    try {
+      const res = await githubRequest(
+        "GET",
+        `/repos/${project.githubRepo}/issues/${issueNum}`,
+        project.githubToken!
+      );
+      if (res.ok) {
+        const issue = (await res.json()) as { state: string };
+        if (issue.state === "open") {
+          allClosed = false;
+          break;
+        }
+      }
+    } catch {
+      // If API fails, assume issue is still open (safe default)
+      allClosed = false;
+      break;
+    }
+  }
+
+  if (allClosed) {
+    // Auto-release: remove claim from KV
+    claimsState.claims = claimsState.claims.filter((c) => c.telegramId !== telegramId);
+    claimsState.lastUpdated = new Date().toISOString();
+    await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+    // Stop timer
+    try {
+      await stopTimer(env.PROJECTS, telegramId, projectId);
+    } catch {}
+
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Handle "Meine Aufgaben" — DM task list with priority sorting and
  * inline [Start] / [Done] buttons per task.
  *
@@ -3293,6 +3348,9 @@ async function handleMeineAufgaben(
       keyboard: kb,
     };
   }
+
+  // Auto-release category if all assigned issues are closed on GitHub
+  await autoReleaseDoneCategory(env, project, projectId, telegramId);
 
   // Look up the caller's GitHub username
   const members = await getTeamMembers(env.PROJECTS);
@@ -3368,6 +3426,15 @@ async function handleMeineAufgaben(
     `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>`,
     "━".repeat(16),
   ];
+
+  // Show active category claim and branch name in header
+  const claimsForHeader = await getCategoryClaims(env.PROJECTS, projectId);
+  const myClaimHeader = claimsForHeader.claims.find((c) => c.telegramId === telegramId);
+  if (myClaimHeader) {
+    const branchName = `feature/${myClaimHeader.displayName.toLowerCase().replace(/\s+/g, "-")}`;
+    lines.push(`\u{1F4C2} Category: <b>${escapeHtml(myClaimHeader.displayName)}</b>`);
+    lines.push(`\u{1F33F} Branch: <code>${escapeHtml(branchName)}</code>`);
+  }
 
   if (myIssues.length === 0) {
     lines.push("");
@@ -4293,6 +4360,9 @@ async function handleCategoryAssign(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
+  // Auto-release category if all assigned tasks are done on GitHub
+  await autoReleaseDoneCategory(env, project, projectId, telegramId);
+
   // Warn about blocker but allow override
   const blockers = await isBlockerActive(project);
   if (blockers.length > 0 && !ctx.callbackQuery?.data?.includes("cat_override")) {
@@ -4965,6 +5035,9 @@ async function handleAufgabeNehmen(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
+  // Auto-release category if all assigned tasks are done on GitHub
+  await autoReleaseDoneCategory(env, project, projectId, telegramId);
+
   // Warn about blocker but allow override via inline button
   const blockers = await isBlockerActive(project);
   if (blockers.length > 0) {
@@ -5373,47 +5446,6 @@ function createBot(
       hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin",
     });
     await ctx.reply(`\u{1F515} DND enabled until ${timeStr}. Use /dnd off to disable.`);
-  });
-
-  // Admin command: reset stale category claims for the calling user
-  bot.command("reset", async (ctx: Context) => {
-    const telegramId = ctx.from?.id;
-    if (!telegramId) return;
-
-    try {
-      const active = await resolveActiveProject(env, telegramId);
-      if (!active) {
-        await ctx.reply("No active project found.");
-        return;
-      }
-
-      const claimsState = await getCategoryClaims(env.PROJECTS, active.projectId);
-      const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
-
-      if (!myClaim) {
-        await ctx.reply("You have no active category claim. You can use 'Aufgabe nehmen' to claim one.");
-        return;
-      }
-
-      // Remove the claim
-      claimsState.claims = claimsState.claims.filter((c) => c.telegramId !== telegramId);
-      claimsState.lastUpdated = new Date().toISOString();
-      await saveCategoryClaims(env.PROJECTS, active.projectId, claimsState);
-
-      // Stop timer if running
-      try {
-        await stopTimer(env.PROJECTS, telegramId, active.projectId);
-      } catch {}
-
-      await ctx.reply(
-        `\u{2705} Category claim <b>${escapeHtml(myClaim.displayName)}</b> released.\n\n` +
-        "You can now use 'Aufgabe nehmen' to claim a new category.",
-        { parse_mode: "HTML" }
-      );
-    } catch (err) {
-      console.error("reset error:", err);
-      await ctx.reply("Could not reset. Try again.");
-    }
   });
 
   bot.command("register", async (ctx: Context) => {
