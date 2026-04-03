@@ -3309,7 +3309,7 @@ async function handleMeineAufgaben(
     };
   }
 
-  // Fetch issues assigned to this user
+  // Fetch open issues assigned to this user
   const response = await githubRequest(
     "GET",
     `/repos/${project.githubRepo}/issues?state=open&assignee=${githubUsername}&per_page=30`,
@@ -3328,7 +3328,33 @@ async function handleMeineAufgaben(
     title: string;
     labels: Array<{ name: string }>;
     pull_request?: unknown;
+    closed_at?: string | null;
   }>;
+
+  // Fetch recently closed issues so the user can see completed tasks (Issue #68)
+  let closedIssues: Array<{
+    number: number;
+    title: string;
+    labels: Array<{ name: string }>;
+    pull_request?: unknown;
+    closed_at?: string | null;
+  }> = [];
+  try {
+    // Only fetch issues closed in the last 7 days to keep the list relevant
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const closedRes = await githubRequest(
+      "GET",
+      `/repos/${project.githubRepo}/issues?state=closed&assignee=${githubUsername}&since=${since}&per_page=10`,
+      project.githubToken
+    );
+    if (closedRes.ok) {
+      closedIssues = ((await closedRes.json()) as typeof closedIssues).filter(
+        (i) => !i.pull_request
+      );
+    }
+  } catch {
+    // Non-critical — continue without closed issues
+  }
 
   // Filter out pull requests, sort by priority (blocker first)
   const myIssues = sortByPriority(issues.filter((i) => !i.pull_request));
@@ -3345,7 +3371,21 @@ async function handleMeineAufgaben(
 
   if (myIssues.length === 0) {
     lines.push("");
-    lines.push("No tasks assigned to you.");
+
+    // Show completed tasks even when no open tasks remain (Issue #68)
+    if (closedIssues.length > 0) {
+      lines.push("All open tasks are done! \u{1F389}");
+      lines.push("");
+      lines.push(`\u{2705} <b>Recently completed (${closedIssues.length}):</b>`);
+      for (const issue of closedIssues) {
+        lines.push(
+          `\u{2611}\u{FE0F} <s>#${issue.number} ${escapeHtml(issue.title)}</s>`
+        );
+      }
+    } else {
+      lines.push("No tasks assigned to you.");
+    }
+
     lines.push("");
     lines.push("Use \u{1F4CB} <b>Aufgabe nehmen</b> to claim a category first!");
     lines.push("");
@@ -3435,6 +3475,17 @@ async function handleMeineAufgaben(
         );
       }
       kb.row();
+    }
+  }
+
+  // Show recently completed tasks so the user sees what's done (Issue #68)
+  if (closedIssues.length > 0) {
+    lines.push("");
+    lines.push(`\u{2705} <b>Recently completed (${closedIssues.length}):</b>`);
+    for (const issue of closedIssues) {
+      lines.push(
+        `\u{2611}\u{FE0F} <s>#${issue.number} ${escapeHtml(issue.title)}</s>`
+      );
     }
   }
 
