@@ -131,6 +131,21 @@ interface MessageThread {
   createdAt: string;
 }
 
+/**
+ * A snapshot of weekly velocity data for a project.
+ * Stored in D1 velocity table every Friday via cron. (Issue #61)
+ */
+interface VelocitySnapshot {
+  project: string;
+  weekStart: string;
+  tasksCompleted: number;
+  tasksOpened: number;
+  teamHours: number;
+  perMember: Array<{ userId: string; name: string; tasks: number; hours: number }>;
+  fastestTask: { number: number; title: string; minutes: number } | null;
+  longestTask: { number: number; title: string; minutes: number } | null;
+}
+
 interface GitHubIssuesPayload {
   action: string;
   issue: {
@@ -2145,6 +2160,265 @@ function formatDuration(minutes: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// D1 helpers — velocity snapshots (Issue #61)
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist a weekly velocity snapshot to D1.
+ * Best-effort — errors are swallowed so they don't break the cron job.
+ */
+async function saveVelocitySnapshot(
+  db: D1Database,
+  snapshot: VelocitySnapshot
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        "INSERT OR REPLACE INTO velocity (project, week_start, tasks_completed, tasks_opened, team_hours, per_member, fastest_task, longest_task) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .bind(
+        snapshot.project,
+        snapshot.weekStart,
+        snapshot.tasksCompleted,
+        snapshot.tasksOpened,
+        snapshot.teamHours,
+        JSON.stringify(snapshot.perMember),
+        snapshot.fastestTask ? JSON.stringify(snapshot.fastestTask) : null,
+        snapshot.longestTask ? JSON.stringify(snapshot.longestTask) : null
+      )
+      .run();
+  } catch {
+    // Best-effort — don't break the cron job
+  }
+}
+
+/**
+ * Fetch a velocity snapshot for a specific project and week.
+ */
+async function getVelocityData(
+  db: D1Database,
+  project: string,
+  weekStart: string
+): Promise<VelocitySnapshot | null> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT project, week_start, tasks_completed, tasks_opened, team_hours, per_member, fastest_task, longest_task FROM velocity WHERE project = ? AND week_start = ? LIMIT 1"
+      )
+      .bind(project, weekStart)
+      .first<{
+        project: string;
+        week_start: string;
+        tasks_completed: number;
+        tasks_opened: number;
+        team_hours: number;
+        per_member: string | null;
+        fastest_task: string | null;
+        longest_task: string | null;
+      }>();
+    if (!row) return null;
+    return {
+      project: row.project,
+      weekStart: row.week_start,
+      tasksCompleted: row.tasks_completed,
+      tasksOpened: row.tasks_opened,
+      teamHours: row.team_hours,
+      perMember: row.per_member ? JSON.parse(row.per_member) : [],
+      fastestTask: row.fastest_task ? JSON.parse(row.fastest_task) : null,
+      longestTask: row.longest_task ? JSON.parse(row.longest_task) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch velocity snapshots for the last two weeks (this week + last week).
+ * Returns [thisWeek, lastWeek] — either may be null if no data exists.
+ */
+async function getLastTwoWeeksVelocity(
+  db: D1Database,
+  project: string
+): Promise<[VelocitySnapshot | null, VelocitySnapshot | null]> {
+  try {
+    const rows = await db
+      .prepare(
+        "SELECT project, week_start, tasks_completed, tasks_opened, team_hours, per_member, fastest_task, longest_task FROM velocity WHERE project = ? ORDER BY week_start DESC LIMIT 2"
+      )
+      .bind(project)
+      .all<{
+        project: string;
+        week_start: string;
+        tasks_completed: number;
+        tasks_opened: number;
+        team_hours: number;
+        per_member: string | null;
+        fastest_task: string | null;
+        longest_task: string | null;
+      }>();
+
+    const results = (rows.results || []).map((row) => ({
+      project: row.project,
+      weekStart: row.week_start,
+      tasksCompleted: row.tasks_completed,
+      tasksOpened: row.tasks_opened,
+      teamHours: row.team_hours,
+      perMember: row.per_member ? JSON.parse(row.per_member) : [],
+      fastestTask: row.fastest_task ? JSON.parse(row.fastest_task) : null,
+      longestTask: row.longest_task ? JSON.parse(row.longest_task) : null,
+    }));
+
+    return [results[0] || null, results[1] || null];
+  } catch {
+    return [null, null];
+  }
+}
+
+/**
+ * Calculate the Monday (start) of the ISO week containing the given date.
+ */
+function getWeekStartDate(date: Date): string {
+  const d = new Date(date);
+  const day = d.getUTCDay();
+  // Shift so Monday = 0: (day + 6) % 7
+  const diff = (day + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Aggregate current-week data from time_logs + events to build a
+ * VelocitySnapshot.  Does NOT persist — the caller decides when to save.
+ */
+async function calculateVelocitySnapshot(
+  db: D1Database,
+  project: string,
+  members: TeamMember[]
+): Promise<VelocitySnapshot> {
+  const now = new Date();
+  const weekStart = getWeekStartDate(now);
+
+  // Tasks completed (issues closed) this week
+  let tasksCompleted = 0;
+  let tasksOpened = 0;
+  try {
+    const closed = await db
+      .prepare(
+        "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days')"
+      )
+      .bind(weekStart, weekStart)
+      .first<{ c: number }>();
+    tasksCompleted = closed?.c || 0;
+
+    const opened = await db
+      .prepare(
+        "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.opened' AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days')"
+      )
+      .bind(weekStart, weekStart)
+      .first<{ c: number }>();
+    tasksOpened = opened?.c || 0;
+  } catch {
+    // Best-effort
+  }
+
+  // Per-member breakdown from time_logs
+  const perMember: VelocitySnapshot["perMember"] = [];
+  let totalTeamMinutes = 0;
+  for (const member of members) {
+    const hours = await getWeeklyHours(db, member.telegram_id, weekStart);
+    // Count tasks completed by this member (issues they closed)
+    let memberTasks = 0;
+    try {
+      const row = await db
+        .prepare(
+          "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND actor = ? AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days')"
+        )
+        .bind(member.github, weekStart, weekStart)
+        .first<{ c: number }>();
+      memberTasks = row?.c || 0;
+    } catch {
+      // Best-effort
+    }
+
+    totalTeamMinutes += hours;
+    perMember.push({
+      userId: String(member.telegram_id),
+      name: member.name,
+      tasks: memberTasks,
+      hours,
+    });
+  }
+
+  // Fastest and longest tasks — find issues.closed events with time_logs data
+  let fastestTask: VelocitySnapshot["fastestTask"] = null;
+  let longestTask: VelocitySnapshot["longestTask"] = null;
+  try {
+    const closedEvents = await db
+      .prepare(
+        "SELECT target, metadata FROM events WHERE event_type = 'issues.closed' AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days') AND target IS NOT NULL"
+      )
+      .bind(weekStart, weekStart)
+      .all<{ target: string; metadata: string | null }>();
+
+    if (closedEvents.results && closedEvents.results.length > 0) {
+      // Try to find time data for closed issues from time_logs
+      const taskTimings: Array<{ number: number; title: string; minutes: number }> = [];
+
+      for (const event of closedEvents.results) {
+        const issueNumber = parseInt(event.target, 10);
+        if (isNaN(issueNumber)) continue;
+
+        // Extract title from metadata if available
+        let title = `#${issueNumber}`;
+        if (event.metadata) {
+          try {
+            const meta = JSON.parse(event.metadata);
+            if (meta.title) title = meta.title;
+          } catch {
+            // Ignore parse errors
+          }
+        }
+
+        // Look for time log entries related to this issue's category
+        const timeRow = await db
+          .prepare(
+            "SELECT SUM(duration_minutes) as total FROM time_logs WHERE date(started_at) >= ? AND date(started_at) < date(?, '+7 days') AND tasks_completed > 0"
+          )
+          .bind(weekStart, weekStart)
+          .first<{ total: number | null }>();
+
+        if (timeRow?.total && timeRow.total > 0) {
+          taskTimings.push({ number: issueNumber, title, minutes: timeRow.total });
+        }
+      }
+
+      if (taskTimings.length > 0) {
+        taskTimings.sort((a, b) => a.minutes - b.minutes);
+        fastestTask = taskTimings[0];
+        longestTask = taskTimings[taskTimings.length - 1];
+        // Only show fastest/longest if they're different tasks
+        if (fastestTask.number === longestTask.number) {
+          longestTask = null;
+        }
+      }
+    }
+  } catch {
+    // Best-effort
+  }
+
+  return {
+    project,
+    weekStart,
+    tasksCompleted,
+    tasksOpened,
+    teamHours: totalTeamMinutes,
+    perMember,
+    fastestTask,
+    longestTask,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Project config from KV
 // ---------------------------------------------------------------------------
 
@@ -3464,7 +3738,170 @@ async function renderTeamBoard(
   lines.push("");
   lines.push(`🕐 Updated: ${timeStr}`);
 
-  kb.text("🔄 Refresh", "teamboard_refresh");
+  kb.text("\u{1F4CA} Velocity", "board_velocity");
+  kb.text("\u{1F504} Refresh", "teamboard_refresh");
+
+  return { text: lines.join("\n"), keyboard: kb };
+}
+
+// ---------------------------------------------------------------------------
+// Velocity View — weekly comparison accessible from Team Board (Issue #61)
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a delta value with a +/- prefix and directional arrow.
+ * Positive = up (good for tasks, neutral for hours), negative = down.
+ */
+function formatDelta(current: number, previous: number): string {
+  const diff = current - previous;
+  if (diff === 0) return "\u{2796} 0";
+  const sign = diff > 0 ? "+" : "";
+  const arrow = diff > 0 ? "\u{2B06}" : "\u{2B07}";
+  return `${arrow} ${sign}${diff}`;
+}
+
+/**
+ * Render the Velocity view showing this week vs last week comparison,
+ * per-person breakdown, and fastest/longest task highlights.
+ *
+ * Returns { text, keyboard } so the caller can send or edit the message.
+ */
+async function renderVelocityView(
+  env: Env
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const kb = new InlineKeyboard();
+  const projects = await getProjectList(env);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  if (projects.length === 0) {
+    kb.text("\u{2B05}\u{FE0F} Back", "velocity_back");
+    return {
+      text: "\u{1F4CA} <b>Velocity</b>\n\u{2501}".repeat(16) + "\n\nNo projects configured yet.",
+      keyboard: kb,
+    };
+  }
+
+  const lines: string[] = [
+    "\u{1F4CA} <b>Velocity Report</b>",
+    "\u{2501}".repeat(16),
+  ];
+
+  for (const { id: projectId } of projects) {
+    lines.push("");
+    lines.push(`\u{1F4C2} <b>${escapeHtml(projectId)}</b>`);
+    lines.push("\u{2500}".repeat(14));
+
+    // Fetch the last two weeks of saved velocity data
+    const [thisWeek, lastWeek] = await getLastTwoWeeksVelocity(
+      env.DB,
+      projectId
+    );
+
+    if (!thisWeek) {
+      // No saved data yet — calculate live from current week
+      const liveSnapshot = await calculateVelocitySnapshot(
+        env.DB,
+        projectId,
+        members
+      );
+
+      lines.push("");
+      lines.push(`\u{1F4C5} This week (${escapeHtml(liveSnapshot.weekStart)}):`);
+      lines.push(`   \u{2705} Tasks closed: ${liveSnapshot.tasksCompleted}`);
+      lines.push(`   \u{1F4DD} Tasks opened: ${liveSnapshot.tasksOpened}`);
+      lines.push(`   \u{23F1} Team hours: ${formatDuration(liveSnapshot.teamHours)}`);
+
+      if (liveSnapshot.perMember.length > 0) {
+        lines.push("");
+        lines.push("<b>Per Person:</b>");
+        for (const pm of liveSnapshot.perMember) {
+          const color = getUserColorByName(members, pm.name);
+          lines.push(
+            `${color} ${escapeHtml(pm.name)}: ${pm.tasks} tasks \u{00B7} ${formatDuration(pm.hours)}`
+          );
+        }
+      }
+
+      if (liveSnapshot.fastestTask) {
+        lines.push("");
+        lines.push(
+          `\u{26A1} Fastest: #${liveSnapshot.fastestTask.number} ${escapeHtml(liveSnapshot.fastestTask.title)} (${formatDuration(liveSnapshot.fastestTask.minutes)})`
+        );
+      }
+      if (liveSnapshot.longestTask) {
+        lines.push(
+          `\u{1F422} Longest: #${liveSnapshot.longestTask.number} ${escapeHtml(liveSnapshot.longestTask.title)} (${formatDuration(liveSnapshot.longestTask.minutes)})`
+        );
+      }
+
+      lines.push("");
+      lines.push("<i>No previous week data for comparison yet.</i>");
+      continue;
+    }
+
+    // We have at least this week's data — show it with comparison if available
+    lines.push("");
+    lines.push(`\u{1F4C5} This week (${escapeHtml(thisWeek.weekStart)}):`);
+    lines.push(`   \u{2705} Tasks closed: ${thisWeek.tasksCompleted}`);
+    lines.push(`   \u{1F4DD} Tasks opened: ${thisWeek.tasksOpened}`);
+    lines.push(`   \u{23F1} Team hours: ${formatDuration(thisWeek.teamHours)}`);
+
+    if (lastWeek) {
+      lines.push("");
+      lines.push(`\u{1F4C5} Last week (${escapeHtml(lastWeek.weekStart)}):`);
+      lines.push(`   \u{2705} Tasks closed: ${lastWeek.tasksCompleted}`);
+      lines.push(`   \u{1F4DD} Tasks opened: ${lastWeek.tasksOpened}`);
+      lines.push(`   \u{23F1} Team hours: ${formatDuration(lastWeek.teamHours)}`);
+
+      // Delta comparison
+      lines.push("");
+      lines.push("<b>Week-over-Week:</b>");
+      lines.push(
+        `   Tasks: ${formatDelta(thisWeek.tasksCompleted, lastWeek.tasksCompleted)}`
+      );
+      lines.push(
+        `   Hours: ${formatDelta(thisWeek.teamHours, lastWeek.teamHours)}`
+      );
+    }
+
+    // Per-person breakdown (from this week's data)
+    if (thisWeek.perMember.length > 0) {
+      lines.push("");
+      lines.push("<b>Per Person:</b>");
+      for (const pm of thisWeek.perMember) {
+        const color = getUserColorByName(members, pm.name);
+        const safeName = escapeHtml(pm.name);
+        lines.push(
+          `${color} ${safeName}: ${pm.tasks} tasks \u{00B7} ${formatDuration(pm.hours)}`
+        );
+      }
+    }
+
+    // Fastest / longest task highlights
+    if (thisWeek.fastestTask) {
+      lines.push("");
+      lines.push(
+        `\u{26A1} Fastest: #${thisWeek.fastestTask.number} ${escapeHtml(thisWeek.fastestTask.title)} (${formatDuration(thisWeek.fastestTask.minutes)})`
+      );
+    }
+    if (thisWeek.longestTask) {
+      lines.push(
+        `\u{1F422} Longest: #${thisWeek.longestTask.number} ${escapeHtml(thisWeek.longestTask.title)} (${formatDuration(thisWeek.longestTask.minutes)})`
+      );
+    }
+  }
+
+  // Footer
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  lines.push("");
+  lines.push(`\u{1F555} Updated: ${timeStr}`);
+
+  kb.text("\u{2B05}\u{FE0F} Back", "velocity_back");
+  kb.text("\u{1F504} Refresh", "velocity_refresh");
 
   return { text: lines.join("\n"), keyboard: kb };
 }
@@ -5476,6 +5913,51 @@ function createBot(
       console.error("teamboard_refresh error:", err);
       try {
         await ctx.answerCallbackQuery({ text: "Could not refresh Team Board." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Velocity — View, Refresh, Back callbacks (Issue #61)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("board_velocity", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const { text, keyboard } = await renderVelocityView(env);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("board_velocity error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not load Velocity view." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("velocity_refresh", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const { text, keyboard } = await renderVelocityView(env);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("velocity_refresh error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not refresh Velocity." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("velocity_back", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    try {
+      const { text, keyboard } = await renderTeamBoard(env, telegramId);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("velocity_back error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not go back." });
       } catch {}
     }
   });
@@ -8217,8 +8699,16 @@ export {
   getDailyHours,
   getWeeklyHours,
   formatDuration,
+  // Velocity report helpers (Issue #61)
+  saveVelocitySnapshot,
+  getVelocityData,
+  getLastTwoWeeksVelocity,
+  calculateVelocitySnapshot,
+  getWeekStartDate,
+  formatDelta,
+  renderVelocityView,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
@@ -8664,6 +9154,36 @@ async function sendWeeklyReport(env: Env): Promise<void> {
       const color = getUserColorByName(members, actor);
       lines.push(`${medals[i] || "\u{2022}"} ${color} ${actor}: ${actions} actions`);
       i++;
+    }
+  }
+
+  // --- Velocity snapshot: calculate, save, and append comparison (Issue #61) ---
+  const projects = await getProjectList(env);
+  for (const { id: projectId } of projects) {
+    try {
+      const snapshot = await calculateVelocitySnapshot(env.DB, projectId, members);
+      await saveVelocitySnapshot(env.DB, snapshot);
+
+      // Try to find last week's data for a comparison line
+      const lastWeekStart = getWeekStartDate(
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      );
+      const lastWeek = await getVelocityData(env.DB, projectId, lastWeekStart);
+
+      lines.push("");
+      lines.push(`\u{1F4CA} <b>Velocity — ${escapeHtml(projectId)}</b>`);
+      lines.push(
+        `   Tasks: ${snapshot.tasksCompleted} closed, ${snapshot.tasksOpened} opened`
+      );
+      lines.push(`   Team hours: ${formatDuration(snapshot.teamHours)}`);
+
+      if (lastWeek) {
+        lines.push(
+          `   vs last week: tasks ${formatDelta(snapshot.tasksCompleted, lastWeek.tasksCompleted)}, hours ${formatDelta(snapshot.teamHours, lastWeek.teamHours)}`
+        );
+      }
+    } catch {
+      // Best-effort — don't break the weekly report
     }
   }
 

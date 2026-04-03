@@ -37,3 +37,20 @@ CREATE TABLE IF NOT EXISTS time_logs (
 
 CREATE INDEX IF NOT EXISTS idx_time_logs_user_date ON time_logs(user_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_time_logs_project ON time_logs(project, started_at);
+
+-- Weekly velocity snapshots (Issue #61)
+CREATE TABLE IF NOT EXISTS velocity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project TEXT NOT NULL,
+  week_start TEXT NOT NULL,
+  tasks_completed INTEGER NOT NULL DEFAULT 0,
+  tasks_opened INTEGER NOT NULL DEFAULT 0,
+  team_hours INTEGER NOT NULL DEFAULT 0,
+  per_member TEXT,
+  fastest_task TEXT,
+  longest_task TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(project, week_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_velocity_project_week ON velocity(project, week_start);
