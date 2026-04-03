@@ -672,6 +672,31 @@ async function unassignIssuesFromUser(
   return { success, failed };
 }
 
+/**
+ * Fetch all `area:*` labels from the GitHub repo (not from issues).
+ * Returns an array of label names like ["area:dashboard", "area:api"].
+ */
+async function fetchAreaLabels(
+  project: ProjectConfig,
+  prefix: string = "area:"
+): Promise<string[]> {
+  if (!project.githubToken) return [];
+
+  const res = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/labels?per_page=100`,
+    project.githubToken
+  );
+
+  if (!res.ok) return [];
+
+  const labels = (await res.json()) as Array<{ name: string }>;
+  return labels
+    .map((l) => l.name)
+    .filter((name) => name.startsWith(prefix))
+    .sort();
+}
+
 // ---------------------------------------------------------------------------
 // Priority helpers — extract, sort, and check blocker status
 // ---------------------------------------------------------------------------
@@ -1006,6 +1031,56 @@ async function clearOnboardingState(
   telegramId: number
 ): Promise<void> {
   await kv.delete(`onboarding:${telegramId}`);
+}
+
+// ---------------------------------------------------------------------------
+// "Neue Idee" wizard state — guided issue creation flow
+// ---------------------------------------------------------------------------
+
+interface NewIdeaState {
+  step: "awaiting_title" | "awaiting_category" | "awaiting_priority";
+  title?: string;
+  category?: string; // full label name like "area:dashboard"
+}
+
+/**
+ * Read the current "new idea" wizard state for a user (null = not in wizard).
+ * Keys expire after 1h so abandoned wizards auto-clean.
+ */
+async function getNewIdeaState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<NewIdeaState | null> {
+  const raw = await kv.get(`newidea:${telegramId}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as NewIdeaState;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the user's current "new idea" wizard state with a 1h TTL.
+ */
+async function setNewIdeaState(
+  kv: KVNamespace,
+  telegramId: number,
+  state: NewIdeaState
+): Promise<void> {
+  await kv.put(`newidea:${telegramId}`, JSON.stringify(state), {
+    expirationTtl: 3600,
+  });
+}
+
+/**
+ * Remove the "new idea" wizard state (wizard finished or abandoned).
+ */
+async function clearNewIdeaState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<void> {
+  await kv.delete(`newidea:${telegramId}`);
 }
 
 /**
@@ -4279,7 +4354,105 @@ function createBot(
   });
 
   bot.hears("\u{1F4A1} Neue Idee", async (ctx) => {
-    await ctx.reply("\u{1F6A7} <b>Neue Idee</b> \u{2014} coming soon!", { parse_mode: "HTML" });
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    // Start the guided issue creation wizard
+    await setNewIdeaState(env.PROJECTS, telegramId, { step: "awaiting_title" });
+    await ctx.reply(
+      "\u{1F4A1} <b>Neue Idee</b>\n\n" +
+        "Schick mir den Titel f\u{00FC}r dein neues Issue:",
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // "Neue Idee" wizard — category selection callback handlers
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^newidea_cat:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_category") return;
+
+    const category = ctx.match[1];
+    // Validate category is a real area: label (defense-in-depth)
+    if (!category.startsWith("area:")) return;
+    const displayName = category.replace("area:", "");
+
+    // Save category and advance to priority step
+    await setNewIdeaState(env.PROJECTS, telegramId, {
+      ...state,
+      step: "awaiting_priority",
+      category,
+    });
+
+    const priorityKb = buildIdeaPriorityKeyboard();
+    await ctx.editMessageText(
+      `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+        `\u{1F4DD} ${escapeHtml(state.title || "")}\n` +
+        `\u{1F4C2} ${escapeHtml(displayName)}\n\n` +
+        "W\u{00E4}hle die Priorit\u{00E4}t:",
+      { parse_mode: "HTML", reply_markup: priorityKb }
+    );
+  });
+
+  bot.callbackQuery("newidea_cat_skip", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_category") return;
+
+    // Skip category and advance to priority step
+    await setNewIdeaState(env.PROJECTS, telegramId, {
+      ...state,
+      step: "awaiting_priority",
+    });
+
+    const priorityKb = buildIdeaPriorityKeyboard();
+    await ctx.editMessageText(
+      `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+        `\u{1F4DD} ${escapeHtml(state.title || "")}\n` +
+        `\u{1F4C2} <i>no category</i>\n\n` +
+        "W\u{00E4}hle die Priorit\u{00E4}t:",
+      { parse_mode: "HTML", reply_markup: priorityKb }
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // "Neue Idee" wizard — priority selection callback handlers
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^newidea_pri:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_priority") return;
+
+    const priority = ctx.match[1];
+    // Validate priority against known values (defense-in-depth)
+    const VALID_PRIORITIES = ["priority:high", "priority:medium", "priority:low"];
+    if (!VALID_PRIORITIES.includes(priority)) return;
+    await finalizeNewIdea(ctx, env, telegramId, state, priority);
+  });
+
+  bot.callbackQuery("newidea_pri_skip", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_priority") return;
+
+    // Default to medium priority
+    await finalizeNewIdea(ctx, env, telegramId, state, PRIORITY_DEFAULT);
   });
 
   bot.hears("\u{2753} Hilfe", async (ctx) => {
@@ -4390,13 +4563,76 @@ function createBot(
   // -------------------------------------------------------------------
   // Onboarding wizard — GitHub username input handler
   // Must be AFTER all bot.command() and bot.hears() handlers so it only
-  // catches free-text messages from users currently in onboarding.
+  // catches free-text messages from users in a wizard (new idea or onboarding).
   // -------------------------------------------------------------------
 
   bot.on("message:text", async (ctx) => {
     if (ctx.chat?.type !== "private") return;
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
+
+    // "Neue Idee" wizard — title input (checked BEFORE onboarding)
+    const ideaState = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (ideaState?.step === "awaiting_title") {
+      const title = ctx.message.text.trim();
+
+      if (!title || title.length > 256) {
+        await ctx.reply(
+          "\u{274C} Bitte gib einen Titel ein (max. 256 Zeichen).",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Resolve project to fetch area labels
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.reply(
+          "\u{26A0}\u{FE0F} No project configured. Use /start to set up first.",
+          { parse_mode: "HTML" }
+        );
+        await clearNewIdeaState(env.PROJECTS, telegramId);
+        return;
+      }
+
+      const { projectConfig: activeProject } = active;
+
+      // Fetch available area: labels from the GitHub repo
+      const areaLabels = await fetchAreaLabels(activeProject);
+
+      if (areaLabels.length === 0) {
+        // No categories available — skip directly to priority selection
+        await setNewIdeaState(env.PROJECTS, telegramId, {
+          step: "awaiting_priority",
+          title,
+        });
+
+        const priorityKb = buildIdeaPriorityKeyboard();
+        await ctx.reply(
+          `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+            `\u{1F4DD} ${escapeHtml(title)}\n` +
+            `\u{1F4C2} <i>no categories available</i>\n\n` +
+            "W\u{00E4}hle die Priorit\u{00E4}t:",
+          { parse_mode: "HTML", reply_markup: priorityKb }
+        );
+        return;
+      }
+
+      // Save title and advance to category step
+      await setNewIdeaState(env.PROJECTS, telegramId, {
+        step: "awaiting_category",
+        title,
+      });
+
+      const categoryKb = buildIdeaCategoryKeyboard(areaLabels);
+      await ctx.reply(
+        `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+          `\u{1F4DD} ${escapeHtml(title)}\n\n` +
+          "W\u{00E4}hle eine Kategorie:",
+        { parse_mode: "HTML", reply_markup: categoryKb }
+      );
+      return;
+    }
 
     const state = await getOnboardingState(env.PROJECTS, telegramId);
     if (state !== "awaiting_github") return;
@@ -4644,6 +4880,139 @@ async function handleWerCommand(
     `Aktive Sessions:\n\n${lines.join("\n")}`,
     project.threadId
   );
+}
+
+/**
+ * Create a GitHub issue from the "Neue Idee" guided wizard.
+ * Returns the created issue's number and URL, or null on failure.
+ */
+async function createIdeaIssue(
+  project: ProjectConfig,
+  title: string,
+  category: string | null,
+  priority: string
+): Promise<{ number: number; html_url: string } | null> {
+  if (!project.githubToken) return null;
+
+  const labels: string[] = [priority];
+  if (category) labels.push(category);
+
+  const response = await githubRequest(
+    "POST",
+    `/repos/${project.githubRepo}/issues`,
+    project.githubToken,
+    { title, labels }
+  );
+
+  if (!response.ok) return null;
+
+  const issue = (await response.json()) as {
+    number: number;
+    html_url: string;
+  };
+
+  return { number: issue.number, html_url: issue.html_url };
+}
+
+/**
+ * Build the category selection inline keyboard for the "Neue Idee" wizard.
+ */
+function buildIdeaCategoryKeyboard(areaLabels: string[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  for (const label of areaLabels) {
+    const displayName = label.replace("area:", "");
+    kb.text(`\u{1F4C2} ${displayName}`, `newidea_cat:${label}`).row();
+  }
+
+  kb.text("\u{23ED}\u{FE0F} Skip (no category)", "newidea_cat_skip");
+  return kb;
+}
+
+/**
+ * Build the priority selection inline keyboard for the "Neue Idee" wizard.
+ */
+function buildIdeaPriorityKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  kb.text(`${PRIORITY_EMOJIS["priority:high"]} High`, "newidea_pri:priority:high");
+  kb.text(`${PRIORITY_EMOJIS["priority:medium"]} Medium`, "newidea_pri:priority:medium");
+  kb.text(`${PRIORITY_EMOJIS["priority:low"]} Low`, "newidea_pri:priority:low").row();
+  kb.text("\u{23ED}\u{FE0F} Skip (defaults to Medium)", "newidea_pri_skip");
+
+  return kb;
+}
+
+/**
+ * Final step of the "Neue Idee" wizard — create the issue and send confirmation.
+ */
+async function finalizeNewIdea(
+  ctx: Context,
+  env: Env,
+  telegramId: number,
+  state: NewIdeaState,
+  priority: string
+): Promise<void> {
+  const active = await resolveActiveProject(env, telegramId);
+  if (!active) {
+    await ctx.reply(
+      "\u{26A0}\u{FE0F} No project configured. Use /start to set up first.",
+      { parse_mode: "HTML" }
+    );
+    await clearNewIdeaState(env.PROJECTS, telegramId);
+    return;
+  }
+
+  const { projectConfig: project } = active;
+
+  if (!project.githubToken) {
+    await ctx.reply(
+      "\u{26A0}\u{FE0F} No GitHub token configured \u{2014} cannot create issues.",
+      { parse_mode: "HTML" }
+    );
+    await clearNewIdeaState(env.PROJECTS, telegramId);
+    return;
+  }
+
+  const title = state.title || "Untitled idea";
+  const category = state.category || null;
+
+  const issue = await createIdeaIssue(project, title, category, priority);
+
+  await clearNewIdeaState(env.PROJECTS, telegramId);
+
+  if (!issue) {
+    await ctx.reply(
+      "\u{274C} <b>Failed to create issue.</b>\n\nGitHub API returned an error. Please try again later.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Build the confirmation message
+  const priorityEmoji = PRIORITY_EMOJIS[priority] || "\u{1F7E1}";
+  const priorityName = priority.replace("priority:", "");
+  const categoryDisplay = category
+    ? `\u{1F4C2} ${escapeHtml(category.replace("area:", ""))}`
+    : "\u{2014} <i>none</i>";
+
+  let confirmationText =
+    `\u{2705} <b>Issue #${issue.number} created!</b>\n\n` +
+    `\u{1F4DD} <b>${escapeHtml(title)}</b>\n` +
+    `${priorityEmoji} Priority: ${escapeHtml(priorityName)}\n` +
+    `Category: ${categoryDisplay}\n\n` +
+    `\u{1F517} <a href="${escapeHtml(issue.html_url)}">${escapeHtml(issue.html_url)}</a>`;
+
+  // Contextual tip if no category was chosen
+  if (!category) {
+    confirmationText +=
+      "\n\n\u{1F4A1} <i>Tip: Issues without a category may be overlooked in the category picker.</i>";
+  }
+
+  await ctx.reply(confirmationText, {
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
+  });
 }
 
 /**
@@ -5693,8 +6062,17 @@ export {
   removePausedCategory,
   handlePause,
   handlePauseConfirm,
+  // Neue Idee helpers (Issue #51)
+  getNewIdeaState,
+  setNewIdeaState,
+  clearNewIdeaState,
+  fetchAreaLabels,
+  createIdeaIssue,
+  buildIdeaCategoryKeyboard,
+  buildIdeaPriorityKeyboard,
+  finalizeNewIdea,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
