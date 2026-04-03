@@ -1158,6 +1158,77 @@ async function resolveActiveProject(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for active task tracking (per user per project)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the user's currently active task (issue number) for a project.
+ */
+async function getActiveTask(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<number | null> {
+  const raw = await kv.get(`active_task:${telegramId}:${projectId}`);
+  if (!raw) return null;
+  const num = parseInt(raw, 10);
+  return isNaN(num) ? null : num;
+}
+
+/**
+ * Mark an issue as the user's currently active task.
+ */
+async function setActiveTask(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string,
+  issueNumber: number
+): Promise<void> {
+  await kv.put(`active_task:${telegramId}:${projectId}`, String(issueNumber));
+}
+
+/**
+ * Clear the user's active task marker.
+ */
+async function clearActiveTask(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<void> {
+  await kv.delete(`active_task:${telegramId}:${projectId}`);
+}
+
+/**
+ * Read the user's "tasks done today" counter from KV.
+ * Returns 0 when the key has expired (daily reset via TTL).
+ */
+async function getTodayDoneCount(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<number> {
+  const raw = await kv.get(`today_done:${telegramId}`);
+  if (!raw) return 0;
+  const num = parseInt(raw, 10);
+  return isNaN(num) ? 0 : num;
+}
+
+/**
+ * Increment the user's "tasks done today" counter.
+ * Uses a 24-hour TTL so the counter resets automatically each day.
+ */
+async function incrementTodayDoneCount(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<number> {
+  const current = await getTodayDoneCount(kv, telegramId);
+  const next = current + 1;
+  await kv.put(`today_done:${telegramId}`, String(next), {
+    expirationTtl: 86400,
+  });
+  return next;
+}
+
+// ---------------------------------------------------------------------------
 // D1 helpers — event logging and session history
 // ---------------------------------------------------------------------------
 
@@ -1956,6 +2027,155 @@ async function handleProjectMyTasks(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Handle "Meine Aufgaben" — DM task list with priority sorting and
+ * inline [Start] / [Done] buttons per task.
+ *
+ * Returns { text, keyboard } so the caller can send or edit the message.
+ */
+async function handleMeineAufgaben(
+  env: Env,
+  telegramId: number,
+  firstName: string
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const kb = new InlineKeyboard();
+  const safeFirstName = escapeHtml(firstName);
+
+  // Resolve active project
+  const active = await resolveActiveProject(env, telegramId);
+  if (!active) {
+    return {
+      text: `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>\n${"━".repeat(16)}\n\nNo project configured yet.`,
+      keyboard: kb,
+    };
+  }
+
+  const { projectId, projectConfig: project } = active;
+
+  if (!project.githubToken) {
+    return {
+      text: `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>\n${"━".repeat(16)}\n\n📌 No GitHub token configured.`,
+      keyboard: kb,
+    };
+  }
+
+  // Look up the caller's GitHub username
+  const members = await getTeamMembers(env.PROJECTS);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  const githubUsername = member?.github;
+
+  if (!githubUsername) {
+    return {
+      text:
+        `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>\n${"━".repeat(16)}\n\n` +
+        "You are not registered yet.\n" +
+        "Use /register &lt;github-username&gt; to link your account.",
+      keyboard: kb,
+    };
+  }
+
+  // Fetch issues assigned to this user
+  const response = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&assignee=${githubUsername}&per_page=30`,
+    project.githubToken
+  );
+
+  if (!response.ok) {
+    return {
+      text: `\u{2705} <b>Meine Aufgaben</b>\n\n⚠️ GitHub API error: ${response.status}`,
+      keyboard: kb,
+    };
+  }
+
+  const issues = (await response.json()) as Array<{
+    number: number;
+    title: string;
+    labels: Array<{ name: string }>;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out pull requests, sort by priority (blocker first)
+  const myIssues = sortByPriority(issues.filter((i) => !i.pull_request));
+
+  // Read the user's currently active task and today's done counter
+  const activeTaskNumber = await getActiveTask(env.PROJECTS, telegramId, projectId);
+  const todayDone = await getTodayDoneCount(env.PROJECTS, telegramId);
+
+  // Build the message
+  const lines: string[] = [
+    `\u{2705} <b>Meine Aufgaben, ${safeFirstName}</b>`,
+    "━".repeat(16),
+  ];
+
+  if (myIssues.length === 0) {
+    lines.push("");
+    lines.push("No tasks assigned to you.");
+    lines.push("");
+    lines.push("Use \u{1F4CB} <b>Aufgabe nehmen</b> to claim a category first!");
+    lines.push("");
+    lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
+
+    return { text: lines.join("\n"), keyboard: kb };
+  }
+
+  // Separate blockers from the rest for prominent display
+  const blockerIssues = myIssues.filter(
+    (i) => getIssuePriority(i.labels) === "priority:blocker"
+  );
+  const otherIssues = myIssues.filter(
+    (i) => getIssuePriority(i.labels) !== "priority:blocker"
+  );
+
+  // Show blocker warning at top
+  if (blockerIssues.length > 0) {
+    lines.push("");
+    lines.push("\u{1F6A8} <b>BLOCKER — fix these first:</b>");
+    for (const issue of blockerIssues) {
+      const isActive = issue.number === activeTaskNumber;
+      const activeTag = isActive ? " ▶ <b>ACTIVE</b>" : "";
+      lines.push(
+        `\u{1F6A8} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
+      );
+      // Add Start/Done buttons for this blocker
+      kb.text(
+        isActive ? "▶ Active" : "▶ Start",
+        `mytasks_start:${issue.number}`
+      ).text("✅ Done", `mytasks_done:${issue.number}`);
+      kb.row();
+    }
+  }
+
+  // Show remaining tasks grouped by priority
+  if (otherIssues.length > 0) {
+    lines.push("");
+    lines.push(`Assigned to you (${otherIssues.length}):`);
+    for (const issue of otherIssues) {
+      const priority = getIssuePriority(issue.labels);
+      const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+      const isActive = issue.number === activeTaskNumber;
+      const activeTag = isActive ? " ▶ <b>ACTIVE</b>" : "";
+      lines.push(
+        `${emoji} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
+      );
+      // Add Start/Done buttons for this task
+      kb.text(
+        isActive ? "▶ Active" : "▶ Start",
+        `mytasks_start:${issue.number}`
+      ).text("✅ Done", `mytasks_done:${issue.number}`);
+      kb.row();
+    }
+  }
+
+  // Footer: today counter + refresh
+  lines.push("");
+  lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
+
+  kb.text("🔄 Refresh", "mytasks_refresh");
+
+  return { text: lines.join("\n"), keyboard: kb };
 }
 
 /**
@@ -3539,6 +3759,121 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // "Meine Aufgaben" inline button callbacks — Start, Done, Refresh
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^mytasks_start:(\d+)$/, async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const issueNumber = parseInt(ctx.match![1], 10);
+    const firstName = ctx.from?.first_name || "User";
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.answerCallbackQuery({ text: "No project configured." });
+        return;
+      }
+
+      // Set as active task in KV
+      await setActiveTask(env.PROJECTS, telegramId, active.projectId, issueNumber);
+
+      // Refresh the whole task list to reflect the new active state
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+      try { await ctx.answerCallbackQuery(); } catch {}
+    } catch (err) {
+      console.error("mytasks_start error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not start task." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery(/^mytasks_done:(\d+)$/, async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const issueNumber = parseInt(ctx.match![1], 10);
+    const firstName = ctx.from?.first_name || "User";
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.answerCallbackQuery({ text: "No project configured." });
+        return;
+      }
+
+      const { projectConfig: proj } = active;
+      if (!proj.githubToken) {
+        await ctx.answerCallbackQuery({ text: "No GitHub token configured." });
+        return;
+      }
+
+      // Close the issue on GitHub
+      const closeRes = await githubRequest(
+        "PATCH",
+        `/repos/${proj.githubRepo}/issues/${issueNumber}`,
+        proj.githubToken,
+        { state: "closed" }
+      );
+
+      if (!closeRes.ok) {
+        await ctx.answerCallbackQuery({
+          text: `GitHub error closing #${issueNumber}: ${closeRes.status}`,
+        });
+        return;
+      }
+
+      // Clear active task if it was the one being completed
+      const currentActive = await getActiveTask(
+        env.PROJECTS,
+        telegramId,
+        active.projectId
+      );
+      if (currentActive === issueNumber) {
+        await clearActiveTask(env.PROJECTS, telegramId, active.projectId);
+      }
+
+      // Increment daily counter
+      const newCount = await incrementTodayDoneCount(env.PROJECTS, telegramId);
+
+      // Refresh the task list to show the issue removed
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      const footer = `\n\n✅ <b>#${issueNumber} closed!</b> (Today: ${newCount})`;
+      await ctx.editMessageText(text + footer, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+      try { await ctx.answerCallbackQuery(); } catch {}
+    } catch (err) {
+      console.error("mytasks_done error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not complete task." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("mytasks_refresh", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const firstName = ctx.from?.first_name || "User";
+
+    try {
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("mytasks_refresh error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not refresh." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
   // New group member detection — auto-greet and prompt for registration
   // Past work — show last 5 days of activity from D1
   bot.callbackQuery("past_work", async (ctx) => {
@@ -3647,7 +3982,19 @@ function createBot(
   });
 
   bot.hears("\u{2705} Meine Aufgaben", async (ctx) => {
-    await ctx.reply("\u{1F6A7} <b>Meine Aufgaben</b> \u{2014} coming soon!", { parse_mode: "HTML" });
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const firstName = ctx.from?.first_name || "User";
+    try {
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("Meine Aufgaben error:", err);
+      await ctx.reply("⚠️ Could not load your tasks. Please try again.", {
+        parse_mode: "HTML",
+      });
+    }
   });
 
   bot.hears("\u{1F465} Team Board", async (ctx) => {
@@ -5043,6 +5390,13 @@ export {
   PRIORITY_LEVELS,
   PRIORITY_EMOJIS,
   PRIORITY_DEFAULT,
+  // Meine Aufgaben helpers
+  getActiveTask,
+  setActiveTask,
+  clearActiveTask,
+  getTodayDoneCount,
+  incrementTodayDoneCount,
+  handleMeineAufgaben,
   // Category assignment helpers (Issue #48)
   getCategoryClaims,
   saveCategoryClaims,
