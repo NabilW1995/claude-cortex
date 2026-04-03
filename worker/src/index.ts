@@ -324,6 +324,81 @@ const HELP_TEXTS = {
 };
 
 // ---------------------------------------------------------------------------
+// Contextual Tips Registry (Issue #65)
+// ---------------------------------------------------------------------------
+
+/**
+ * Contextual tips shown inline below handler responses.
+ * Each tip is shown at most once per hour per user (KV-deduped).
+ * All tips are in German, HTML-formatted, and italicized.
+ */
+const CONTEXTUAL_TIPS: Record<string, string> = {
+  category_taken:
+    "\u{1F4A1} <i>Tipp: Jede Kategorie geh\u{00F6}rt einer Person \u{2014} so vermeiden wir Merge-Konflikte.</i>",
+  blocker_active:
+    "\u{1F4A1} <i>Tipp: Solange ein Blocker offen ist, sind alle Kategorie-Claims pausiert.</i>",
+  already_has_category:
+    "\u{1F4A1} <i>Tipp: Gib deine aktuelle Kategorie frei, bevor du eine neue nimmst.</i>",
+  self_approve_large_pr:
+    "\u{1F4A1} <i>Tipp: Bei gro\u{00DF}en PRs ist ein Peer-Review empfohlen, auch wenn Self-Approve m\u{00F6}glich ist.</i>",
+  all_tasks_done:
+    "\u{1F389} <i>Alle Aufgaben erledigt! Nimm eine neue Kategorie oder erstelle neue Ideen.</i>",
+  no_tasks_assigned:
+    "\u{1F4A1} <i>Tipp: Nutze \"Aufgabe nehmen\" um eine Kategorie zu beanspruchen.</i>",
+  forgot_to_pull:
+    "\u{1F4A1} <i>Tipp: Nach jedem Merge \u{2014} git pull nicht vergessen!</i>",
+  category_empty:
+    "\u{1F4A1} <i>Tipp: Diese Kategorie hat keine offenen Issues. Erstelle neue Ideen mit \"Neue Idee\"!</i>",
+};
+
+// ---------------------------------------------------------------------------
+// Contextual Tips KV Helpers (Issue #65)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a specific tip was already shown to a user within the
+ * current deduplication window (1 hour TTL in KV).
+ */
+async function getTipShown(
+  kv: KVNamespace,
+  telegramId: number,
+  tipKey: string
+): Promise<boolean> {
+  const val = await kv.get(`tip_shown:${telegramId}:${tipKey}`);
+  return val !== null;
+}
+
+/**
+ * Mark a tip as shown for a user. The KV entry expires after 1 hour,
+ * allowing the same tip to reappear in the next session.
+ */
+async function setTipShown(
+  kv: KVNamespace,
+  telegramId: number,
+  tipKey: string
+): Promise<void> {
+  await kv.put(`tip_shown:${telegramId}:${tipKey}`, "1", {
+    expirationTtl: 3600,
+  });
+}
+
+/**
+ * Return a contextual tip string (with leading newlines) if the tip has
+ * not been shown to this user recently, or an empty string if it was
+ * already displayed within the dedup window.
+ */
+async function getTip(
+  kv: KVNamespace,
+  telegramId: number,
+  tipKey: string
+): Promise<string> {
+  const shown = await getTipShown(kv, telegramId, tipKey);
+  if (shown) return "";
+  await setTipShown(kv, telegramId, tipKey);
+  return "\n\n" + CONTEXTUAL_TIPS[tipKey];
+}
+
+// ---------------------------------------------------------------------------
 // GitHub webhook signature verification (HMAC-SHA256)
 // ---------------------------------------------------------------------------
 
@@ -3289,6 +3364,10 @@ async function handleMeineAufgaben(
       lines.push(`\u{23F1} Today: <b>${formatDuration(totalMinutes0)}</b>`);
     }
 
+    // Suggest claiming a category when the user has no tasks
+    const noTasksTip = await getTip(env.PROJECTS, telegramId, "no_tasks_assigned");
+    if (noTasksTip) lines.push(noTasksTip.trim());
+
     return { text: lines.join("\n"), keyboard: kb };
   }
 
@@ -3527,12 +3606,14 @@ async function sendPullReminder(
     if (!prefs.dm_chat_id) continue;
 
     const commitWord = commitCount === 1 ? "commit" : "commits";
+    const pullTip = await getTip(env.PROJECTS, member.telegram_id, "forgot_to_pull");
     const text =
       `\u{1F504} <b>Pull Reminder</b>\n${"━".repeat(16)}\n\n` +
       `@${escapeHtml(mergerGithub)} merged PR #${prNumber}:\n` +
       `"${escapeHtml(prTitle)}"\n\n` +
       `\u{1F4E6} ${commitCount} ${commitWord} added to main.\n\n` +
-      `\u{26A1} Please <code>git pull</code> before continuing work!`;
+      `\u{26A1} Please <code>git pull</code> before continuing work!` +
+      pullTip;
 
     const status = await sendDM(botToken, prefs.dm_chat_id, text);
 
@@ -4144,10 +4225,12 @@ async function handleCategoryAssign(
     const blockerList = blockers
       .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
       .join("\n");
+    const blockerTip = await getTip(env.PROJECTS, telegramId, "blocker_active");
     await ctx.editMessageText(
       `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
         `The following blocker issue(s) must be resolved first:\n${blockerList}\n\n` +
-        "Category claims will be available again once all blockers are closed.",
+        "Category claims will be available again once all blockers are closed." +
+        blockerTip,
       { parse_mode: "HTML" }
     );
     return;
@@ -4158,10 +4241,12 @@ async function handleCategoryAssign(
   const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
 
   if (existingClaim) {
+    const alreadyTip = await getTip(env.PROJECTS, telegramId, "already_has_category");
     const text =
       `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(existingClaim.displayName)}</b> ` +
       `(${existingClaim.assignedIssues.length} issues).\n\n` +
-      "Release your current category first before claiming a new one.";
+      "Release your current category first before claiming a new one." +
+      alreadyTip;
 
     const keyboard = {
       inline_keyboard: [
@@ -4241,8 +4326,9 @@ async function handleCategoryPick(
   const existingClaimer = claimsState.claims.find((c) => c.category === label);
 
   if (existingClaimer) {
+    const tip = await getTip(env.PROJECTS, telegramId!, "category_taken");
     await ctx.editMessageText(
-      `\u{26A0}\u{FE0F} <b>${escapeHtml(label.replace("area:", ""))}</b> was just claimed by ${escapeHtml(existingClaimer.telegramName)}!`,
+      `\u{26A0}\u{FE0F} <b>${escapeHtml(label.replace("area:", ""))}</b> was just claimed by ${escapeHtml(existingClaimer.telegramName)}!` + tip,
       { parse_mode: "HTML" }
     );
     return;
@@ -4387,12 +4473,18 @@ async function handleCategoryConfirm(
   // Remove any paused marker for this category (someone is picking it up)
   await removePausedCategory(env.PROJECTS, projectId, label);
 
+  // Tip when the claimed category has no open issues (edge case)
+  const emptyTip = issues.length === 0
+    ? await getTip(env.PROJECTS, telegramId, "category_empty")
+    : "";
+
   // Update the message in the group
   const successText =
     `\u{2705} <b>${safeDisplayName}</b> \u{2192} ${safeFirstName}\n\n` +
     `${result.success.length} issues assigned` +
     (result.failed.length > 0 ? `, ${result.failed.length} failed` : "") +
-    ".";
+    "." +
+    emptyTip;
 
   await ctx.editMessageText(successText, { parse_mode: "HTML" });
 
@@ -5939,7 +6031,11 @@ function createBot(
 
       // Refresh the task list to show the issue removed
       const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
-      const footer = `\n\n✅ <b>#${issueNumber} closed!</b> (Today: ${newCount})`;
+      // Show celebration tip when all tasks are done
+      const allDoneTip = text.includes("No tasks assigned")
+        ? await getTip(env.PROJECTS, telegramId, "all_tasks_done")
+        : "";
+      const footer = `\n\n✅ <b>#${issueNumber} closed!</b> (Today: ${newCount})` + allDoneTip;
       await ctx.editMessageText(text + footer, {
         parse_mode: "HTML",
         reply_markup: keyboard,
@@ -6193,16 +6289,22 @@ function createBot(
         return;
       }
 
-      // Fetch PR to detect self-approve
+      // Fetch PR to detect self-approve and size (for contextual tip)
       const prRes = await githubRequest(
         "GET",
         `/repos/${proj.githubRepo}/pulls/${prNumber}`,
         proj.githubToken!
       );
       let isSelfApprove = false;
+      let prLinesChanged = 0;
       if (prRes.ok) {
-        const prData = (await prRes.json()) as { user: { login: string } };
+        const prData = (await prRes.json()) as {
+          user: { login: string };
+          additions: number;
+          deletions: number;
+        };
         isSelfApprove = prData.user.login === reviewer.github;
+        prLinesChanged = (prData.additions || 0) + (prData.deletions || 0);
       }
 
       const reviewBody = isSelfApprove
@@ -6214,11 +6316,18 @@ function createBot(
       if (ok) {
         await logEvent(env.DB, proj.githubRepo, "review.approved.bot", reviewer.github, String(prNumber));
 
+        // Show peer-review tip for large self-approved PRs (>200 lines)
+        let selfApproveTip = "";
+        if (isSelfApprove && prLinesChanged > 200) {
+          selfApproveTip = await getTip(env.PROJECTS, telegramId!, "self_approve_large_pr");
+        }
+
         const label = isSelfApprove ? "Self-Approved" : "Approved";
         await ctx.editMessageText(
           `\u{2705} <b>${label}!</b>\n\n` +
           `PR #${prNumber} approved by @${escapeHtml(reviewer.github)}` +
-          (isSelfApprove ? " (self-approved)" : ""),
+          (isSelfApprove ? " (self-approved)" : "") +
+          selfApproveTip,
           { parse_mode: "HTML" }
         );
       } else {
@@ -8825,6 +8934,11 @@ export {
   PRIORITY_DEFAULT,
   // Help system texts (Issue #52, foundation for #65)
   HELP_TEXTS,
+  // Contextual tips engine (Issue #65)
+  CONTEXTUAL_TIPS,
+  getTipShown,
+  setTipShown,
+  getTip,
   // Meine Aufgaben helpers
   getActiveTask,
   setActiveTask,
