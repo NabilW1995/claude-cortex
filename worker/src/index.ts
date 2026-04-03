@@ -4219,19 +4219,27 @@ async function handleCategoryAssign(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
-  // Block category claims when a blocker issue is active
+  // Warn about blocker but allow override
   const blockers = await isBlockerActive(project);
-  if (blockers.length > 0) {
+  if (blockers.length > 0 && !ctx.callbackQuery?.data?.includes("cat_override")) {
     const blockerList = blockers
       .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
       .join("\n");
     const blockerTip = await getTip(env.PROJECTS, telegramId, "blocker_active");
     await ctx.editMessageText(
-      `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
-        `The following blocker issue(s) must be resolved first:\n${blockerList}\n\n` +
-        "Category claims will be available again once all blockers are closed." +
+      `\u{1F6A8} <b>Blocker active</b>\n\n` +
+        `The following blocker issue(s) should be resolved first:\n${blockerList}\n\n` +
+        `\u{26A0}\u{FE0F} <i>You can still claim a category, but be aware of potential merge conflicts.</i>` +
         blockerTip,
-      { parse_mode: "HTML" }
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "\u{26A0}\u{FE0F} Trotzdem arbeiten", callback_data: "cat_override" }],
+            [{ text: "\u{274C} Abbrechen", callback_data: "cat_cancel" }],
+          ],
+        },
+      }
     );
     return;
   }
@@ -4401,20 +4409,10 @@ async function handleCategoryConfirm(
   const firstName = ctx.from?.first_name || "Unknown";
   if (!telegramId) return;
 
-  // Block confirmation when a blocker issue appeared between pick and confirm
+  // Warn about blocker but do not block — user already chose to proceed
   const blockers = await isBlockerActive(project);
-  if (blockers.length > 0) {
-    const blockerList = blockers
-      .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
-      .join("\n");
-    await ctx.editMessageText(
-      `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
-        `A blocker appeared while you were choosing:\n${blockerList}\n\n` +
-        "Try again once all blockers are closed.",
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
+  // (blocker override is handled in handleCategoryAssign — if user reached
+  //  confirm, they already acknowledged the warning)
 
   // Race-condition protection: re-read KV before confirming
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
@@ -4866,17 +4864,25 @@ async function handleAufgabeNehmen(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
-  // Block category claims when a blocker issue is active
+  // Warn about blocker but allow override via inline button
   const blockers = await isBlockerActive(project);
   if (blockers.length > 0) {
     const blockerList = blockers
       .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
       .join("\n");
     await ctx.reply(
-      `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
-        `The following blocker issue(s) must be resolved first:\n${blockerList}\n\n` +
-        "Category claims will be available again once all blockers are closed.",
-      { parse_mode: "HTML" }
+      `\u{1F6A8} <b>Blocker active</b>\n\n` +
+        `The following blocker issue(s) should be resolved first:\n${blockerList}\n\n` +
+        `\u{26A0}\u{FE0F} <i>You can still claim a category, but be aware of potential merge conflicts.</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "\u{26A0}\u{FE0F} Trotzdem arbeiten", callback_data: "cat_override" }],
+            [{ text: "\u{274C} Abbrechen", callback_data: "cat_cancel" }],
+          ],
+        },
+      }
     );
     return;
   }
@@ -5880,6 +5886,12 @@ function createBot(
     try { await ctx.answerCallbackQuery(); } catch {}
     const label = ctx.match![1];
     await handleCategoryConfirm(ctx, project, env, projectId, label);
+  });
+
+  bot.callbackQuery("cat_override", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    // User chose to override blocker warning — show category picker anyway
+    await handleCategoryAssign(ctx, project, env, projectId);
   });
 
   bot.callbackQuery("cat_cancel", async (ctx) => {
