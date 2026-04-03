@@ -1644,8 +1644,9 @@ function parseIssueReferences(text: string): number[] {
 // ---------------------------------------------------------------------------
 
 interface NewIdeaState {
-  step: "awaiting_title" | "awaiting_category" | "awaiting_priority";
+  step: "awaiting_title" | "awaiting_description" | "awaiting_category" | "awaiting_priority";
   title?: string;
+  description?: string;
   category?: string; // full label name like "area:dashboard"
 }
 
@@ -5007,7 +5008,7 @@ async function renderHomeScreen(
     .row()
     .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
     .row()
-    .text("\u{2753} Hilfe")
+    .text("\u{2753} Hilfe").text("\u{1F504} Projekt wechseln")
     .resized()
     .persistent();
 
@@ -5103,13 +5104,13 @@ function createBot(
       }
     }
 
-    // New 5-button reply keyboard
+    // New 6-button reply keyboard
     const keyboard = new Keyboard()
       .text("\u{1F4CB} Aufgabe nehmen").text("\u{2705} Meine Aufgaben")
       .row()
       .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
       .row()
-      .text("\u{2753} Hilfe")
+      .text("\u{2753} Hilfe").text("\u{1F504} Projekt wechseln")
       .resized()
       .persistent();
 
@@ -6594,6 +6595,22 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // "Neue Idee" wizard — skip description callback handler
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("newidea_desc_skip", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_description") return;
+
+    // Skip description and advance to category step
+    await advanceToCategoryStep(ctx, env, telegramId, state.title || "", "");
+  });
+
+  // -------------------------------------------------------------------
   // "Neue Idee" wizard — category selection callback handlers
   // -------------------------------------------------------------------
 
@@ -6695,6 +6712,54 @@ function createBot(
     await ctx.reply(HELP_TEXTS.overview, {
       parse_mode: "HTML",
       reply_markup: keyboard,
+    });
+  });
+
+  bot.hears("\u{1F504} Projekt wechseln", async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const projects = await getProjectList(env);
+    if (projects.length <= 1) {
+      await ctx.reply("\u{1F4C2} Only one project registered \u{2014} no switching needed.");
+      return;
+    }
+
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+
+    // Build enriched project list: name + personal claim + open task count
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (const p of projects) {
+      const isCurrent = p.id === currentProjectId;
+
+      // Check if user has a category claim in this project
+      const claimsState = await getCategoryClaims(env.PROJECTS, p.id);
+      const userClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      // Count open issues for this project
+      const issueMap = await fetchOpenIssuesByCategory(p.config);
+      let totalOpen = 0;
+      for (const issues of issueMap.values()) {
+        totalOpen += issues.length;
+      }
+
+      // Build label: checkmark + name + personal info + open tasks
+      let label = isCurrent ? "\u{2705} " : "";
+      label += p.id;
+      if (userClaim) {
+        label += ` \u{1F4CC} ${userClaim.displayName}`;
+      }
+      label += ` (${totalOpen} open)`;
+
+      buttons.push([{
+        text: label,
+        callback_data: `switch_project:${p.id}`,
+      }]);
+    }
+
+    await ctx.reply("\u{1F4C2} <b>Switch Project:</b>", {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: buttons },
     });
   });
 
@@ -7095,7 +7160,7 @@ function createBot(
       .row()
       .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
       .row()
-      .text("\u{2753} Hilfe")
+      .text("\u{2753} Hilfe").text("\u{1F504} Projekt wechseln")
       .resized()
       .persistent();
     await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
@@ -7401,8 +7466,25 @@ function createBot(
       return;
     }
 
-    // "Neue Idee" wizard — title input (checked BEFORE onboarding)
+    // "Neue Idee" wizard — description input (checked BEFORE title & onboarding)
     const ideaState = await getNewIdeaState(env.PROJECTS, telegramId);
+
+    if (ideaState?.step === "awaiting_description") {
+      const description = ctx.message.text.trim();
+
+      if (description.length > 2000) {
+        await ctx.reply(
+          "\u{274C} Die Beschreibung ist zu lang (max. 2000 Zeichen). Bitte k\u{00FC}rzen:",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Advance to category step with the description captured
+      await advanceToCategoryStep(ctx, env, telegramId, ideaState.title || "", description);
+      return;
+    }
+
     if (ideaState?.step === "awaiting_title") {
       const title = ctx.message.text.trim();
 
@@ -7414,52 +7496,22 @@ function createBot(
         return;
       }
 
-      // Resolve project to fetch area labels
-      const active = await resolveActiveProject(env, telegramId);
-      if (!active) {
-        await ctx.reply(
-          "\u{26A0}\u{FE0F} No project configured. Use /start to set up first.",
-          { parse_mode: "HTML" }
-        );
-        await clearNewIdeaState(env.PROJECTS, telegramId);
-        return;
-      }
-
-      const { projectConfig: activeProject } = active;
-
-      // Fetch available area: labels from the GitHub repo
-      const areaLabels = await fetchAreaLabels(activeProject);
-
-      if (areaLabels.length === 0) {
-        // No categories available — skip directly to priority selection
-        await setNewIdeaState(env.PROJECTS, telegramId, {
-          step: "awaiting_priority",
-          title,
-        });
-
-        const priorityKb = buildIdeaPriorityKeyboard();
-        await ctx.reply(
-          `\u{1F4A1} <b>Neue Idee</b>\n\n` +
-            `\u{1F4DD} ${escapeHtml(title)}\n` +
-            `\u{1F4C2} <i>no categories available</i>\n\n` +
-            "W\u{00E4}hle die Priorit\u{00E4}t:",
-          { parse_mode: "HTML", reply_markup: priorityKb }
-        );
-        return;
-      }
-
-      // Save title and advance to category step
+      // Advance to description step
       await setNewIdeaState(env.PROJECTS, telegramId, {
-        step: "awaiting_category",
+        step: "awaiting_description",
         title,
       });
 
-      const categoryKb = buildIdeaCategoryKeyboard(areaLabels);
+      const skipKb = new InlineKeyboard().text(
+        "\u{23ED}\u{FE0F} Skip",
+        "newidea_desc_skip"
+      );
       await ctx.reply(
         `\u{1F4A1} <b>Neue Idee</b>\n\n` +
           `\u{1F4DD} ${escapeHtml(title)}\n\n` +
-          "W\u{00E4}hle eine Kategorie:",
-        { parse_mode: "HTML", reply_markup: categoryKb }
+          "\u{1F4DD} Beschreibe kurz das Problem oder die Idee:\n\n" +
+          "<i>(Oder dr\u{00FC}cke Skip f\u{00FC}r ein Issue ohne Beschreibung)</i>",
+        { parse_mode: "HTML", reply_markup: skipKb }
       );
       return;
     }
@@ -7719,6 +7771,7 @@ async function handleWerCommand(
 async function createIdeaIssue(
   project: ProjectConfig,
   title: string,
+  description: string,
   category: string | null,
   priority: string
 ): Promise<{ number: number; html_url: string } | null> {
@@ -7731,7 +7784,7 @@ async function createIdeaIssue(
     "POST",
     `/repos/${project.githubRepo}/issues`,
     project.githubToken,
-    { title, labels }
+    { title, body: description || undefined, labels }
   );
 
   if (!response.ok) return null;
@@ -7742,6 +7795,68 @@ async function createIdeaIssue(
   };
 
   return { number: issue.number, html_url: issue.html_url };
+}
+
+/**
+ * Advance the "Neue Idee" wizard from description to category step.
+ * Shared by both the text handler and the "skip description" callback.
+ */
+async function advanceToCategoryStep(
+  ctx: Context,
+  env: Env,
+  telegramId: number,
+  title: string,
+  description: string
+): Promise<void> {
+  // Resolve project to fetch area labels
+  const active = await resolveActiveProject(env, telegramId);
+  if (!active) {
+    await ctx.reply(
+      "\u{26A0}\u{FE0F} No project configured. Use /start to set up first.",
+      { parse_mode: "HTML" }
+    );
+    await clearNewIdeaState(env.PROJECTS, telegramId);
+    return;
+  }
+
+  const { projectConfig: activeProject } = active;
+
+  // Fetch available area: labels from the GitHub repo
+  const areaLabels = await fetchAreaLabels(activeProject);
+
+  if (areaLabels.length === 0) {
+    // No categories available — skip directly to priority selection
+    await setNewIdeaState(env.PROJECTS, telegramId, {
+      step: "awaiting_priority",
+      title,
+      description,
+    });
+
+    const priorityKb = buildIdeaPriorityKeyboard();
+    await ctx.reply(
+      `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+        `\u{1F4DD} ${escapeHtml(title)}\n` +
+        `\u{1F4C2} <i>no categories available</i>\n\n` +
+        "W\u{00E4}hle die Priorit\u{00E4}t:",
+      { parse_mode: "HTML", reply_markup: priorityKb }
+    );
+    return;
+  }
+
+  // Save title + description and advance to category step
+  await setNewIdeaState(env.PROJECTS, telegramId, {
+    step: "awaiting_category",
+    title,
+    description,
+  });
+
+  const categoryKb = buildIdeaCategoryKeyboard(areaLabels);
+  await ctx.reply(
+    `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+      `\u{1F4DD} ${escapeHtml(title)}\n\n` +
+      "W\u{00E4}hle eine Kategorie:",
+    { parse_mode: "HTML", reply_markup: categoryKb }
+  );
 }
 
 /**
@@ -7805,9 +7920,10 @@ async function finalizeNewIdea(
   }
 
   const title = state.title || "Untitled idea";
+  const description = state.description || "";
   const category = state.category || null;
 
-  const issue = await createIdeaIssue(project, title, category, priority);
+  const issue = await createIdeaIssue(project, title, description, category, priority);
 
   await clearNewIdeaState(env.PROJECTS, telegramId);
 
@@ -7826,9 +7942,15 @@ async function finalizeNewIdea(
     ? `\u{1F4C2} ${escapeHtml(category.replace("area:", ""))}`
     : "\u{2014} <i>none</i>";
 
+  // Show a preview of the description (first 100 chars) if one was provided
+  const descriptionPreview = description
+    ? `\u{1F4C4} ${escapeHtml(description.length > 100 ? description.slice(0, 100) + "\u{2026}" : description)}\n`
+    : "";
+
   let confirmationText =
     `\u{2705} <b>Issue #${issue.number} created!</b>\n\n` +
     `\u{1F4DD} <b>${escapeHtml(title)}</b>\n` +
+    descriptionPreview +
     `${priorityEmoji} Priority: ${escapeHtml(priorityName)}\n` +
     `Category: ${categoryDisplay}\n\n` +
     `\u{1F517} <a href="${escapeHtml(issue.html_url)}">${escapeHtml(issue.html_url)}</a>`;
