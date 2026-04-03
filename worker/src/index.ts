@@ -1214,6 +1214,170 @@ async function getActivityData(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for file-level conflict detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Store the list of recently changed files for a user in a specific project.
+ * Used by the conflict detector to compare against other users' file lists.
+ * Auto-expires after 2 hours (matches heartbeat TTL).
+ */
+async function saveChangedFiles(
+  kv: KVNamespace,
+  projectId: string,
+  telegramId: number,
+  files: string[]
+): Promise<void> {
+  const key = `files:${projectId}:${telegramId}`;
+  await kv.put(key, JSON.stringify(files), { expirationTtl: 7200 });
+}
+
+/**
+ * Retrieve the stored changed files for a user in a project.
+ * Returns an empty array if no data exists (expired or never set).
+ */
+async function getChangedFiles(
+  kv: KVNamespace,
+  projectId: string,
+  telegramId: number
+): Promise<string[]> {
+  const raw = await kv.get(`files:${projectId}:${telegramId}`);
+  return raw ? JSON.parse(raw) : [];
+}
+
+/**
+ * Check if a conflict warning was already sent for a specific file between two users.
+ * The key is sorted by user ID so A→B and B→A share the same dedup entry.
+ */
+async function hasConflictWarning(
+  kv: KVNamespace,
+  projectId: string,
+  userA: number,
+  userB: number,
+  file: string
+): Promise<boolean> {
+  const sortedPair = [userA, userB].sort((a, b) => a - b).join("_");
+  const key = `conflict_warn:${projectId}:${sortedPair}:${file}`;
+  return (await kv.get(key)) !== null;
+}
+
+/**
+ * Mark a conflict warning as sent for a specific file between two users.
+ * Expires after 1 hour — ensures warnings are throttled but not permanent.
+ */
+async function setConflictWarning(
+  kv: KVNamespace,
+  projectId: string,
+  userA: number,
+  userB: number,
+  file: string
+): Promise<void> {
+  const sortedPair = [userA, userB].sort((a, b) => a - b).join("_");
+  const key = `conflict_warn:${projectId}:${sortedPair}:${file}`;
+  await kv.put(key, "1", { expirationTtl: 3600 });
+}
+
+/**
+ * Detect file-level conflicts between the current user and all other active
+ * team members in the same project. If overlapping files are found and no
+ * warning has been sent recently, DMs both users with the conflict details.
+ *
+ * Respects DND mode — users in DND won't receive conflict warnings.
+ */
+async function detectFileConflicts(
+  env: Env,
+  projectId: string,
+  currentUser: string,
+  currentTelegramId: number,
+  currentFiles: string[],
+  botToken: string
+): Promise<void> {
+  if (currentFiles.length === 0) return;
+
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the current user
+    if (member.telegram_id === currentTelegramId) continue;
+
+    // Retrieve the other user's changed files for this project
+    const otherFiles = await getChangedFiles(env.PROJECTS, projectId, member.telegram_id);
+    if (otherFiles.length === 0) continue;
+
+    // Find overlapping files
+    const otherFileSet = new Set(otherFiles);
+    const conflicts = currentFiles.filter((f) => otherFileSet.has(f));
+    if (conflicts.length === 0) continue;
+
+    // Filter out files that already had a warning sent recently
+    const newConflicts: string[] = [];
+    for (const file of conflicts) {
+      const alreadyWarned = await hasConflictWarning(
+        env.PROJECTS,
+        projectId,
+        currentTelegramId,
+        member.telegram_id,
+        file
+      );
+      if (!alreadyWarned) {
+        newConflicts.push(file);
+      }
+    }
+    if (newConflicts.length === 0) continue;
+
+    // Set throttle keys for all new conflicts
+    for (const file of newConflicts) {
+      await setConflictWarning(
+        env.PROJECTS,
+        projectId,
+        currentTelegramId,
+        member.telegram_id,
+        file
+      );
+    }
+
+    // Build the conflict file list for the message
+    const fileList = newConflicts
+      .map((f) => `\u2022 <code>${escapeHtml(f)}</code>`)
+      .join("\n");
+
+    const escapedProject = escapeHtml(projectId);
+
+    // Send DM to the current user (about the other user)
+    const currentPrefs = await getUserPreferences(env.PROJECTS, currentTelegramId);
+    if (currentPrefs.dm_chat_id && !(await isUserDND(env.PROJECTS, currentTelegramId))) {
+      const otherName = escapeHtml(member.name || member.telegram_username);
+      const msgForCurrent =
+        `\u26A0\uFE0F <b>File Conflict Warning</b>\n\n` +
+        `You and <b>${otherName}</b> are both editing:\n${fileList}\n\n` +
+        `Project: <b>${escapedProject}</b>\n\n` +
+        `<i>Coordinate to avoid merge conflicts!</i>`;
+      const status = await sendDM(botToken, currentPrefs.dm_chat_id, msgForCurrent);
+      if (status === "blocked") {
+        currentPrefs.dm_chat_id = null;
+        await saveUserPreferences(env.PROJECTS, currentTelegramId, currentPrefs);
+      }
+    }
+
+    // Send DM to the other user (about the current user)
+    const otherPrefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+    if (otherPrefs.dm_chat_id && !(await isUserDND(env.PROJECTS, member.telegram_id))) {
+      const currentName = escapeHtml(currentUser);
+      const msgForOther =
+        `\u26A0\uFE0F <b>File Conflict Warning</b>\n\n` +
+        `You and <b>${currentName}</b> are both editing:\n${fileList}\n\n` +
+        `Project: <b>${escapedProject}</b>\n\n` +
+        `<i>Coordinate to avoid merge conflicts!</i>`;
+      const status = await sendDM(botToken, otherPrefs.dm_chat_id, msgForOther);
+      if (status === "blocked") {
+        otherPrefs.dm_chat_id = null;
+        await saveUserPreferences(env.PROJECTS, member.telegram_id, otherPrefs);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers for central team-members registry
 // ---------------------------------------------------------------------------
 
@@ -7207,6 +7371,27 @@ async function handleSession(
         lastCommit: update.lastCommit || "",
       });
     }
+
+    // File-level conflict detection — warn users editing the same files
+    const heartbeatFiles = update.lastFiles || [];
+    if (heartbeatFiles.length > 0) {
+      // Resolve current user's telegram_id from team member registry
+      const allMembers = await getTeamMembers(env.PROJECTS);
+      const currentMember = allMembers.find(
+        (m) => m.github === update.user || m.name === update.user
+      );
+      if (currentMember) {
+        await saveChangedFiles(env.PROJECTS, projectId, currentMember.telegram_id, heartbeatFiles);
+        await detectFileConflicts(
+          env,
+          projectId,
+          update.user,
+          currentMember.telegram_id,
+          heartbeatFiles,
+          project.botToken
+        );
+      }
+    }
   } else if (update.type === "end") {
     // Don't remove from KV — auto-expires via TTL (prevents false offline from context compression)
     // But DO log the end to D1 for work hours tracking
@@ -7424,6 +7609,14 @@ export {
   submitPRReview,
   sendPullReminder,
   sendPreviewNotifications,
+  // Conflict detector helpers (Issue #58)
+  saveChangedFiles,
+  getChangedFiles,
+  hasConflictWarning,
+  setConflictWarning,
+  detectFileConflicts,
+  isUserDND,
+  sendDM,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
 
