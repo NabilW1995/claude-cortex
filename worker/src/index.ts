@@ -3380,21 +3380,32 @@ async function handleMeineAufgaben(
     (i) => getIssuePriority(i.labels) !== "priority:blocker"
   );
 
+  // Helper: truncate a title to fit Telegram's inline button label limit
+  const shortTitle = (title: string, maxLen: number = 22): string =>
+    title.length > maxLen ? title.slice(0, maxLen - 1) + "\u{2026}" : title;
+
   // Show blocker warning at top
   if (blockerIssues.length > 0) {
     lines.push("");
-    lines.push("\u{1F6A8} <b>BLOCKER — fix these first:</b>");
+    lines.push("\u{1F6A8} <b>BLOCKER \u{2014} fix these first:</b>");
     for (const issue of blockerIssues) {
       const isActive = issue.number === activeTaskNumber;
-      const activeTag = isActive ? " ▶ <b>ACTIVE</b>" : "";
+      const activeTag = isActive ? " \u{25B6} <b>ACTIVE</b>" : "";
       lines.push(
         `\u{1F6A8} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
       );
-      // Add Start/Done buttons for this blocker
-      kb.text(
-        isActive ? "▶ Active" : "▶ Start",
-        `mytasks_start:${issue.number}`
-      ).text("✅ Done", `mytasks_done:${issue.number}`);
+      // One row per task — descriptive label so the user knows which task each button controls
+      if (isActive) {
+        kb.text(
+          `\u{2705} Done #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_done:${issue.number}`
+        );
+      } else {
+        kb.text(
+          `\u{25B6}\u{FE0F} Start #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
+        );
+      }
       kb.row();
     }
   }
@@ -3402,20 +3413,27 @@ async function handleMeineAufgaben(
   // Show remaining tasks grouped by priority
   if (otherIssues.length > 0) {
     lines.push("");
-    lines.push(`Assigned to you (${otherIssues.length}):`);
+    lines.push(`\u{1F4CB} <b>Assigned to you (${otherIssues.length}):</b>`);
     for (const issue of otherIssues) {
       const priority = getIssuePriority(issue.labels);
       const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
       const isActive = issue.number === activeTaskNumber;
-      const activeTag = isActive ? " ▶ <b>ACTIVE</b>" : "";
+      const activeTag = isActive ? " \u{25B6} <b>ACTIVE</b>" : "";
       lines.push(
         `${emoji} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
       );
-      // Add Start/Done buttons for this task
-      kb.text(
-        isActive ? "▶ Active" : "▶ Start",
-        `mytasks_start:${issue.number}`
-      ).text("✅ Done", `mytasks_done:${issue.number}`);
+      // One row per task — active tasks show Done, others show Start
+      if (isActive) {
+        kb.text(
+          `\u{2705} Done #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_done:${issue.number}`
+        );
+      } else {
+        kb.text(
+          `\u{25B6}\u{FE0F} Start #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
+        );
+      }
       kb.row();
     }
   }
@@ -3441,6 +3459,8 @@ async function handleMeineAufgaben(
   // Show Pause button when user has a claimed category
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
   const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  // Action buttons row: Pause + Show Prompts + Refresh
   if (myClaim) {
     kb.text("\u{23F8} Pause", "mytasks_pause");
   }
@@ -3471,7 +3491,6 @@ async function handleMeineAufgaben(
           project.githubToken
         );
         if (branchRes.ok) {
-          kb.row();
           kb.text(
             "\u{1F680} Create Preview",
             `preview_create:${projectId}:${myClaim.category}`
@@ -3483,6 +3502,9 @@ async function handleMeineAufgaben(
     }
   }
 
+  kb.row();
+  // "Show All Prompts" sends Claude Code prompts for every assigned issue as DMs
+  kb.text("\u{1F4CB} Show All Prompts", "mytasks_show_prompts");
   kb.text("\u{1F504} Refresh", "mytasks_refresh");
 
   return { text: lines.join("\n"), keyboard: kb };
@@ -4515,6 +4537,33 @@ async function handleCategoryConfirm(
     if (dmStatus === "blocked") {
       prefs.dm_chat_id = null;
       await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+    }
+
+    // Send Claude Code prompts for each assigned issue so the user can
+    // start working immediately without navigating to "Meine Aufgaben" first.
+    if (prefs.dm_chat_id) {
+      for (const issue of assignedIssues) {
+        try {
+          const prompt = await generateClaudePrompt(project, issue.number, displayName);
+          const MAX_PROMPT_CHARS = 3400;
+          const safePrompt = prompt.length > MAX_PROMPT_CHARS
+            ? prompt.slice(0, MAX_PROMPT_CHARS) + "\n... (truncated)"
+            : prompt;
+
+          await sendDM(
+            project.botToken,
+            prefs.dm_chat_id,
+            `\u{1F680} <b>Prompt for #${issue.number} ${escapeHtml(issue.title)}</b>\n\n` +
+              `<pre>${escapeHtml(safePrompt)}</pre>\n\n` +
+              `<i>\u{1F4A1} Long-press the code block to copy, then paste into VS Code.</i>`
+          );
+
+          // Small delay between DMs to avoid Telegram rate limits
+          await new Promise((r) => setTimeout(r, 300));
+        } catch (promptErr) {
+          console.error(`Prompt generation failed for #${issue.number}:`, promptErr);
+        }
+      }
     }
   }
 
@@ -6076,6 +6125,119 @@ function createBot(
       console.error("mytasks_refresh error:", err);
       try {
         await ctx.answerCallbackQuery({ text: "Could not refresh." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // "Meine Aufgaben" — Show All Prompts callback
+  // Generates Claude Code prompts for every assigned issue and sends
+  // them as individual DMs so the user can copy-paste into VS Code.
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("mytasks_show_prompts", async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    try {
+      await ctx.answerCallbackQuery({ text: "Generating prompts\u{2026}" });
+
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) return;
+
+      const { projectId: promptProjectId, projectConfig: promptProject } = active;
+
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      if (!prefs.dm_chat_id) {
+        await sendDM(
+          promptProject.botToken,
+          ctx.from!.id,
+          "\u{26A0}\u{FE0F} DM not set up. Send /start to the bot first."
+        );
+        return;
+      }
+
+      if (!promptProject.githubToken) return;
+
+      // Look up the caller's GitHub username
+      const promptMembers = await getTeamMembers(env.PROJECTS);
+      const promptMember = promptMembers.find((m) => m.telegram_id === telegramId);
+      const promptGithub = promptMember?.github;
+      if (!promptGithub) return;
+
+      // Fetch issues assigned to this user
+      const promptResponse = await githubRequest(
+        "GET",
+        `/repos/${promptProject.githubRepo}/issues?state=open&assignee=${promptGithub}&per_page=30`,
+        promptProject.githubToken
+      );
+      if (!promptResponse.ok) return;
+
+      const promptIssues = (await promptResponse.json()) as Array<{
+        number: number;
+        title: string;
+        labels: Array<{ name: string }>;
+        pull_request?: unknown;
+      }>;
+
+      const myPromptIssues = sortByPriority(
+        promptIssues.filter((i) => !i.pull_request)
+      );
+
+      if (myPromptIssues.length === 0) {
+        await sendDM(
+          promptProject.botToken,
+          prefs.dm_chat_id,
+          "No open issues assigned to you."
+        );
+        return;
+      }
+
+      // Determine category for branch naming
+      const promptClaims = await getCategoryClaims(env.PROJECTS, promptProjectId);
+      const promptClaim = promptClaims.claims.find(
+        (c) => c.telegramId === telegramId
+      );
+      const promptCategory = promptClaim?.displayName || null;
+
+      // Send a header DM, then one prompt per issue
+      await sendDM(
+        promptProject.botToken,
+        prefs.dm_chat_id,
+        `\u{1F4CB} <b>Claude Code Prompts (${myPromptIssues.length} issues)</b>\n\n` +
+          "Each prompt below is ready to paste into VS Code."
+      );
+
+      for (const issue of myPromptIssues) {
+        try {
+          const prompt = await generateClaudePrompt(
+            promptProject,
+            issue.number,
+            promptCategory
+          );
+          const MAX_PROMPT_CHARS = 3400;
+          const safePrompt = prompt.length > MAX_PROMPT_CHARS
+            ? prompt.slice(0, MAX_PROMPT_CHARS) + "\n... (truncated)"
+            : prompt;
+
+          await sendDM(
+            promptProject.botToken,
+            prefs.dm_chat_id,
+            `\u{1F680} <b>Prompt for #${issue.number} ${escapeHtml(issue.title)}</b>\n\n` +
+              `<pre>${escapeHtml(safePrompt)}</pre>\n\n` +
+              `<i>\u{1F4A1} Long-press the code block to copy, then paste into VS Code.</i>`
+          );
+
+          // Small delay between DMs to avoid Telegram rate limits
+          await new Promise((r) => setTimeout(r, 300));
+        } catch (promptErr) {
+          console.error(`Show prompts: failed for #${issue.number}:`, promptErr);
+        }
+      }
+    } catch (err) {
+      console.error("mytasks_show_prompts error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not generate prompts." });
       } catch {}
     }
   });
