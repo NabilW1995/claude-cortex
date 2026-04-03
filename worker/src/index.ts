@@ -3261,6 +3261,49 @@ async function getProjectList(env: Env): Promise<Array<{ id: string; config: Pro
 }
 
 // ---------------------------------------------------------------------------
+// Home screen helper — re-used by /start, onboarding, and project switch
+// ---------------------------------------------------------------------------
+
+/**
+ * Send the project header (with Switch button) and the 5-button reply
+ * keyboard.  Extracted so that project switching can re-render the home
+ * screen without duplicating the layout logic.
+ */
+async function renderHomeScreen(
+  ctx: Context,
+  env: Env,
+  telegramId: number
+): Promise<void> {
+  const active = await resolveActiveProject(env, telegramId);
+  if (active) {
+    const projectName = escapeHtml(active.projectId);
+    await ctx.reply(
+      `\u{1F4C2} <b>Project:</b> ${projectName}`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[{ text: "\u{1F504} Switch", callback_data: "home_switch_project" }]],
+        },
+      }
+    );
+  }
+
+  const keyboard = new Keyboard()
+    .text("\u{1F4CB} Aufgabe nehmen").text("\u{2705} Meine Aufgaben")
+    .row()
+    .text("\u{1F465} Team Board").text("\u{1F4A1} Neue Idee")
+    .row()
+    .text("\u{2753} Hilfe")
+    .resized()
+    .persistent();
+
+  await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+    reply_markup: keyboard,
+    parse_mode: "HTML",
+  });
+}
+
+// ---------------------------------------------------------------------------
 // grammy bot factory — creates a bot instance with all handlers registered
 // ---------------------------------------------------------------------------
 
@@ -4624,10 +4667,36 @@ function createBot(
     }
 
     const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
-    const buttons = projects.map((p) => [{
-      text: (p.id === currentProjectId ? "\u{2705} " : "") + escapeHtml(p.id),
-      callback_data: `switch_project:${p.id}`,
-    }]);
+
+    // Build enriched project list: name + personal claim + open task count
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (const p of projects) {
+      const isCurrent = p.id === currentProjectId;
+
+      // Check if user has a category claim in this project
+      const claimsState = await getCategoryClaims(env.PROJECTS, p.id);
+      const userClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      // Count open issues for this project
+      const issueMap = await fetchOpenIssuesByCategory(p.config);
+      let totalOpen = 0;
+      for (const issues of issueMap.values()) {
+        totalOpen += issues.length;
+      }
+
+      // Build label: checkmark + name + personal info + open tasks
+      let label = isCurrent ? "\u{2705} " : "";
+      label += p.id;
+      if (userClaim) {
+        label += ` \u{1F4CC} ${userClaim.displayName}`;
+      }
+      label += ` (${totalOpen} open)`;
+
+      buttons.push([{
+        text: label,
+        callback_data: `switch_project:${p.id}`,
+      }]);
+    }
 
     await ctx.reply("\u{1F4C2} <b>Switch Project:</b>", {
       parse_mode: "HTML",
@@ -4635,19 +4704,190 @@ function createBot(
     });
   });
 
+  // Switch to a new project — checks for active claims before allowing switch
   bot.callbackQuery(/^switch_project:/, async (ctx) => {
     try { await ctx.answerCallbackQuery(); } catch {}
     const telegramId = ctx.from?.id;
     if (!telegramId) return;
 
-    const newProjectId = (ctx.callbackQuery?.data || "").replace("switch_project:", "");
+    const newProjectId = (ctx.callbackQuery?.data || "").substring("switch_project:".length);
     if (!newProjectId) return;
 
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+
+    // Already on this project — nothing to do
+    if (newProjectId === currentProjectId) {
+      await ctx.editMessageText(
+        `\u{1F4C2} <b>Project:</b> ${escapeHtml(newProjectId)}\n\u{2705} Already active!`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Check if user has an active category claim in the CURRENT project
+    if (currentProjectId) {
+      const claimsState = await getCategoryClaims(env.PROJECTS, currentProjectId);
+      const userClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      if (userClaim) {
+        // User has open work — show warning dialog
+        const safeCategory = escapeHtml(userClaim.displayName);
+        const safeCurrentProject = escapeHtml(currentProjectId);
+
+        const text =
+          `\u{26A0}\u{FE0F} <b>Open tasks in ${safeCurrentProject}</b>\n\n` +
+          `You have <b>${safeCategory}</b> claimed with ` +
+          `${userClaim.assignedIssues.length} assigned issue(s).\n\n` +
+          `What would you like to do?`;
+
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: "\u{1F4CB} Finish tasks", callback_data: "switch_finish" },
+              { text: "\u{23F8} Pause & Switch", callback_data: `switch_pause_and_go:${newProjectId}` },
+            ],
+          ],
+        };
+
+        await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+        return;
+      }
+    }
+
+    // No active claim — switch immediately
     await setActiveProject(env.PROJECTS, telegramId, newProjectId);
     await ctx.editMessageText(
       `\u{1F4C2} <b>Project:</b> ${escapeHtml(newProjectId)}\n\u{2705} Switched!`,
       { parse_mode: "HTML" }
     );
+
+    // Re-render the home screen with the new project context
+    await renderHomeScreen(ctx, env, telegramId);
+  });
+
+  // "Finish tasks" — user chose to stay and finish current work
+  bot.callbackQuery("switch_finish", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await ctx.editMessageText(
+      "\u{1F4CB} OK \u{2014} finish your current tasks first, then switch!",
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // "Pause & Switch" — pause current category, then switch to new project
+  bot.callbackQuery(/^switch_pause_and_go:/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    const firstName = ctx.from?.first_name || "Unknown";
+    if (!telegramId) return;
+
+    const newProjectId = (ctx.callbackQuery?.data || "").substring("switch_pause_and_go:".length);
+    if (!newProjectId) return;
+
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+    if (!currentProjectId) return;
+
+    const currentConfig = await getProject(env.PROJECTS, currentProjectId, env);
+    if (!currentConfig) return;
+
+    // --- Execute pause logic (mirrors handlePauseConfirm) ---
+
+    const claimsState = await getCategoryClaims(env.PROJECTS, currentProjectId);
+    const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+
+    if (claimIndex < 0) {
+      // Claim was already released — just switch
+      await setActiveProject(env.PROJECTS, telegramId, newProjectId);
+      await ctx.editMessageText(
+        `\u{1F4C2} <b>Project:</b> ${escapeHtml(newProjectId)}\n\u{2705} Switched!`,
+        { parse_mode: "HTML" }
+      );
+      await renderHomeScreen(ctx, env, telegramId);
+      return;
+    }
+
+    const claim = claimsState.claims[claimIndex];
+    const safeDisplayName = escapeHtml(claim.displayName);
+    const safeFirstName = escapeHtml(firstName);
+
+    // Count completed tasks
+    let completedCount = 0;
+    const totalCount = claim.assignedIssues.length;
+
+    if (currentConfig.githubToken && claim.assignedIssues.length > 0) {
+      let openCount = 0;
+      for (const issueNum of claim.assignedIssues) {
+        try {
+          const res = await githubRequest(
+            "GET",
+            `/repos/${currentConfig.githubRepo}/issues/${issueNum}`,
+            currentConfig.githubToken
+          );
+          if (res.ok) {
+            const issue = (await res.json()) as { state: string };
+            if (issue.state === "open") openCount++;
+          } else {
+            openCount++;
+          }
+        } catch {
+          openCount++;
+        }
+      }
+      completedCount = totalCount - openCount;
+    }
+
+    // 1. Unassign all open issues on GitHub
+    await unassignIssuesFromUser(currentConfig, claim.assignedIssues, claim.githubUsername);
+
+    // 2. Remove claim from KV
+    claimsState.claims.splice(claimIndex, 1);
+    await saveCategoryClaims(env.PROJECTS, currentProjectId, claimsState);
+
+    // 3. Store paused marker
+    const pausedEntry: PausedCategory = {
+      category: claim.category,
+      displayName: claim.displayName,
+      pausedBy: firstName,
+      completedTasks: completedCount,
+      totalTasks: totalCount,
+      pausedAt: new Date().toISOString(),
+    };
+    await addPausedCategory(env.PROJECTS, currentProjectId, pausedEntry);
+
+    // 4. Clear active task
+    await clearActiveTask(env.PROJECTS, telegramId, currentProjectId);
+
+    // 5. Notify team in group chat
+    await sendTelegram(
+      currentConfig.botToken,
+      currentConfig.chatId,
+      `\u{23F8} ${safeDisplayName} paused by ${safeFirstName} (${completedCount}/${totalCount} done) \u{2014} switching to ${escapeHtml(newProjectId)}`,
+      currentConfig.threadId
+    );
+
+    // 6. Notify subscribers
+    await notifySubscribers(
+      env,
+      currentConfig.botToken,
+      "tasks",
+      () =>
+        `\u{1F4CB} <b>${safeDisplayName}</b> is available again!\n` +
+        `Paused by ${safeFirstName} (${completedCount}/${totalCount} done).\n` +
+        `Branch is preserved \u{2014} use \u{1F4CB} Aufgabe nehmen to continue.`,
+      telegramId
+    );
+
+    // --- Switch to new project ---
+    await setActiveProject(env.PROJECTS, telegramId, newProjectId);
+
+    await ctx.editMessageText(
+      `\u{23F8} <b>${safeDisplayName}</b> paused (${completedCount}/${totalCount} done).\n` +
+      `\u{1F4C2} Switched to <b>${escapeHtml(newProjectId)}</b>!`,
+      { parse_mode: "HTML" }
+    );
+
+    // Re-render home screen for the new project
+    await renderHomeScreen(ctx, env, telegramId);
   });
 
   // -------------------------------------------------------------------
@@ -6213,6 +6453,8 @@ export {
   buildIdeaCategoryKeyboard,
   buildIdeaPriorityKeyboard,
   finalizeNewIdea,
+  // Project switcher helper (Issue #53)
+  renderHomeScreen,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
 

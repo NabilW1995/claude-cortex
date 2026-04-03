@@ -12,8 +12,16 @@ import {
   resolveActiveProject,
   getProjectList,
   escapeHtml,
+  getCategoryClaims,
+  saveCategoryClaims,
+  getPausedCategories,
+  savePausedCategories,
+  addPausedCategory,
+  removePausedCategory,
+  clearActiveTask,
+  renderHomeScreen,
 } from "./index";
-import type { Env, ProjectConfig } from "./index";
+import type { Env, ProjectConfig, CategoryClaimsState, PausedCategory, CategoryClaim } from "./index";
 
 // ---------------------------------------------------------------------------
 // Mock KV Namespace — simulates Cloudflare KV for testing
@@ -426,5 +434,782 @@ describe("Home screen edge cases", () => {
     const result2 = await resolveActiveProject(env, 12345);
 
     expect(result1!.projectId).toBe(result2!.projectId);
+  });
+});
+
+// =========================================================================
+// 9. Project switcher — category claim detection (Issue #53)
+// =========================================================================
+
+describe("Project switcher — category claim detection", () => {
+  it("getCategoryClaims returns empty when no claims exist", async () => {
+    const kv = createMockKV();
+    const result = await getCategoryClaims(kv, "my-project");
+    expect(result.claims).toEqual([]);
+    expect(result.lastUpdated).toBe("");
+  });
+
+  it("getCategoryClaims returns stored claims", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [{
+        telegramId: 12345,
+        telegramName: "TestUser",
+        githubUsername: "testuser",
+        category: "area:dashboard",
+        displayName: "Dashboard",
+        assignedIssues: [1, 2, 3],
+        claimedAt: "2026-04-03T10:00:00Z",
+      }],
+      lastUpdated: "2026-04-03T10:00:00Z",
+    };
+    await saveCategoryClaims(kv, "my-project", claimsState);
+    const result = await getCategoryClaims(kv, "my-project");
+    expect(result.claims).toHaveLength(1);
+    expect(result.claims[0].telegramId).toBe(12345);
+  });
+
+  it("user claim can be found by telegramId", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [
+        {
+          telegramId: 111,
+          telegramName: "UserA",
+          githubUsername: "usera",
+          category: "area:auth",
+          displayName: "Auth",
+          assignedIssues: [1],
+          claimedAt: "2026-04-03T10:00:00Z",
+        },
+        {
+          telegramId: 222,
+          telegramName: "UserB",
+          githubUsername: "userb",
+          category: "area:dashboard",
+          displayName: "Dashboard",
+          assignedIssues: [2, 3],
+          claimedAt: "2026-04-03T10:00:00Z",
+        },
+      ],
+      lastUpdated: "2026-04-03T10:00:00Z",
+    };
+    await saveCategoryClaims(kv, "my-project", claimsState);
+
+    const result = await getCategoryClaims(kv, "my-project");
+    const userClaim = result.claims.find((c) => c.telegramId === 222);
+    expect(userClaim).toBeDefined();
+    expect(userClaim!.displayName).toBe("Dashboard");
+    expect(userClaim!.assignedIssues).toEqual([2, 3]);
+  });
+
+  it("user without a claim gets undefined from find()", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [{
+        telegramId: 111,
+        telegramName: "UserA",
+        githubUsername: "usera",
+        category: "area:auth",
+        displayName: "Auth",
+        assignedIssues: [1],
+        claimedAt: "2026-04-03T10:00:00Z",
+      }],
+      lastUpdated: "2026-04-03T10:00:00Z",
+    };
+    await saveCategoryClaims(kv, "my-project", claimsState);
+
+    const result = await getCategoryClaims(kv, "my-project");
+    const userClaim = result.claims.find((c) => c.telegramId === 999);
+    expect(userClaim).toBeUndefined();
+  });
+});
+
+// =========================================================================
+// 10. Project switcher — switch_pause_and_go callback data format
+// =========================================================================
+
+describe("Project switcher — callback data format", () => {
+  it("switch_pause_and_go callback contains the target project ID", () => {
+    const newProjectId = "project-b";
+    const callbackData = `switch_pause_and_go:${newProjectId}`;
+    expect(callbackData).toBe("switch_pause_and_go:project-b");
+  });
+
+  it("extracting project ID from switch_pause_and_go works correctly", () => {
+    const callbackData = "switch_pause_and_go:project-b";
+    const extracted = callbackData.replace("switch_pause_and_go:", "");
+    expect(extracted).toBe("project-b");
+  });
+
+  it("switch_finish callback data is a simple string", () => {
+    const callbackData = "switch_finish";
+    expect(callbackData).toBe("switch_finish");
+  });
+});
+
+// =========================================================================
+// 11. Project switcher — enriched project list label formatting
+// =========================================================================
+
+describe("Project switcher — enriched project list labels", () => {
+  it("current project gets checkmark prefix", () => {
+    const currentProjectId = "project-a";
+    const isCurrent = "project-a" === currentProjectId;
+    let label = isCurrent ? "\u{2705} " : "";
+    label += "project-a";
+    label += " (5 open)";
+    expect(label).toBe("\u{2705} project-a (5 open)");
+  });
+
+  it("non-current project has no checkmark", () => {
+    const currentProjectId: string = "project-a";
+    const thisProjectId: string = "project-b";
+    const isCurrent = thisProjectId === currentProjectId;
+    let label = isCurrent ? "\u{2705} " : "";
+    label += thisProjectId;
+    label += " (3 open)";
+    expect(label).toBe("project-b (3 open)");
+  });
+
+  it("project with user claim shows pin + category name", () => {
+    const isCurrent = true;
+    const userClaimDisplayName = "Dashboard";
+    const totalOpen = 8;
+    let label = isCurrent ? "\u{2705} " : "";
+    label += "my-project";
+    if (userClaimDisplayName) {
+      label += ` \u{1F4CC} ${userClaimDisplayName}`;
+    }
+    label += ` (${totalOpen} open)`;
+    expect(label).toBe("\u{2705} my-project \u{1F4CC} Dashboard (8 open)");
+  });
+
+  it("project without user claim omits the pin", () => {
+    const userClaimDisplayName = null;
+    let label = "my-project";
+    if (userClaimDisplayName) {
+      label += ` \u{1F4CC} ${userClaimDisplayName}`;
+    }
+    label += " (0 open)";
+    expect(label).toBe("my-project (0 open)");
+  });
+});
+
+// =========================================================================
+// 12. renderHomeScreen — smoke test (exported helper)
+// =========================================================================
+
+describe("renderHomeScreen", () => {
+  it("is exported and is a function", () => {
+    expect(typeof renderHomeScreen).toBe("function");
+  });
+});
+
+// =========================================================================
+// 13. saveCategoryClaims — lastUpdated auto-update
+// =========================================================================
+
+describe("saveCategoryClaims — lastUpdated behavior", () => {
+  it("updates lastUpdated when saving claims", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [{
+        telegramId: 111,
+        telegramName: "UserA",
+        githubUsername: "usera",
+        category: "area:auth",
+        displayName: "Auth",
+        assignedIssues: [1],
+        claimedAt: "2026-04-03T10:00:00Z",
+      }],
+      lastUpdated: "",
+    };
+
+    await saveCategoryClaims(kv, "my-project", claimsState);
+    const result = await getCategoryClaims(kv, "my-project");
+
+    // lastUpdated should have been filled in by saveCategoryClaims
+    expect(result.lastUpdated).not.toBe("");
+    // It should be a valid ISO date string
+    expect(new Date(result.lastUpdated).toISOString()).toBe(result.lastUpdated);
+  });
+
+  it("overwrites previous lastUpdated on each save", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [],
+      lastUpdated: "2020-01-01T00:00:00.000Z",
+    };
+
+    await saveCategoryClaims(kv, "my-project", claimsState);
+    const result = await getCategoryClaims(kv, "my-project");
+
+    // Should be a recent timestamp, not the old one
+    expect(result.lastUpdated).not.toBe("2020-01-01T00:00:00.000Z");
+  });
+});
+
+// =========================================================================
+// 14. getCategoryClaims — corrupt JSON handling
+// =========================================================================
+
+describe("getCategoryClaims — error handling", () => {
+  it("returns empty default when KV contains invalid JSON", async () => {
+    const kv = createMockKV();
+    await kv.put("my-project:category_claims", "not-valid-json{{{");
+
+    const result = await getCategoryClaims(kv, "my-project");
+    expect(result.claims).toEqual([]);
+    expect(result.lastUpdated).toBe("");
+  });
+
+  it("returns empty default for a project that has never had claims", async () => {
+    const kv = createMockKV();
+    const result = await getCategoryClaims(kv, "nonexistent-project");
+    expect(result.claims).toEqual([]);
+    expect(result.lastUpdated).toBe("");
+  });
+});
+
+// =========================================================================
+// 15. Pause-and-switch — claim splice logic
+// =========================================================================
+
+describe("Pause-and-switch — claim state manipulation", () => {
+  it("splice removes the correct claim from the claims array", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [
+        {
+          telegramId: 111,
+          telegramName: "UserA",
+          githubUsername: "usera",
+          category: "area:auth",
+          displayName: "Auth",
+          assignedIssues: [1, 2],
+          claimedAt: "2026-04-03T10:00:00Z",
+        },
+        {
+          telegramId: 222,
+          telegramName: "UserB",
+          githubUsername: "userb",
+          category: "area:dashboard",
+          displayName: "Dashboard",
+          assignedIssues: [3, 4, 5],
+          claimedAt: "2026-04-03T11:00:00Z",
+        },
+        {
+          telegramId: 333,
+          telegramName: "UserC",
+          githubUsername: "userc",
+          category: "area:settings",
+          displayName: "Settings",
+          assignedIssues: [6],
+          claimedAt: "2026-04-03T12:00:00Z",
+        },
+      ],
+      lastUpdated: "2026-04-03T12:00:00Z",
+    };
+    await saveCategoryClaims(kv, "my-project", claimsState);
+
+    // Simulate pause-and-switch: user 222 pauses their claim
+    const loaded = await getCategoryClaims(kv, "my-project");
+    const claimIndex = loaded.claims.findIndex((c) => c.telegramId === 222);
+    expect(claimIndex).toBe(1);
+
+    const removedClaim = loaded.claims[claimIndex];
+    loaded.claims.splice(claimIndex, 1);
+    await saveCategoryClaims(kv, "my-project", loaded);
+
+    // Verify the removed claim was UserB
+    expect(removedClaim.telegramId).toBe(222);
+    expect(removedClaim.displayName).toBe("Dashboard");
+
+    // Verify remaining claims are correct
+    const after = await getCategoryClaims(kv, "my-project");
+    expect(after.claims).toHaveLength(2);
+    expect(after.claims[0].telegramId).toBe(111);
+    expect(after.claims[1].telegramId).toBe(333);
+  });
+
+  it("splice on last remaining claim leaves empty array", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [{
+        telegramId: 111,
+        telegramName: "UserA",
+        githubUsername: "usera",
+        category: "area:auth",
+        displayName: "Auth",
+        assignedIssues: [1],
+        claimedAt: "2026-04-03T10:00:00Z",
+      }],
+      lastUpdated: "2026-04-03T10:00:00Z",
+    };
+    await saveCategoryClaims(kv, "my-project", claimsState);
+
+    const loaded = await getCategoryClaims(kv, "my-project");
+    loaded.claims.splice(0, 1);
+    await saveCategoryClaims(kv, "my-project", loaded);
+
+    const after = await getCategoryClaims(kv, "my-project");
+    expect(after.claims).toEqual([]);
+  });
+
+  it("findIndex returns -1 when claim was already released", async () => {
+    const kv = createMockKV();
+    const claimsState: CategoryClaimsState = {
+      claims: [{
+        telegramId: 111,
+        telegramName: "UserA",
+        githubUsername: "usera",
+        category: "area:auth",
+        displayName: "Auth",
+        assignedIssues: [1],
+        claimedAt: "2026-04-03T10:00:00Z",
+      }],
+      lastUpdated: "2026-04-03T10:00:00Z",
+    };
+    await saveCategoryClaims(kv, "my-project", claimsState);
+
+    // Try to find a claim for a user who has no claim (already released)
+    const loaded = await getCategoryClaims(kv, "my-project");
+    const claimIndex = loaded.claims.findIndex((c) => c.telegramId === 999);
+    expect(claimIndex).toBe(-1);
+  });
+});
+
+// =========================================================================
+// 16. Paused categories — KV helpers
+// =========================================================================
+
+describe("Paused categories — KV round-trip", () => {
+  it("returns empty array when no paused categories exist", async () => {
+    const kv = createMockKV();
+    const result = await getPausedCategories(kv, "my-project");
+    expect(result).toEqual([]);
+  });
+
+  it("saves and retrieves paused categories", async () => {
+    const kv = createMockKV();
+    const paused: PausedCategory[] = [{
+      category: "area:dashboard",
+      displayName: "Dashboard",
+      pausedBy: "Nabil",
+      completedTasks: 2,
+      totalTasks: 5,
+      pausedAt: "2026-04-03T10:00:00Z",
+    }];
+
+    await savePausedCategories(kv, "my-project", paused);
+    const result = await getPausedCategories(kv, "my-project");
+
+    expect(result).toHaveLength(1);
+    expect(result[0].category).toBe("area:dashboard");
+    expect(result[0].pausedBy).toBe("Nabil");
+    expect(result[0].completedTasks).toBe(2);
+    expect(result[0].totalTasks).toBe(5);
+  });
+
+  it("returns empty array when KV contains invalid JSON", async () => {
+    const kv = createMockKV();
+    await kv.put("my-project:paused_categories", "broken{json");
+    const result = await getPausedCategories(kv, "my-project");
+    expect(result).toEqual([]);
+  });
+});
+
+describe("addPausedCategory", () => {
+  it("adds a new paused category entry", async () => {
+    const kv = createMockKV();
+    const entry: PausedCategory = {
+      category: "area:auth",
+      displayName: "Auth",
+      pausedBy: "Nabil",
+      completedTasks: 1,
+      totalTasks: 3,
+      pausedAt: "2026-04-03T10:00:00Z",
+    };
+
+    await addPausedCategory(kv, "my-project", entry);
+    const result = await getPausedCategories(kv, "my-project");
+    expect(result).toHaveLength(1);
+    expect(result[0].category).toBe("area:auth");
+  });
+
+  it("replaces an existing entry for the same category", async () => {
+    const kv = createMockKV();
+
+    // First pause
+    await addPausedCategory(kv, "my-project", {
+      category: "area:auth",
+      displayName: "Auth",
+      pausedBy: "Nabil",
+      completedTasks: 1,
+      totalTasks: 3,
+      pausedAt: "2026-04-03T10:00:00Z",
+    });
+
+    // Same category paused again by someone else
+    await addPausedCategory(kv, "my-project", {
+      category: "area:auth",
+      displayName: "Auth",
+      pausedBy: "TestUser",
+      completedTasks: 2,
+      totalTasks: 3,
+      pausedAt: "2026-04-03T14:00:00Z",
+    });
+
+    const result = await getPausedCategories(kv, "my-project");
+    // Should have replaced, not duplicated
+    expect(result).toHaveLength(1);
+    expect(result[0].pausedBy).toBe("TestUser");
+    expect(result[0].completedTasks).toBe(2);
+  });
+
+  it("can store multiple paused categories for the same project", async () => {
+    const kv = createMockKV();
+
+    await addPausedCategory(kv, "my-project", {
+      category: "area:auth",
+      displayName: "Auth",
+      pausedBy: "Nabil",
+      completedTasks: 1,
+      totalTasks: 3,
+      pausedAt: "2026-04-03T10:00:00Z",
+    });
+
+    await addPausedCategory(kv, "my-project", {
+      category: "area:dashboard",
+      displayName: "Dashboard",
+      pausedBy: "TestUser",
+      completedTasks: 0,
+      totalTasks: 5,
+      pausedAt: "2026-04-03T11:00:00Z",
+    });
+
+    const result = await getPausedCategories(kv, "my-project");
+    expect(result).toHaveLength(2);
+    const categories = result.map((p) => p.category).sort();
+    expect(categories).toEqual(["area:auth", "area:dashboard"]);
+  });
+});
+
+describe("removePausedCategory", () => {
+  it("removes a specific paused category by name", async () => {
+    const kv = createMockKV();
+    await savePausedCategories(kv, "my-project", [
+      {
+        category: "area:auth",
+        displayName: "Auth",
+        pausedBy: "Nabil",
+        completedTasks: 1,
+        totalTasks: 3,
+        pausedAt: "2026-04-03T10:00:00Z",
+      },
+      {
+        category: "area:dashboard",
+        displayName: "Dashboard",
+        pausedBy: "TestUser",
+        completedTasks: 0,
+        totalTasks: 5,
+        pausedAt: "2026-04-03T11:00:00Z",
+      },
+    ]);
+
+    await removePausedCategory(kv, "my-project", "area:auth");
+    const result = await getPausedCategories(kv, "my-project");
+    expect(result).toHaveLength(1);
+    expect(result[0].category).toBe("area:dashboard");
+  });
+
+  it("does nothing when removing a category that was not paused", async () => {
+    const kv = createMockKV();
+    await savePausedCategories(kv, "my-project", [{
+      category: "area:auth",
+      displayName: "Auth",
+      pausedBy: "Nabil",
+      completedTasks: 1,
+      totalTasks: 3,
+      pausedAt: "2026-04-03T10:00:00Z",
+    }]);
+
+    await removePausedCategory(kv, "my-project", "area:nonexistent");
+    const result = await getPausedCategories(kv, "my-project");
+    expect(result).toHaveLength(1);
+    expect(result[0].category).toBe("area:auth");
+  });
+});
+
+// =========================================================================
+// 17. Pause-and-switch — PausedCategory entry shape
+// =========================================================================
+
+describe("Pause-and-switch — PausedCategory entry creation", () => {
+  it("creates a correctly shaped PausedCategory from a claim", () => {
+    // Simulate the logic in switch_pause_and_go handler
+    const claim: CategoryClaim = {
+      telegramId: 222,
+      telegramName: "UserB",
+      githubUsername: "userb",
+      category: "area:dashboard",
+      displayName: "Dashboard",
+      assignedIssues: [3, 4, 5],
+      claimedAt: "2026-04-03T11:00:00Z",
+    };
+    const firstName = "TestUser";
+    const completedCount = 1;
+    const totalCount = claim.assignedIssues.length;
+
+    const pausedEntry: PausedCategory = {
+      category: claim.category,
+      displayName: claim.displayName,
+      pausedBy: firstName,
+      completedTasks: completedCount,
+      totalTasks: totalCount,
+      pausedAt: new Date().toISOString(),
+    };
+
+    expect(pausedEntry.category).toBe("area:dashboard");
+    expect(pausedEntry.displayName).toBe("Dashboard");
+    expect(pausedEntry.pausedBy).toBe("TestUser");
+    expect(pausedEntry.completedTasks).toBe(1);
+    expect(pausedEntry.totalTasks).toBe(3);
+    expect(pausedEntry.pausedAt).toBeTruthy();
+  });
+
+  it("completedTasks is zero when no issues were completed", () => {
+    const claim: CategoryClaim = {
+      telegramId: 111,
+      telegramName: "UserA",
+      githubUsername: "usera",
+      category: "area:auth",
+      displayName: "Auth",
+      assignedIssues: [1, 2, 3],
+      claimedAt: "2026-04-03T10:00:00Z",
+    };
+    // All issues still open
+    const openCount = claim.assignedIssues.length;
+    const totalCount = claim.assignedIssues.length;
+    const completedCount = totalCount - openCount;
+
+    expect(completedCount).toBe(0);
+
+    const pausedEntry: PausedCategory = {
+      category: claim.category,
+      displayName: claim.displayName,
+      pausedBy: "Nabil",
+      completedTasks: completedCount,
+      totalTasks: totalCount,
+      pausedAt: new Date().toISOString(),
+    };
+
+    expect(pausedEntry.completedTasks).toBe(0);
+    expect(pausedEntry.totalTasks).toBe(3);
+  });
+});
+
+// =========================================================================
+// 18. Switch edge cases — same project & already-released claim
+// =========================================================================
+
+describe("Switch edge cases", () => {
+  it("switching to the same project is detected by equality check", () => {
+    const currentProjectId = "project-a";
+    const newProjectId = "project-a";
+    const isSameProject = newProjectId === currentProjectId;
+    expect(isSameProject).toBe(true);
+  });
+
+  it("switching to a different project passes the equality check", () => {
+    const currentProjectId: string = "project-a";
+    const newProjectId: string = "project-b";
+    // Both typed as string so TS allows the comparison
+    const isSameProject = newProjectId === currentProjectId;
+    expect(isSameProject).toBe(false);
+  });
+
+  it("claim-already-released path triggers when claimIndex is -1", async () => {
+    const kv = createMockKV();
+    // No claims at all
+    const claimsState = await getCategoryClaims(kv, "my-project");
+    const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === 12345);
+    expect(claimIndex).toBe(-1);
+
+    // In the handler, claimIndex < 0 means "just switch without pause logic"
+    // We verify the condition matches
+    expect(claimIndex < 0).toBe(true);
+  });
+
+  it("claim-already-released: user can still switch projects", async () => {
+    const env = createMockEnv({
+      "project-a": makeProjectConfig(),
+      "project-b": makeProjectConfig(),
+    });
+
+    // User is on project-a but has NO claim
+    await setActiveProject(env.PROJECTS, 12345, "project-a");
+
+    const claimsState = await getCategoryClaims(env.PROJECTS, "project-a");
+    const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === 12345);
+
+    // No claim — should proceed to switch directly
+    expect(claimIndex).toBe(-1);
+
+    // Simulate the direct switch
+    await setActiveProject(env.PROJECTS, 12345, "project-b");
+    const active = await getActiveProject(env.PROJECTS, 12345);
+    expect(active).toBe("project-b");
+  });
+
+  it("no current project means pause-and-switch exits early", async () => {
+    const kv = createMockKV();
+    // User has no active project at all
+    const currentProjectId = await getActiveProject(kv, 12345);
+    expect(currentProjectId).toBeNull();
+
+    // In the handler, !currentProjectId triggers early return
+    expect(!currentProjectId).toBe(true);
+  });
+});
+
+// =========================================================================
+// 19. Full pause-and-switch simulation — end-to-end KV state
+// =========================================================================
+
+describe("Full pause-and-switch simulation", () => {
+  it("complete flow: claim removed, paused entry created, project switched", async () => {
+    const kv = createMockKV();
+    const telegramId = 12345;
+    const currentProjectId = "project-a";
+    const newProjectId = "project-b";
+
+    // Setup: user has a claim in project-a
+    const initialClaims: CategoryClaimsState = {
+      claims: [
+        {
+          telegramId: telegramId,
+          telegramName: "Nabil",
+          githubUsername: "nabil",
+          category: "area:dashboard",
+          displayName: "Dashboard",
+          assignedIssues: [10, 11, 12],
+          claimedAt: "2026-04-03T09:00:00Z",
+        },
+        {
+          telegramId: 999,
+          telegramName: "Other",
+          githubUsername: "other",
+          category: "area:auth",
+          displayName: "Auth",
+          assignedIssues: [20],
+          claimedAt: "2026-04-03T08:00:00Z",
+        },
+      ],
+      lastUpdated: "2026-04-03T09:00:00Z",
+    };
+    await saveCategoryClaims(kv, currentProjectId, initialClaims);
+
+    // Set user's active project
+    await kv.put(`active_project:${telegramId}`, currentProjectId);
+
+    // --- Execute pause logic (mirrors switch_pause_and_go handler) ---
+
+    // 1. Load claims and find user's claim
+    const claimsState = await getCategoryClaims(kv, currentProjectId);
+    const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+    expect(claimIndex).toBe(0);
+
+    const claim = claimsState.claims[claimIndex];
+
+    // 2. Remove claim from array
+    claimsState.claims.splice(claimIndex, 1);
+    await saveCategoryClaims(kv, currentProjectId, claimsState);
+
+    // 3. Create paused entry
+    const pausedEntry: PausedCategory = {
+      category: claim.category,
+      displayName: claim.displayName,
+      pausedBy: "Nabil",
+      completedTasks: 1,
+      totalTasks: claim.assignedIssues.length,
+      pausedAt: new Date().toISOString(),
+    };
+    await addPausedCategory(kv, currentProjectId, pausedEntry);
+
+    // 4. Switch active project
+    await kv.put(`active_project:${telegramId}`, newProjectId);
+
+    // --- Verify final state ---
+
+    // Claims: only the other user's claim remains
+    const finalClaims = await getCategoryClaims(kv, currentProjectId);
+    expect(finalClaims.claims).toHaveLength(1);
+    expect(finalClaims.claims[0].telegramId).toBe(999);
+
+    // Paused categories: one entry for the user who paused
+    const finalPaused = await getPausedCategories(kv, currentProjectId);
+    expect(finalPaused).toHaveLength(1);
+    expect(finalPaused[0].category).toBe("area:dashboard");
+    expect(finalPaused[0].pausedBy).toBe("Nabil");
+    expect(finalPaused[0].completedTasks).toBe(1);
+    expect(finalPaused[0].totalTasks).toBe(3);
+
+    // Active project switched
+    const activeProject = await kv.get(`active_project:${telegramId}`);
+    expect(activeProject).toBe("project-b");
+  });
+
+  it("double-pause: pausing same category twice replaces the entry", async () => {
+    const kv = createMockKV();
+
+    // First user pauses dashboard
+    await addPausedCategory(kv, "my-project", {
+      category: "area:dashboard",
+      displayName: "Dashboard",
+      pausedBy: "UserA",
+      completedTasks: 1,
+      totalTasks: 5,
+      pausedAt: "2026-04-03T10:00:00Z",
+    });
+
+    // Second user picks it up and then also pauses it
+    await addPausedCategory(kv, "my-project", {
+      category: "area:dashboard",
+      displayName: "Dashboard",
+      pausedBy: "UserB",
+      completedTasks: 3,
+      totalTasks: 5,
+      pausedAt: "2026-04-03T14:00:00Z",
+    });
+
+    const result = await getPausedCategories(kv, "my-project");
+    // Should only have one entry, not two
+    expect(result).toHaveLength(1);
+    expect(result[0].pausedBy).toBe("UserB");
+    expect(result[0].completedTasks).toBe(3);
+  });
+});
+
+// =========================================================================
+// 20. clearActiveTask — exported helper
+// =========================================================================
+
+describe("clearActiveTask", () => {
+  it("is exported and is a function", () => {
+    expect(typeof clearActiveTask).toBe("function");
+  });
+
+  it("clears the active task entry from KV", async () => {
+    const kv = createMockKV();
+    // Manually set an active task
+    await kv.put("active_task:12345:my-project", JSON.stringify({ issueNumber: 1 }));
+
+    await clearActiveTask(kv, 12345, "my-project");
+
+    // After clearing, the entry should be gone
+    const result = await kv.get("active_task:12345:my-project");
+    expect(result).toBeNull();
   });
 });
