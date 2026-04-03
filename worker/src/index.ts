@@ -178,6 +178,27 @@ interface RegisterPayload {
 }
 
 // ---------------------------------------------------------------------------
+// Priority system — 4-level labels used on GitHub issues
+// ---------------------------------------------------------------------------
+
+/** Maps GitHub priority label names to numeric sort weight (lower = higher priority). */
+const PRIORITY_LEVELS: Record<string, number> = {
+  "priority:blocker": 0,
+  "priority:high": 1,
+  "priority:medium": 2,
+  "priority:low": 3,
+};
+
+const PRIORITY_EMOJIS: Record<string, string> = {
+  "priority:blocker": "\u{1F6A8}",
+  "priority:high": "\u{1F534}",
+  "priority:medium": "\u{1F7E1}",
+  "priority:low": "\u{26AA}",
+};
+
+const PRIORITY_DEFAULT = "priority:medium";
+
+// ---------------------------------------------------------------------------
 // GitHub webhook signature verification (HMAC-SHA256)
 // ---------------------------------------------------------------------------
 
@@ -635,6 +656,76 @@ async function unassignIssuesFromUser(
   }
 
   return { success, failed };
+}
+
+// ---------------------------------------------------------------------------
+// Priority helpers — extract, sort, and check blocker status
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the priority label from an issue's labels array.
+ * Returns the label name (e.g. "priority:high") or the default "priority:medium".
+ */
+function getIssuePriority(labels: Array<{ name: string }>): string {
+  const priorityLabel = labels.find((l) => l.name.startsWith("priority:"));
+  return priorityLabel?.name || PRIORITY_DEFAULT;
+}
+
+/**
+ * Get the numeric sort weight for a priority label (lower = higher priority).
+ */
+function getPrioritySortWeight(priority: string): number {
+  return PRIORITY_LEVELS[priority] ?? PRIORITY_LEVELS[PRIORITY_DEFAULT];
+}
+
+/**
+ * Sort issues by priority (blocker first, then high, medium, low).
+ * Issues without a priority label are treated as medium.
+ */
+function sortByPriority<T extends { labels: Array<{ name: string }> }>(issues: T[]): T[] {
+  return [...issues].sort((a, b) => {
+    const pa = getPrioritySortWeight(getIssuePriority(a.labels));
+    const pb = getPrioritySortWeight(getIssuePriority(b.labels));
+    return pa - pb;
+  });
+}
+
+/**
+ * Check whether any open issue in a project has the priority:blocker label.
+ * Returns the blocker issue(s) if found, empty array otherwise.
+ */
+async function isBlockerActive(
+  project: ProjectConfig
+): Promise<Array<{ number: number; title: string }>> {
+  if (!project.githubToken) return [];
+
+  const res = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&labels=priority:blocker&per_page=100`,
+    project.githubToken
+  );
+
+  if (!res.ok) return [];
+
+  const issues = (await res.json()) as Array<{
+    number: number;
+    title: string;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out PRs (GitHub API returns PRs as issues)
+  return issues
+    .filter((i) => !i.pull_request)
+    .map((i) => ({ number: i.number, title: i.title }));
+}
+
+/**
+ * Format a priority label as a human-readable emoji + text.
+ */
+function formatPriority(priority: string): string {
+  const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+  const level = priority.replace("priority:", "").toUpperCase();
+  return `${emoji} ${level}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,6 +1817,7 @@ async function handleProjectBoard(
     number: number;
     title: string;
     assignee?: { login: string } | null;
+    labels: Array<{ name: string }>;
     pull_request?: unknown;
   }>;
 
@@ -1737,18 +1829,33 @@ async function handleProjectBoard(
       `\u{1F4CB} <b>${projectId}</b> \u{2014} Board\n\u{2501}${"\u{2501}".repeat(15)}\n\nNo open issues.`;
   }
 
-  const assigned = realIssues.filter((i) => i.assignee);
-  const unassigned = realIssues.filter((i) => !i.assignee);
+  // Check for active blockers — show prominently at top
+  const blockers = realIssues.filter((i) =>
+    i.labels.some((l) => l.name === "priority:blocker")
+  );
+
+  const assigned = sortByPriority(realIssues.filter((i) => i.assignee));
+  const unassigned = sortByPriority(realIssues.filter((i) => !i.assignee));
 
   const lines: string[] = [
     `\u{1F4CB} <b>${projectId}</b> \u{2014} Board`,
     "\u{2501}".repeat(16),
   ];
 
+  // Blocker banner — shown when any blocker issue exists
+  if (blockers.length > 0) {
+    lines.push("");
+    lines.push("\u{1F6A8} <b>BLOCKER</b> \u{2014} category claims paused:");
+    for (const b of blockers) {
+      lines.push(`  \u{2022} #${b.number} ${escapeHtml(b.title)}`);
+    }
+  }
+
   if (unassigned.length > 0) {
     lines.push(`\nOpen (${unassigned.length}):`);
     for (const issue of unassigned.slice(0, 15)) {
-      lines.push(`\u{2022} #${issue.number} ${issue.title} [open]`);
+      const pri = formatPriority(getIssuePriority(issue.labels));
+      lines.push(`${pri} #${issue.number} ${escapeHtml(issue.title)} [open]`);
     }
     if (unassigned.length > 15) {
       lines.push(`  ... and ${unassigned.length - 15} more`);
@@ -1758,8 +1865,9 @@ async function handleProjectBoard(
   if (assigned.length > 0) {
     lines.push(`\nIn Progress (${assigned.length}):`);
     for (const issue of assigned.slice(0, 15)) {
+      const pri = formatPriority(getIssuePriority(issue.labels));
       lines.push(
-        `\u{2022} #${issue.number} ${issue.title} [${issue.assignee!.login}]`
+        `${pri} #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(issue.assignee!.login)}]`
       );
     }
     if (assigned.length > 15) {
@@ -1812,16 +1920,29 @@ async function handleProjectMyTasks(
   const issues = (await response.json()) as Array<{
     number: number;
     title: string;
+    labels: Array<{ name: string }>;
     pull_request?: unknown;
   }>;
 
-  // Filter out pull requests
-  const myIssues = issues.filter((i) => !i.pull_request);
+  // Filter out pull requests, then sort by priority
+  const myIssues = sortByPriority(issues.filter((i) => !i.pull_request));
 
+  // Check for active blockers — warn the user
+  const blockers = await isBlockerActive(project);
+
+  const safeFirstName = escapeHtml(callerFirstName);
   const lines: string[] = [
-    `\u{1F4CC} <b>Your Tasks, ${callerFirstName}</b>`,
+    `\u{1F4CC} <b>Your Tasks, ${safeFirstName}</b>`,
     "\u{2501}".repeat(16),
   ];
+
+  if (blockers.length > 0) {
+    lines.push("");
+    lines.push("\u{1F6A8} <b>BLOCKER active</b> \u{2014} focus on these first:");
+    for (const b of blockers) {
+      lines.push(`  \u{2022} #${b.number} ${escapeHtml(b.title)}`);
+    }
+  }
 
   if (myIssues.length === 0) {
     lines.push("\nNo tasks assigned to you.");
@@ -1829,7 +1950,8 @@ async function handleProjectMyTasks(
   } else {
     lines.push(`\nAssigned to you (${myIssues.length}):`);
     for (const issue of myIssues) {
-      lines.push(`\u{2022} #${issue.number} ${issue.title}`);
+      const pri = formatPriority(getIssuePriority(issue.labels));
+      lines.push(`${pri} #${issue.number} ${escapeHtml(issue.title)}`);
     }
   }
 
@@ -1994,6 +2116,21 @@ async function handleCategoryAssign(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
+  // Block category claims when a blocker issue is active
+  const blockers = await isBlockerActive(project);
+  if (blockers.length > 0) {
+    const blockerList = blockers
+      .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
+      .join("\n");
+    await ctx.editMessageText(
+      `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
+        `The following blocker issue(s) must be resolved first:\n${blockerList}\n\n` +
+        "Category claims will be available again once all blockers are closed.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
   // Check if user already has a category claimed
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
   const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
@@ -2144,6 +2281,21 @@ async function handleCategoryConfirm(
   const telegramId = ctx.from?.id;
   const firstName = ctx.from?.first_name || "Unknown";
   if (!telegramId) return;
+
+  // Block confirmation when a blocker issue appeared between pick and confirm
+  const blockers = await isBlockerActive(project);
+  if (blockers.length > 0) {
+    const blockerList = blockers
+      .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
+      .join("\n");
+    await ctx.editMessageText(
+      `\u{1F6A8} <b>Blocker active \u{2014} claims paused</b>\n\n` +
+        `A blocker appeared while you were choosing:\n${blockerList}\n\n` +
+        "Try again once all blockers are closed.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
 
   // Race-condition protection: re-read KV before confirming
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
@@ -4061,10 +4213,37 @@ async function handleGitHubIssues(
       eventType = "issues.opened";
       break;
 
-    case "closed":
+    case "closed": {
       message = `\u{2705} Issue #${issue.number} closed by @${sender.login}`;
       eventType = "issues.closed";
+
+      // If a blocker issue was closed, notify all team members that work can resume
+      const closedIssueLabels = (issue.labels || []).map((l) => l.name);
+      if (closedIssueLabels.includes("priority:blocker")) {
+        const blockerMembers = await getTeamMembers(env.PROJECTS);
+        for (const bMember of blockerMembers) {
+          // Skip the person who closed the blocker
+          if (bMember.github === sender.login) continue;
+          const bPrefs = await getUserPreferences(env.PROJECTS, bMember.telegram_id);
+          if (!bPrefs.dm_chat_id) continue;
+          const bDnd = await isUserDND(env.PROJECTS, bMember.telegram_id);
+          if (bDnd) continue;
+
+          const dmStatus = await sendDM(
+            project.botToken,
+            bPrefs.dm_chat_id,
+            `\u{1F7E2} <b>Blocker resolved!</b>\n\n` +
+              `Issue #${issue.number}: "${escapeHtml(issue.title)}" was closed by @${escapeHtml(sender.login)}.\n\n` +
+              "Category claims are available again. Use /start to pick a task!"
+          );
+          if (dmStatus === "blocked") {
+            bPrefs.dm_chat_id = null;
+            await saveUserPreferences(env.PROJECTS, bMember.telegram_id, bPrefs);
+          }
+        }
+      }
       break;
+    }
 
     case "assigned": {
       // Send assignment DM directly to the assignee (tasks = always on)
@@ -4741,6 +4920,15 @@ export {
   setActiveProject,
   resolveActiveProject,
   getProjectList,
+  // Priority system helpers
+  getIssuePriority,
+  getPrioritySortWeight,
+  sortByPriority,
+  isBlockerActive,
+  formatPriority,
+  PRIORITY_LEVELS,
+  PRIORITY_EMOJIS,
+  PRIORITY_DEFAULT,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig };
 
