@@ -5375,6 +5375,47 @@ function createBot(
     await ctx.reply(`\u{1F515} DND enabled until ${timeStr}. Use /dnd off to disable.`);
   });
 
+  // Admin command: reset stale category claims for the calling user
+  bot.command("reset", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.reply("No active project found.");
+        return;
+      }
+
+      const claimsState = await getCategoryClaims(env.PROJECTS, active.projectId);
+      const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      if (!myClaim) {
+        await ctx.reply("You have no active category claim. You can use 'Aufgabe nehmen' to claim one.");
+        return;
+      }
+
+      // Remove the claim
+      claimsState.claims = claimsState.claims.filter((c) => c.telegramId !== telegramId);
+      claimsState.lastUpdated = new Date().toISOString();
+      await saveCategoryClaims(env.PROJECTS, active.projectId, claimsState);
+
+      // Stop timer if running
+      try {
+        await stopTimer(env.PROJECTS, telegramId, active.projectId);
+      } catch {}
+
+      await ctx.reply(
+        `\u{2705} Category claim <b>${escapeHtml(myClaim.displayName)}</b> released.\n\n` +
+        "You can now use 'Aufgabe nehmen' to claim a new category.",
+        { parse_mode: "HTML" }
+      );
+    } catch (err) {
+      console.error("reset error:", err);
+      await ctx.reply("Could not reset. Try again.");
+    }
+  });
+
   bot.command("register", async (ctx: Context) => {
     const githubUsername = (ctx.match as string).trim();
 
