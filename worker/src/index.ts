@@ -2403,6 +2403,193 @@ async function handleMeineAufgaben(
   return { text: lines.join("\n"), keyboard: kb };
 }
 
+// ---------------------------------------------------------------------------
+// Team Board — overview of all members, categories, and progress
+// ---------------------------------------------------------------------------
+
+/**
+ * Render the Team Board view showing all team members with their current
+ * category assignment, task progress, and branch status across all projects.
+ *
+ * Returns { text, keyboard } so the caller can send or edit the message.
+ */
+async function renderTeamBoard(
+  env: Env,
+  telegramId: number
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const kb = new InlineKeyboard();
+  const members = await getTeamMembers(env.PROJECTS);
+  const projects = await getProjectList(env);
+
+  if (projects.length === 0) {
+    return {
+      text: "👥 <b>Team Board</b>\n━━━━━━━━━━━━━━━━\n\nNo projects configured yet.",
+      keyboard: kb,
+    };
+  }
+
+  const lines: string[] = [
+    "👥 <b>Team Board</b>",
+    "━".repeat(16),
+  ];
+
+  for (const { id: projectId, config: project } of projects) {
+    lines.push("");
+    lines.push(`📂 <b>${escapeHtml(projectId)}</b>`);
+    lines.push("─".repeat(14));
+
+    // Fetch all data for this project in parallel where possible
+    const [claimsState, pausedCategories, openIssuesByCategory, openPRs] =
+      await Promise.all([
+        getCategoryClaims(env.PROJECTS, projectId),
+        getPausedCategories(env.PROJECTS, projectId),
+        project.githubToken
+          ? fetchOpenIssuesByCategory(project, "area:")
+          : Promise.resolve(new Map() as Map<string, Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }> }>>),
+        project.githubToken
+          ? githubRequest(
+              "GET",
+              `/repos/${project.githubRepo}/pulls?state=open&per_page=30`,
+              project.githubToken
+            )
+              .then(async (res) => {
+                if (!res.ok) return [];
+                return (await res.json()) as Array<{
+                  number: number;
+                  title: string;
+                  head: { ref: string };
+                  user: { login: string };
+                }>;
+              })
+              .catch(() => [] as Array<{ number: number; title: string; head: { ref: string }; user: { login: string } }>)
+          : Promise.resolve([] as Array<{ number: number; title: string; head: { ref: string }; user: { login: string } }>),
+      ]);
+
+    // Build a set of open issue numbers for progress calculation
+    const allOpenIssueNumbers = new Set<number>();
+    for (const issues of openIssuesByCategory.values()) {
+      for (const issue of issues) {
+        allOpenIssueNumbers.add(issue.number);
+      }
+    }
+
+    // Track which categories are claimed or paused so we know which are free
+    const claimedCategories = new Set(
+      claimsState.claims.map((c) => c.category)
+    );
+    const pausedCategoryNames = new Set(
+      pausedCategories.map((p) => p.category)
+    );
+
+    // ── Claimed categories ──
+    if (claimsState.claims.length > 0) {
+      lines.push("");
+      for (const claim of claimsState.claims) {
+        const color = getUserColor(members, claim.telegramId);
+        const safeName = escapeHtml(claim.telegramName);
+        const safeDisplay = escapeHtml(claim.displayName);
+
+        // Task progress: assigned issues that are no longer open = done
+        const totalAssigned = claim.assignedIssues.length;
+        const stillOpen = claim.assignedIssues.filter((n) =>
+          allOpenIssueNumbers.has(n)
+        ).length;
+        const done = totalAssigned - stillOpen;
+        const progressText =
+          totalAssigned > 0 ? `${done}/${totalAssigned} done` : "0 issues";
+
+        // Branch status: check for a matching open PR
+        const categorySlug = claim.category
+          .replace("area:", "")
+          .toLowerCase();
+        const matchingPR = openPRs.find((pr) =>
+          pr.head.ref.includes(categorySlug)
+        );
+        let branchStatus = "in progress";
+        if (matchingPR) {
+          branchStatus = "PR open";
+        }
+
+        lines.push(
+          `${color} <b>${safeDisplay}</b> → ${safeName}`
+        );
+        lines.push(
+          `    📊 ${progressText} · ${branchStatus}`
+        );
+
+        // Show tasks within this category sorted by priority
+        const categoryIssues = openIssuesByCategory.get(claim.category);
+        if (categoryIssues && categoryIssues.length > 0) {
+          const sorted = sortByPriority(categoryIssues);
+          for (const issue of sorted) {
+            const priority = getIssuePriority(issue.labels);
+            const emoji =
+              PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+            lines.push(
+              `    ${emoji} #${issue.number} ${escapeHtml(issue.title)}`
+            );
+          }
+        }
+      }
+    }
+
+    // ── Paused categories ──
+    if (pausedCategories.length > 0) {
+      lines.push("");
+      for (const paused of pausedCategories) {
+        const safePausedBy = escapeHtml(paused.pausedBy);
+        const safeDisplay = escapeHtml(paused.displayName);
+        lines.push(
+          `⏸ <b>${safeDisplay}</b> — paused by ${safePausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`
+        );
+      }
+    }
+
+    // ── Unclaimed categories (not claimed, not paused) ──
+    const unclaimedCategories: Array<{ category: string; issueCount: number }> =
+      [];
+    for (const [category, issues] of openIssuesByCategory.entries()) {
+      if (!claimedCategories.has(category) && !pausedCategoryNames.has(category)) {
+        unclaimedCategories.push({ category, issueCount: issues.length });
+      }
+    }
+
+    if (unclaimedCategories.length > 0) {
+      lines.push("");
+      lines.push("<i>Free categories:</i>");
+      for (const { category, issueCount } of unclaimedCategories) {
+        const displayName = category.replace("area:", "");
+        lines.push(
+          `⬜ ${escapeHtml(displayName)} — free (${issueCount} ${issueCount === 1 ? "issue" : "issues"})`
+        );
+      }
+    }
+
+    // Show "nothing here" if project has no categories at all
+    if (
+      claimsState.claims.length === 0 &&
+      pausedCategories.length === 0 &&
+      unclaimedCategories.length === 0
+    ) {
+      lines.push("");
+      lines.push("<i>No categories found.</i>");
+    }
+  }
+
+  // Footer with timestamp and refresh button
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  lines.push("");
+  lines.push(`🕐 Updated: ${timeStr}`);
+
+  kb.text("🔄 Refresh", "teamboard_refresh");
+
+  return { text: lines.join("\n"), keyboard: kb };
+}
+
 /**
  * Handle "Open PRs" button — show open pull requests with status info.
  * Uses GitHub API to fetch PRs and shows author, reviewer, and CI status.
@@ -4312,6 +4499,26 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // Team Board — Refresh callback
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("teamboard_refresh", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    try {
+      const { text, keyboard } = await renderTeamBoard(env, telegramId);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("teamboard_refresh error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not refresh Team Board." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
   // "Meine Aufgaben" — Pause flow callbacks
   // -------------------------------------------------------------------
 
@@ -4464,7 +4671,18 @@ function createBot(
   });
 
   bot.hears("\u{1F465} Team Board", async (ctx) => {
-    await ctx.reply("\u{1F6A7} <b>Team Board</b> \u{2014} coming soon!", { parse_mode: "HTML" });
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    try {
+      const { text, keyboard } = await renderTeamBoard(env, telegramId);
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("Team Board error:", err);
+      await ctx.reply("⚠️ Could not load the Team Board. Please try again.", {
+        parse_mode: "HTML",
+      });
+    }
   });
 
   bot.hears("\u{1F4A1} Neue Idee", async (ctx) => {
@@ -6455,6 +6673,8 @@ export {
   finalizeNewIdea,
   // Project switcher helper (Issue #53)
   renderHomeScreen,
+  // Team Board (Issue #54)
+  renderTeamBoard,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
 
