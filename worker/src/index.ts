@@ -213,6 +213,77 @@ const PRIORITY_EMOJIS: Record<string, string> = {
 const PRIORITY_DEFAULT = "priority:medium";
 
 // ---------------------------------------------------------------------------
+// Help system — central text registry for the help view (foundation for #65)
+// ---------------------------------------------------------------------------
+
+/**
+ * Central registry of all help texts displayed in the bot's help view.
+ * Each key maps to a focused explanation shown via inline keyboard navigation.
+ * All texts use HTML parse_mode and are written in German (matching the bot UI).
+ */
+const HELP_TEXTS = {
+  overview:
+    "\u{2753} <b>Hilfe</b>\n\n" +
+    "<b>Workflow:</b>\n" +
+    "1\u{FE0F}\u{20E3} Kategorie w\u{00E4}hlen (<i>Aufgabe nehmen</i>)\n" +
+    "2\u{FE0F}\u{20E3} Tasks bearbeiten (<i>Meine Aufgaben</i>)\n" +
+    "3\u{FE0F}\u{20E3} Preview erstellen &amp; mergen\n" +
+    "4\u{FE0F}\u{20E3} Nach Merge: pull nicht vergessen!\n\n" +
+    "\u{1F3C6} <b>Golden Rule:</b> Eine Kategorie pro Person = keine Merge-Konflikte!\n\n" +
+    "W\u{00E4}hle ein Thema f\u{00FC}r mehr Details:",
+
+  blocker:
+    "\u{1F6AB} <b>Blocker</b>\n\n" +
+    "Ein Blocker ist ein kritisches Problem, das <b>alle anderen Aufgaben stoppt</b>. " +
+    "Solange ein Blocker offen ist, kann niemand neue Kategorien beanspruchen.\n\n" +
+    "Blocker werden als GitHub-Issue mit dem Label <code>priority:blocker</code> erstellt. " +
+    "Sobald das Issue geschlossen wird, l\u{00E4}uft alles wieder normal weiter.\n\n" +
+    "\u{1F4A1} <b>Tipp:</b> Blocker nur f\u{00FC}r echte Showstopper verwenden \u{2014} " +
+    "nicht f\u{00FC}r normale Bugs.",
+
+  priorities:
+    "\u{1F4CA} <b>Priorit\u{00E4}ten</b>\n\n" +
+    "Es gibt 4 Stufen, von dringend bis niedrig:\n\n" +
+    "\u{1F6A8} <b>Blocker</b> \u{2014} Stoppt alles, muss sofort gel\u{00F6}st werden\n" +
+    "\u{1F534} <b>High</b> \u{2014} Wichtig, sollte als n\u{00E4}chstes bearbeitet werden\n" +
+    "\u{1F7E1} <b>Medium</b> \u{2014} Normaler Task (Standard)\n" +
+    "\u{26AA} <b>Low</b> \u{2014} Kann warten, nice-to-have\n\n" +
+    "Tasks werden automatisch nach Priorit\u{00E4}t sortiert. " +
+    "H\u{00F6}here Priorit\u{00E4}t = weiter oben in der Liste.",
+
+  categories:
+    "\u{1F4C1} <b>Kategorien</b>\n\n" +
+    "Kategorien basieren auf den <code>area:</code>-Labels deiner GitHub-Issues. " +
+    "Jede Person beansprucht <b>genau eine Kategorie</b> \u{2014} das verhindert Merge-Konflikte.\n\n" +
+    "<b>So funktioniert\u{2019}s:</b>\n" +
+    "\u{2022} <i>Aufgabe nehmen</i> \u{2192} Kategorie w\u{00E4}hlen \u{2192} Issues werden dir zugewiesen\n" +
+    "\u{2022} Wenn du fertig bist: Kategorie freigeben, damit andere sie nehmen k\u{00F6}nnen\n" +
+    "\u{2022} Du kannst deine Kategorie jederzeit pausieren oder wechseln\n\n" +
+    "\u{1F4A1} <b>Tipp:</b> Pr\u{00FC}fe im Team Board, welche Kategorien frei sind.",
+
+  preview:
+    "\u{1F441} <b>Preview &amp; Merge</b>\n\n" +
+    "Wenn dein Code fertig ist, erstellst du einen Pull Request (PR) auf GitHub. " +
+    "Der Bot zeigt dir einen Preview-Link, damit du deine \u{00C4}nderungen testen kannst.\n\n" +
+    "<b>Ablauf:</b>\n" +
+    "1. Code pushen \u{2192} PR erstellen\n" +
+    "2. Preview-Link pr\u{00FC}fen\n" +
+    "3. Im Team Board: Review anfordern\n" +
+    "4. Nach Approval: Merge durchf\u{00FC}hren\n" +
+    "5. <b>Wichtig:</b> Nach dem Merge lokal <code>git pull</code> nicht vergessen!",
+
+  conflicts:
+    "\u{26A0}\u{FE0F} <b>Konflikte</b>\n\n" +
+    "Merge-Konflikte entstehen, wenn zwei Personen <b>dieselben Dateien</b> gleichzeitig bearbeiten. " +
+    "Deshalb gilt die Golden Rule: <b>Eine Kategorie pro Person.</b>\n\n" +
+    "Kategorien gruppieren Issues, die \u{00E4}hnliche Dateien betreffen. " +
+    "Wenn jeder seine eigene Kategorie hat, arbeitet ihr an verschiedenen Dateien \u{2014} " +
+    "und Konflikte werden vermieden.\n\n" +
+    "\u{1F4A1} <b>Falls es doch kracht:</b> Sprecht euch im Team ab, wer welche Datei anpasst. " +
+    "Der Bot zeigt euch im Team Board, wer welche Kategorie hat.",
+};
+
+// ---------------------------------------------------------------------------
 // GitHub webhook signature verification (HMAC-SHA256)
 // ---------------------------------------------------------------------------
 
@@ -4456,16 +4527,85 @@ function createBot(
   });
 
   bot.hears("\u{2753} Hilfe", async (ctx) => {
-    await ctx.reply(
-      "\u{2753} <b>Hilfe</b>\n\n" +
-      "Workflow:\n" +
-      "1\u{FE0F}\u{20E3} Kategorie w\u{00E4}hlen (Aufgabe nehmen)\n" +
-      "2\u{FE0F}\u{20E3} Tasks bearbeiten (Meine Aufgaben)\n" +
-      "3\u{FE0F}\u{20E3} Preview erstellen &amp; mergen\n" +
-      "4\u{FE0F}\u{20E3} Nach Merge: pull nicht vergessen!\n\n" +
-      "\u{1F3C6} <b>Golden Rule:</b> Eine Kategorie pro Person = keine Merge-Konflikte!",
-      { parse_mode: "HTML" }
-    );
+    const keyboard = new InlineKeyboard()
+      .text("\u{1F6AB} Blocker", "help_blocker")
+      .text("\u{1F4CA} Priorit\u{00E4}ten", "help_priorities")
+      .row()
+      .text("\u{1F4C1} Kategorien", "help_categories")
+      .text("\u{1F441} Preview", "help_preview")
+      .row()
+      .text("\u{26A0}\u{FE0F} Konflikte", "help_conflicts");
+
+    await ctx.reply(HELP_TEXTS.overview, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Help sub-view callback handlers (Issue #52)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("help_blocker", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.blocker, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_priorities", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.priorities, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_categories", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.categories, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_preview", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.preview, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_conflicts", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.conflicts, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_back", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard()
+      .text("\u{1F6AB} Blocker", "help_blocker")
+      .text("\u{1F4CA} Priorit\u{00E4}ten", "help_priorities")
+      .row()
+      .text("\u{1F4C1} Kategorien", "help_categories")
+      .text("\u{1F441} Preview", "help_preview")
+      .row()
+      .text("\u{26A0}\u{FE0F} Konflikte", "help_conflicts");
+
+    await ctx.editMessageText(HELP_TEXTS.overview, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
   });
 
   // -------------------------------------------------------------------
@@ -6036,6 +6176,8 @@ export {
   PRIORITY_LEVELS,
   PRIORITY_EMOJIS,
   PRIORITY_DEFAULT,
+  // Help system texts (Issue #52, foundation for #65)
+  HELP_TEXTS,
   // Meine Aufgaben helpers
   getActiveTask,
   setActiveTask,
