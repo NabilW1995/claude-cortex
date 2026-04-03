@@ -13,10 +13,10 @@ npx cortex-init
 ```
 
 That's it. One command installs everything:
-- 8 specialized AI agents
+- 16 specialized AI agents
 - 20 automatic hooks (security, linting, testing)
 - 11 rule sets (git, security, testing, accessibility)
-- 7 skills (project discovery, design, learning system)
+- 8 skills (project discovery, design, learning system)
 - SQLite-based learning database
 
 ### Alternative: Manual install (without npm)

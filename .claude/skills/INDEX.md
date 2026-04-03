@@ -94,7 +94,7 @@ Every skill:
 
 | Category | Available | Planned | Total |
 |----------|-----------|---------|-------|
-| Cortex Core | 7 | 0 | 7 |
+| Cortex Core | 8 | 0 | 8 |
 | AI Automation | 0 | 1 | 1 |
 | Development | 0 | 5 | 5 |
 | Design | 0 | 2 | 2 |
@@ -102,7 +102,7 @@ Every skill:
 | Legal | 0 | 4 | 4 |
 | Productivity | 0 | 2 | 2 |
 | Email | 0 | 8 | 8 |
-| **Total** | **7** | **27** | **34** |
+| **Total** | **8** | **27** | **35** |
 
 ## Quick Start
 

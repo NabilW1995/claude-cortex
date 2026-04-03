@@ -186,14 +186,14 @@ Show the screenshot to the user for approval before considering the task done.
 
 ## Working with Other Skills
 
-| Situation | Skill to use |
-|-----------|-------------|
-| Need style/color/font recommendations | `ui-ux-pro-max` |
-| Building with Stitch | `stitch-design` + `enhance-prompt` |
-| Need premium anti-generic rules | `taste-design` |
-| Using shadcn/ui components | `shadcn-ui` |
-| Need design system documentation | `design-md` |
-| Converting Stitch to React | `react:components` |
+| Situation | Skill to use | Availability |
+|-----------|-------------|-------------|
+| Need style/color/font recommendations | `ui-ux-pro-max` | Local skill |
+| Building with Stitch | `stitch-design` + `enhance-prompt` | Available as plugins (install via /plugin) |
+| Need premium anti-generic rules | `taste-design` | Available as plugin (install via /plugin) |
+| Using shadcn/ui components | `shadcn-ui` | Available as plugin (install via /plugin) |
+| Need design system documentation | `design-md` | Available as plugin (install via /plugin) |
+| Converting Stitch to React | `react:components` | Available as plugin (install via /plugin) |
 
 ## For Non-Programmers
 

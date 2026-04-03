@@ -67,7 +67,9 @@ Lies gleichzeitig:
 Lade die letzten 10 relevanten Learnings:
 ```python
 import sqlite3
-conn = sqlite3.connect(r'C:\Users\Nabil\.claude-learnings\learnings.db')
+import os
+db_path = os.path.join(os.path.expanduser('~'), '.claude-learnings', 'learnings.db')
+conn = sqlite3.connect(db_path)
 c = conn.cursor()
 c.execute("""SELECT category, rule, confidence FROM learnings
              ORDER BY created_at DESC LIMIT 10""")

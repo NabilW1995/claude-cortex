@@ -1,5 +1,6 @@
 ---
 description: Agent routing — the core development flow, dispatch rules, and sub-agent restrictions
+globs: "**/*"
 ---
 
 # Agent Routing
@@ -65,6 +66,19 @@ Done (or fix round)
 |-------|---------|
 | **util--pr-writer** | Writes PR descriptions from git diff. |
 | **start--onboarding** | One-time codebase scan for new projects. |
+| **rpi--requirement-parser** | Parses feature requests into structured requirements. |
+| **rpi--product-manager** | Writes user stories, PRDs, acceptance criteria. |
+| **rpi--ux-designer** | Creates UI flows, wireframes, UX designs. |
+
+### Drift Detection (dispatched by /drift-check)
+
+| Agent | Purpose |
+|-------|---------|
+| **util--drift-agents** | Checks for new agent frontmatter fields. |
+| **util--drift-skills** | Checks for new skill fields + bundled skills. |
+| **util--drift-commands** | Checks for new command fields + built-in commands. |
+| **util--drift-settings** | Checks for new settings, hook events, env vars. |
+| **util--drift-features** | Checks for new Claude Code features/concepts. |
 
 ## Dispatch Rules
 

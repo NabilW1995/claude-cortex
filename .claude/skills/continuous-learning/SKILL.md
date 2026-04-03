@@ -182,9 +182,9 @@ When corrections pile up, the system escalates:
 
 ```
 Correction 1-2:  Normal — Claude tries again
-Correction 3:    🦆 Rubber Duck agent — helps articulate the real problem
-Correction 4:    (Rubber Duck continues)
-Correction 5+:   🔧 Unsticker agent — root-cause analysis
+Correction 3:    pre--architect agent — helps articulate the real problem
+Correction 4:    (pre--architect continues)
+Correction 5+:   fix--root-cause-finder agent — root-cause analysis
 ```
 
 ## Rules

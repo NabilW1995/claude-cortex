@@ -1,5 +1,5 @@
 ---
-name: pr-ghostwriter
+name: pr-writer
 description: "Dispatch when creating pull requests, commit messages, or changelogs. Reads actual diffs and produces review-ready documentation."
 model: sonnet
 tools: Read, Grep, Glob, Bash(git:*)

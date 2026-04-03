@@ -1,5 +1,5 @@
 ---
-name: error-whisperer
+name: error-translator
 description: "Dispatch when user encounters cryptic errors, stack traces, build failures, or dependency conflicts. Translates into simple explanations with copy-paste fixes."
 model: sonnet
 tools: Read, Grep, Glob, WebSearch, Write, Edit

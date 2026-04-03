@@ -1,5 +1,5 @@
 ---
-name: onboarding-sherpa
+name: onboarding
 description: "Dispatch once when joining a new project. Scans the codebase, maps architecture, identifies key patterns, and creates a mental model to work with immediately."
 model: sonnet
 tools: Read, Grep, Glob, Bash(git:*,wc:*,find:*), Write, Edit

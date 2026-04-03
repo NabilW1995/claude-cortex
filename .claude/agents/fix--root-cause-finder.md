@@ -1,5 +1,5 @@
 ---
-name: debug-investigator
+name: root-cause-finder
 description: "Dispatch when a specific bug needs systematic investigation. Reads logs, traces stack traces, identifies the root cause — not just symptoms."
 model: sonnet
 tools: Bash, Read, Grep, Glob

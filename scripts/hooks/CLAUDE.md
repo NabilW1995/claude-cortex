@@ -15,7 +15,7 @@ These hooks run automatically during Claude Code sessions. They are registered i
 | **PostCompact** | post-compact-resume.sh | After context compression |
 | **SessionStart** | session-reset.sh, session-start.js, sync-check.js, sync-team-learnings.js | Session begins |
 | **SessionEnd** | session-end.js, auto-push-learnings.js | Session closes |
-| **Stop** | stop-prompts.js, session-end.js, log-stop-verdict.sh, auto-push-learnings.js | Claude stops |
+| **Stop** | stop-prompts.js, log-stop-verdict.sh | Claude stops |
 | **TaskCompleted** | Telegram notification (async) | Background task finishes |
 
 ## All 22 Claude Code Hook Events (Reference)
@@ -33,7 +33,7 @@ These hooks run automatically during Claude Code sessions. They are registered i
 | Stop | Yes | Yes | Claude decides to stop — show prompts, log |
 | TaskCompleted | Yes | Yes | Background task finishes — notify |
 | Notification | Yes | No | Model wants to notify user |
-| PermissionRequest | Yes | No | Route permission prompts to Slack/Telegram |
+| PermissionRequest | Yes | Yes | Route permission prompts to Slack/Telegram |
 | SubagentStart | Yes | No | Subagent spawned |
 | SubagentStop | Yes | No | Subagent finished |
 | Setup | Yes | No | One-time setup (30s timeout) |

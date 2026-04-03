@@ -1,5 +1,5 @@
 ---
-name: deep-dive
+name: architect
 description: "Dispatch before complex features that need architectural analysis. Deep exploration of codebase, design alternatives, and technical decisions."
 model: opus
 tools: Bash, Read, Edit, Grep, Glob, WebSearch, WebFetch
