@@ -1,9 +1,9 @@
 ---
 name: debug-investigator
-description: "Systematischer Fehler-Ermittler — liest Logs, verfolgt Stack-Traces, identifiziert die Grundursache. Nutze diesen Agent wenn ein spezifischer Fehler oder Bug untersucht werden muss.\n\nBeispiele:\n\n<example>\nKontext: User meldet einen Fehler\nuser: \"Die App stuerzt ab wenn ich auf Speichern klicke\"\nassistant: \"Ich starte den Debug-Investigator um diesen Fehler systematisch zu untersuchen.\"\n<Task tool Aufruf um den debug-investigator Agent zu starten>\n</example>\n\n<example>\nKontext: Ein Test schlaegt fehl\nuser: \"npm run test zeigt einen Fehler in der Login-Komponente\"\nassistant: \"Ich nutze den Debug-Investigator um die Ursache des fehlschlagenden Tests zu finden.\"\n<Task tool Aufruf um den debug-investigator Agent zu starten>\n</example>\n\n<example>\nKontext: Build schlaegt fehl\nuser: \"npm run build funktioniert nicht mehr\"\nassistant: \"Ich starte den Debug-Investigator um die Build-Fehler systematisch zu analysieren.\"\n<Task tool Aufruf um den debug-investigator Agent zu starten>\n</example>"
-tools: Bash, Read, Grep, Glob
+description: "Dispatch when a specific bug needs systematic investigation. Reads logs, traces stack traces, identifies the root cause — not just symptoms."
 model: sonnet
-maxTurns: 10
+tools: Bash, Read, Grep, Glob
+effort: high
 color: red
 ---
 

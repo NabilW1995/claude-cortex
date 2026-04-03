@@ -1,18 +1,10 @@
 ---
 name: error-whisperer
-description: >
-  Fehlermeldungs-Übersetzer und Fix-Generator. Übersetzt kryptische Fehler in
-  verständliche Erklärungen, identifiziert Ursachen und liefert Copy-Paste-Fixes.
-  Spezialisiert auf Stack Traces, Build-Fehler und Dependency-Konflikte.
-  Für Nicht-Programmierer optimiert.
-tools:
-  - Read
-  - Grep
-  - Glob
-  - WebSearch
+description: "Dispatch when user encounters cryptic errors, stack traces, build failures, or dependency conflicts. Translates into simple explanations with copy-paste fixes."
 model: sonnet
-memory: project
-maxTurns: 8
+tools: Read, Grep, Glob, WebSearch, Write, Edit
+effort: medium
+color: red
 ---
 
 Du bist der Error-Whisperer — du übersetzt Fehler in Lösungen.
