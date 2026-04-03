@@ -8501,6 +8501,20 @@ async function handleSession(
       "sessions",
       () => `\u{1F534} ${escapeHtml(update.user)} went offline (${escapeHtml(projectId)})`
     );
+
+    // Send private evening DM on session end (deduped — only once per 24h)
+    try {
+      const allMembers = await getTeamMembers(env.PROJECTS);
+      const member = allMembers.find(
+        (m) => m.github === update.user || m.name === update.user
+      );
+      if (member) {
+        const projects = await getProjectList(env);
+        await sendPrivateEveningDM(env, member, projects, allMembers);
+      }
+    } catch (e) {
+      console.error("[Session] Evening DM on session end failed:", e);
+    }
   } else {
     return new Response("Invalid session type", { status: 400 });
   }
@@ -8735,6 +8749,10 @@ export {
   sendMorningDigest,
   getYesterdayStats,
   getYesterdayWorkHours,
+  // Evening message helpers (Issue #63)
+  sendPrivateEveningDM,
+  sendGroupEveningMessage,
+  sendEveningDigest,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot };
 
@@ -8957,9 +8975,9 @@ export default {
       await sendMorningDigest(env);
     }
 
-    // Mon-Fri 16:00 UTC (18:00 CEST): evening summary
+    // Mon-Fri 16:00 UTC (18:00 CEST): evening digest (group + private DMs)
     if (hour === 16 && minute === 0 && dayOfWeek >= 1 && dayOfWeek <= 5) {
-      await sendEveningSummary(env);
+      await sendEveningDigest(env);
     }
 
     // Friday 15:00 UTC (17:00 CEST): weekly report
@@ -9440,30 +9458,6 @@ async function sendMorningDigest(env: Env): Promise<void> {
   }
 }
 
-async function sendEveningSummary(env: Env): Promise<void> {
-  const stats = await getTodayStats(env.DB);
-  const workHours = await getWorkHoursToday(env.DB);
-  const members = await getTeamMembers(env.PROJECTS);
-
-  const lines: string[] = ["\u{1F319} <b>Evening Summary</b>", "\u{2500}".repeat(25), ""];
-  lines.push(`\u{1F4DD} Issues: ${stats.issues_opened} opened, ${stats.issues_closed} closed`);
-  lines.push(`\u{1F500} PRs: ${stats.prs_merged} merged, ${stats.prs_open} opened`);
-  lines.push(`\u{1F4CA} Total events: ${stats.total_events}`);
-
-  if (workHours.length > 0) {
-    lines.push("");
-    lines.push("<b>Work Hours:</b>");
-    for (const w of workHours) {
-      const color = getUserColorByName(members, w.user_id);
-      const hours = Math.floor(w.total_minutes / 60);
-      const mins = w.total_minutes % 60;
-      lines.push(`${color} ${w.user_id}: ${hours}h ${mins}m`);
-    }
-  }
-
-  await sendToLoginChannel(env, lines.join("\n"));
-}
-
 async function sendWeeklyReport(env: Env): Promise<void> {
   const members = await getTeamMembers(env.PROJECTS);
 
@@ -9554,4 +9548,363 @@ async function sendWeeklyReport(env: Env): Promise<void> {
   }
 
   await sendToLoginChannel(env, lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Evening messages — private DM per user + group overview (Issue #63)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a private evening DM to a single team member when they wrap up.
+ * Shows: today's completed tasks with time, branch status, category claim check,
+ * learnings placeholder (for future Issue #64 integration), and encouragement.
+ *
+ * Dedup: KV key `evening_dm:{telegramId}` with 24h TTL prevents duplicates.
+ *
+ * @param learnings - Optional array of learning descriptions forwarded from the
+ *   session hook. Future Issue #64 will pull these from a D1 table instead.
+ */
+async function sendPrivateEveningDM(
+  env: Env,
+  member: TeamMember,
+  projects: Array<{ id: string; config: ProjectConfig }>,
+  allMembers: TeamMember[],
+  learnings?: string[]
+): Promise<void> {
+  const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+  if (!prefs.dm_chat_id) return;
+
+  const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+  if (dnd) return;
+
+  // Dedup — only one evening DM per user per day (24h TTL)
+  const dedupKey = `evening_dm:${member.telegram_id}`;
+  const alreadySent = await env.PROJECTS.get(dedupKey);
+  if (alreadySent) return;
+
+  const color = getUserColorByName(allMembers, member.name);
+  const lines: string[] = [
+    `${color} <b>Good evening, ${escapeHtml(member.name)}!</b> \u{1F319}`,
+    "\u{2500}".repeat(25),
+    "",
+  ];
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  let totalTodayMinutes = 0;
+  let hasActiveClaim = false;
+
+  for (const { id: projectId, config: project } of projects) {
+    const token = getGitHubToken(env, project);
+
+    // --- Today's completed tasks (closed issues by this user) ---
+    try {
+      const closedEvents = await env.DB.prepare(
+        `SELECT target, metadata FROM events
+         WHERE repo = ? AND actor = ? AND event_type = 'issues.closed'
+         AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 20`
+      ).bind(project.githubRepo, member.github)
+        .all<{ target: string; metadata: string | null }>();
+
+      if (closedEvents.results && closedEvents.results.length > 0) {
+        lines.push(`\u{2705} <b>Completed today</b> (${escapeHtml(projectId)}):`);
+        for (const ev of closedEvents.results) {
+          const issueNum = ev.target ? `#${escapeHtml(ev.target)}` : "";
+          let title = "";
+          if (ev.metadata) {
+            try {
+              const meta = JSON.parse(ev.metadata);
+              if (meta.title) title = ` ${escapeHtml(String(meta.title))}`;
+            } catch { /* best-effort */ }
+          }
+          lines.push(`  \u{2022} ${issueNum}${title}`);
+        }
+        lines.push("");
+      }
+    } catch (e) {
+      console.error(`[EveningDM] Events query failed for ${projectId}:`, e);
+    }
+
+    // --- Today's tracked time ---
+    try {
+      const dailyMins = await getDailyHours(env.DB, member.telegram_id, todayStr);
+      if (dailyMins > 0) {
+        totalTodayMinutes += dailyMins;
+      }
+    } catch { /* best-effort */ }
+
+    // --- Branch status (open PRs by this user) ---
+    if (token) {
+      try {
+        const branchRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (branchRes.ok) {
+          const prs = await branchRes.json() as Array<{
+            number: number; title: string; user: { login: string };
+            head: { ref: string }; requested_reviewers: Array<{ login: string }>;
+          }>;
+
+          const myPRs = prs.filter((pr) => pr.user.login === member.github);
+          if (myPRs.length > 0) {
+            lines.push(`\u{1F500} <b>Your open branches</b> (${escapeHtml(projectId)}):`);
+            for (const pr of myPRs) {
+              const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, pr.number);
+              const previewStr = previewUrl ? ` \u{2014} <a href="${escapeHtml(previewUrl)}">Preview</a>` : "";
+              const reviewers = pr.requested_reviewers.length > 0
+                ? ` (reviewers: ${pr.requested_reviewers.map((r) => `@${escapeHtml(r.login)}`).join(", ")})`
+                : " <i>(no reviewer assigned)</i>";
+              lines.push(`  \u{2022} #${pr.number} ${escapeHtml(pr.title)}${reviewers}${previewStr}`);
+            }
+            lines.push("");
+          }
+        }
+      } catch (e) {
+        console.error(`[EveningDM] GitHub PR fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    // --- Category claim check — suggest picking a new category if none active ---
+    try {
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      const userClaim = claimsState.claims.find(
+        (c) => c.telegramName === member.name || c.githubUsername === member.github
+      );
+      if (userClaim) {
+        hasActiveClaim = true;
+      }
+    } catch { /* best-effort */ }
+  }
+
+  // Today's total tracked time
+  if (totalTodayMinutes > 0) {
+    lines.push(`\u{23F1}\u{FE0F} Today's tracked time: <b>${formatDuration(totalTodayMinutes)}</b>`);
+    lines.push("");
+  }
+
+  // Learnings section — accepts forwarded data or shows placeholder
+  if (learnings && learnings.length > 0) {
+    lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+    for (const learning of learnings.slice(0, 5)) {
+      lines.push(`  \u{2022} ${escapeHtml(learning)}`);
+    }
+    lines.push("");
+  } else {
+    lines.push("\u{1F4DA} <i>No learnings captured today.</i>");
+    lines.push("");
+  }
+
+  // Category suggestion if user has no active claim
+  if (!hasActiveClaim) {
+    lines.push("\u{1F4A1} <b>Tip:</b> You don't have an active category \u{2014} consider picking one tomorrow with /grab!");
+    lines.push("");
+  }
+
+  // Encouragement
+  lines.push("\u{1F31F} Great work today \u{2014} rest well and recharge!");
+
+  const botToken = projects.length > 0 ? projects[0].config.botToken : "";
+  if (!botToken) return;
+
+  await sendDM(botToken, prefs.dm_chat_id, lines.join("\n"));
+
+  // Set dedup key (24h TTL)
+  await env.PROJECTS.put(dedupKey, "1", { expirationTtl: 86400 });
+}
+
+/**
+ * Send the group evening message to the login channel.
+ * Shows: today's completed work, who went offline, open work remaining,
+ * preview links waiting for review, and team performance stats.
+ *
+ * Replaces the simple `sendEveningSummary` with a much richer overview.
+ */
+async function sendGroupEveningMessage(env: Env): Promise<void> {
+  const projects = await getProjectList(env);
+  const members = await getTeamMembers(env.PROJECTS);
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  const lines: string[] = [
+    "\u{1F319} <b>Evening Summary</b>",
+    "\u{2500}".repeat(25),
+    "",
+  ];
+
+  for (const { id: projectId, config: project } of projects) {
+    lines.push(`\u{1F4C1} <b>${escapeHtml(projectId)}</b>`);
+    const token = getGitHubToken(env, project);
+
+    // --- Who went offline today (sessions that ended today) ---
+    try {
+      const offlineUsers = await env.DB.prepare(
+        `SELECT DISTINCT user_id FROM sessions
+         WHERE date(ended_at) = ?
+         ORDER BY user_id`
+      ).bind(todayStr).all<{ user_id: string }>();
+
+      if (offlineUsers.results && offlineUsers.results.length > 0) {
+        const offlineNames = offlineUsers.results.map((u) => {
+          const color = getUserColorByName(members, u.user_id);
+          return `${color} ${escapeHtml(u.user_id)}`;
+        });
+        lines.push(`  \u{1F534} Wrapped up: ${offlineNames.join(", ")}`);
+      }
+    } catch (e) {
+      console.error(`[EveningGroup] Offline users query failed for ${projectId}:`, e);
+    }
+
+    // --- Today's completed work (closed issues) ---
+    try {
+      const closedEvents = await env.DB.prepare(
+        `SELECT actor, target, metadata FROM events
+         WHERE repo = ? AND event_type = 'issues.closed'
+         AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 30`
+      ).bind(project.githubRepo)
+        .all<{ actor: string; target: string; metadata: string | null }>();
+
+      if (closedEvents.results && closedEvents.results.length > 0) {
+        lines.push("");
+        lines.push(`  \u{2705} <b>Completed today:</b>`);
+        for (const ev of closedEvents.results) {
+          const color = getUserColorByName(members, ev.actor);
+          const issueNum = ev.target ? `#${escapeHtml(ev.target)}` : "";
+          let title = "";
+          if (ev.metadata) {
+            try {
+              const meta = JSON.parse(ev.metadata);
+              if (meta.title) title = ` ${escapeHtml(String(meta.title))}`;
+            } catch { /* best-effort */ }
+          }
+          lines.push(`    ${color} ${issueNum}${title} (${escapeHtml(ev.actor)})`);
+        }
+      }
+    } catch (e) {
+      console.error(`[EveningGroup] Completed work query failed for ${projectId}:`, e);
+    }
+
+    // --- Still open: assigned issues ---
+    if (token) {
+      try {
+        const openRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/issues?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (openRes.ok) {
+          const issues = await openRes.json() as Array<{
+            number: number; title: string; pull_request?: unknown;
+            assignee?: { login: string } | null;
+          }>;
+          const realIssues = issues.filter((i) => !i.pull_request && i.assignee);
+          if (realIssues.length > 0) {
+            lines.push("");
+            lines.push(`  \u{1F4CB} <b>Still open:</b>`);
+            for (const issue of realIssues.slice(0, 10)) {
+              const color = getUserColorByName(members, issue.assignee!.login);
+              lines.push(`    ${color} #${issue.number} ${escapeHtml(issue.title)} (@${escapeHtml(issue.assignee!.login)})`);
+            }
+            if (realIssues.length > 10) {
+              lines.push(`    <i>...and ${realIssues.length - 10} more</i>`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[EveningGroup] Open issues fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    // --- Preview links waiting for review ---
+    if (token) {
+      try {
+        const prRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (prRes.ok) {
+          const prs = await prRes.json() as Array<{
+            number: number; title: string; user: { login: string };
+            requested_reviewers: Array<{ login: string }>;
+          }>;
+          const needsReview = prs.filter((pr) => pr.requested_reviewers.length > 0);
+          if (needsReview.length > 0) {
+            lines.push("");
+            lines.push(`  \u{1F50D} <b>Preview links waiting for review:</b>`);
+            for (const pr of needsReview) {
+              const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, pr.number);
+              const previewStr = previewUrl ? ` \u{2014} <a href="${escapeHtml(previewUrl)}">Preview</a>` : "";
+              const reviewers = pr.requested_reviewers.map((r) => `@${escapeHtml(r.login)}`).join(", ");
+              lines.push(`    \u{2022} #${pr.number} ${escapeHtml(pr.title)} \u{2192} ${reviewers}${previewStr}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[EveningGroup] PR review fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    lines.push("");
+  }
+
+  // --- Today's team performance ---
+  try {
+    const stats = await getTodayStats(env.DB);
+    const workHours = await getWorkHoursToday(env.DB);
+
+    lines.push("\u{1F4CA} <b>Today's Team Performance:</b>");
+    lines.push(`  \u{1F4DD} Issues: ${stats.issues_opened} opened, ${stats.issues_closed} closed`);
+    lines.push(`  \u{1F500} PRs: ${stats.prs_merged} merged, ${stats.prs_open} opened`);
+    lines.push(`  \u{1F4C8} Total events: ${stats.total_events}`);
+
+    if (workHours.length > 0) {
+      lines.push("");
+      lines.push("  <b>Work Hours:</b>");
+      for (const w of workHours) {
+        const color = getUserColorByName(members, w.user_id);
+        lines.push(`  ${color} ${escapeHtml(w.user_id)}: ${formatDuration(w.total_minutes)}`);
+      }
+    }
+  } catch (e) {
+    console.error("[EveningGroup] Today stats failed:", e);
+  }
+
+  // --- Learnings placeholder (for future Issue #64 integration) ---
+  lines.push("");
+  lines.push("\u{1F4DA} <i>Team learnings: coming soon (Issue #64)</i>");
+
+  await sendToLoginChannel(env, lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Evening digest — orchestrator (calls group + private DMs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send evening notifications: group summary + private DMs to all registered members.
+ * Called from the cron scheduler at 16:00 UTC (replacing the old simple sendEveningSummary).
+ * Also callable from session end hooks for individual DMs.
+ */
+async function sendEveningDigest(env: Env): Promise<void> {
+  // 1. Send the group evening message
+  try {
+    await sendGroupEveningMessage(env);
+  } catch (e) {
+    console.error("[EveningDigest] Group message failed:", e);
+  }
+
+  // 2. Send private evening DMs to all registered members (with dedup)
+  try {
+    const projects = await getProjectList(env);
+    const members = await getTeamMembers(env.PROJECTS);
+
+    for (const member of members) {
+      try {
+        await sendPrivateEveningDM(env, member, projects, members);
+      } catch (e) {
+        console.error(`[EveningDigest] DM failed for ${member.name}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error("[EveningDigest] Private DMs failed:", e);
+  }
 }
