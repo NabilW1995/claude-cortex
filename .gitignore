@@ -23,3 +23,6 @@ build/
 .output/
 coverage/
 *.log
+plans/
+image.png
+image copy.png

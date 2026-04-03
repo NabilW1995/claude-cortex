@@ -1,3 +1,7 @@
+---
+description: "Use when user asks for a changelog, release notes, or 'what changed?'. Generates changelog from git history."
+---
+
 Generate a changelog from git history.
 
 ## Steps

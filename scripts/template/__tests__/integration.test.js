@@ -101,8 +101,8 @@ describe('Claude Cortex Integration Test', () => {
       assert.ok(content.includes('timezone issues'), 'gotchas preserved');
       assert.ok(content.includes('npm start'), 'project commands preserved');
       // Template sections added with markers
-      assert.ok(content.includes('CORTEX:REFS:START'), 'reference docs marker added');
-      assert.ok(content.includes('CORTEX:WICHTIG:START'), 'wichtig marker added');
+      assert.ok(content.includes('CORTEX:REFERENCES:START'), 'reference docs marker added');
+      assert.ok(content.includes('CORTEX:TOP_RULES:START'), 'top rules marker added');
     });
 
     it('merges settings.json preserving project hooks and permissions', () => {

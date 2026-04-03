@@ -1,3 +1,7 @@
+---
+description: "Use when user says 'neues Projekt', 'new project', 'I want to build something', 'lass uns was bauen'. Starts the project discovery interview."
+---
+
 # New Project Discovery
 
 Starte den Project Discovery Prozess für ein neues Projekt.

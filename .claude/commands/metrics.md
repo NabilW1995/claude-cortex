@@ -1,3 +1,7 @@
+---
+description: "Use when user asks about code metrics, project health, LOC count, complexity, or says '/metrics'. Shows project health at a glance."
+---
+
 Code metrics — show project health at a glance.
 
 ## Steps

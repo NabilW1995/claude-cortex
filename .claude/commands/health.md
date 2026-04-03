@@ -1,3 +1,7 @@
+---
+description: "Use when user says 'health check', 'is everything working?', 'cortex status', or '/health'. Verifies Cortex installation."
+---
+
 Health check — verify Cortex is correctly installed and configured.
 
 ## Steps

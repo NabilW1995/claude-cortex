@@ -21,6 +21,10 @@ async function processPrompt(prompt) {
   if (!prompt) return;
 
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+
+  // Reset stop-verification flag on each new prompt
+  const stopFlag = path.join(projectDir, '.claude', 'logs', '.stop-verified');
+  try { if (fs.existsSync(stopFlag)) fs.unlinkSync(stopFlag); } catch {}
   const projectName = path.basename(projectDir);
 
   // ==================== INACTIVITY CHECK ====================
