@@ -59,11 +59,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/hooks/prompt-submit.js"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/prompt-submit.js"
           },
           {
             "type": "command",
-            "command": "node scripts/hooks/tdd-reminder.js"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/tdd-reminder.js"
           }
         ]
       }
@@ -74,19 +74,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/guard-bash.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/guard-bash.sh"
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/test-existence-check.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/test-existence-check.sh"
           },
           {
             "type": "command",
-            "command": "node scripts/hooks/sync-team-learnings.js export"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/sync-team-learnings.js export"
           },
           {
             "type": "command",
-            "command": "node scripts/template/sync-check.js",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/template/sync-check.js",
             "async": true
           }
         ]
@@ -96,11 +96,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/backup-before-write.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/backup-before-write.sh"
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/completeness-gate.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/completeness-gate.sh"
           }
         ]
       }
@@ -111,20 +111,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/post-edit-lint.sh",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/post-edit-lint.sh",
             "async": true
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/security-scan.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/security-scan.sh"
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/log-changes.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/log-changes.sh"
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/auto-test.sh",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/auto-test.sh",
             "async": true
           }
         ]
@@ -134,7 +134,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/hooks/heartbeat.js",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/heartbeat.js",
             "async": true
           }
         ]
@@ -146,7 +146,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/log-failures.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/log-failures.sh"
           }
         ]
       }
@@ -156,7 +156,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/pre-compact.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/pre-compact.sh"
           }
         ]
       }
@@ -166,19 +166,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/session-reset.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/session-reset.sh"
           },
           {
             "type": "command",
-            "command": "node scripts/hooks/session-start.js"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/session-start.js"
           },
           {
             "type": "command",
-            "command": "node scripts/template/sync-check.js"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/template/sync-check.js"
           },
           {
             "type": "command",
-            "command": "node scripts/hooks/sync-team-learnings.js import"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/sync-team-learnings.js import"
           }
         ]
       }
@@ -188,7 +188,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/post-compact-resume.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/post-compact-resume.sh"
           }
         ]
       }
@@ -198,11 +198,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/hooks/session-end.js"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/session-end.js"
           },
           {
             "type": "command",
-            "command": "node scripts/hooks/auto-push-learnings.js",
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/auto-push-learnings.js",
             "async": true
           }
         ]
@@ -225,11 +225,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/hooks/stop-prompts.js"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && node scripts/hooks/stop-prompts.js"
           },
           {
             "type": "command",
-            "command": "bash scripts/hooks/log-stop-verdict.sh"
+            "command": "cd \"$(git rev-parse --show-toplevel)\" && bash scripts/hooks/log-stop-verdict.sh"
           }
         ]
       }
