@@ -74,6 +74,8 @@ Done (or fix round)
 - MUST: Run sanity-check skill after code-review (final gate)
 - MUST: Give subagents complete context (files, errors, requirements)
 - MUST: Summarize subagent results in simple language
+- MUST: For multi-step tasks — ask the user after each milestone before starting the next step (human-gated)
+- MUST: Break subtasks small enough to complete in under 50% context window
 - MAY: Handle fixes <10 lines directly without subagent
 
 ## Sub-Agent Restrictions

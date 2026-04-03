@@ -1,6 +1,6 @@
 ---
 description: Security rules — secrets, auth, input validation, XSS/CSRF/SQL injection prevention
-globs: "**/*"
+globs: "**/*.{js,ts,tsx,py,sh,sql,html}"
 ---
 
 # Security Rules

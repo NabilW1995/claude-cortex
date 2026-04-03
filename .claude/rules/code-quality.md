@@ -1,6 +1,6 @@
 ---
 description: Code quality standards - style matching, DRY, TypeScript, error handling
-globs: "src/**/*"
+globs: "**/*.{js,ts,tsx,jsx,py,sh}"
 ---
 
 # Code Quality

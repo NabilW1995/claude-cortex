@@ -1,6 +1,6 @@
 ---
 description: Browser Use CLI commands and rules for E2E testing and visual review
-globs: "**/*.{test,spec}.{ts,tsx,js,jsx}"
+globs: "**/*.{test,spec,e2e}.{ts,tsx,js,jsx}"
 ---
 
 # Browser Use CLI

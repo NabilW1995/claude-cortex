@@ -13,6 +13,11 @@
       "env": {
         "MEMORY_FILE_PATH": ".claude/knowledge-graph.jsonl"
       }
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "_comment": "Fetches up-to-date library docs — prevents hallucinated APIs"
     }
   }
 }

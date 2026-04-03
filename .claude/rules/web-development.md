@@ -1,6 +1,6 @@
 ---
 description: Frontend and backend web development patterns
-globs: "src/**/*"
+globs: "**/*.{js,ts,tsx,jsx,vue,svelte,html,css}"
 ---
 
 # Web Development Rules
