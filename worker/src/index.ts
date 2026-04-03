@@ -93,6 +93,20 @@ interface CategoryClaimsState {
   lastUpdated: string;
 }
 
+/**
+ * Tracks a category that was paused (not released) — the branch stays on
+ * GitHub so the next developer can continue from where the previous one
+ * stopped.  Stored as a list in KV under `{projectId}:paused_categories`.
+ */
+interface PausedCategory {
+  category: string;
+  displayName: string;
+  pausedBy: string;
+  completedTasks: number;
+  totalTasks: number;
+  pausedAt: string;
+}
+
 interface GitHubIssuesPayload {
   action: string;
   issue: {
@@ -1110,6 +1124,65 @@ async function saveCategoryClaims(
 ): Promise<void> {
   state.lastUpdated = new Date().toISOString();
   await kv.put(`${projectId}:category_claims`, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for paused categories
+// ---------------------------------------------------------------------------
+
+/**
+ * Read paused categories for a project from KV.
+ */
+async function getPausedCategories(
+  kv: KVNamespace,
+  projectId: string
+): Promise<PausedCategory[]> {
+  const raw = await kv.get(`${projectId}:paused_categories`);
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as PausedCategory[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Save paused categories for a project to KV.
+ */
+async function savePausedCategories(
+  kv: KVNamespace,
+  projectId: string,
+  paused: PausedCategory[]
+): Promise<void> {
+  await kv.put(`${projectId}:paused_categories`, JSON.stringify(paused));
+}
+
+/**
+ * Add a paused category entry to the KV list.
+ * If the category was already paused, it replaces the old entry.
+ */
+async function addPausedCategory(
+  kv: KVNamespace,
+  projectId: string,
+  entry: PausedCategory
+): Promise<void> {
+  const paused = await getPausedCategories(kv, projectId);
+  const filtered = paused.filter((p) => p.category !== entry.category);
+  filtered.push(entry);
+  await savePausedCategories(kv, projectId, filtered);
+}
+
+/**
+ * Remove a paused category entry (e.g. when someone claims it again).
+ */
+async function removePausedCategory(
+  kv: KVNamespace,
+  projectId: string,
+  category: string
+): Promise<void> {
+  const paused = await getPausedCategories(kv, projectId);
+  const filtered = paused.filter((p) => p.category !== category);
+  await savePausedCategories(kv, projectId, filtered);
 }
 
 // ---------------------------------------------------------------------------
@@ -2169,10 +2242,16 @@ async function handleMeineAufgaben(
     }
   }
 
-  // Footer: today counter + refresh
+  // Footer: today counter + refresh + pause
   lines.push("");
   lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
 
+  // Show Pause button when user has a claimed category
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (myClaim) {
+    kb.text("\u{23F8} Pause", "mytasks_pause");
+  }
   kb.text("🔄 Refresh", "mytasks_refresh");
 
   return { text: lines.join("\n"), keyboard: kb };
@@ -2389,15 +2468,20 @@ async function handleCategoryAssign(
   // Build category picker buttons with color indicators
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
   const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const pausedList = await getPausedCategories(env.PROJECTS, projectId);
 
   for (const [label, issues] of sortedCategories) {
     const displayName = label.replace("area:", "");
     const claimer = claimsState.claims.find((c) => c.category === label);
+    const paused = pausedList.find((p) => p.category === label);
 
     let buttonText: string;
     if (claimer) {
       const claimerColor = getUserColor(members, claimer.telegramId);
       buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
+    } else if (paused) {
+      // Paused — show pause icon + who paused + progress
+      buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} paused by ${paused.pausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`;
     } else {
       buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
     }
@@ -2574,6 +2658,9 @@ async function handleCategoryConfirm(
   claimsState.claims.push(claim);
   await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
 
+  // Remove any paused marker for this category (someone is picking it up)
+  await removePausedCategory(env.PROJECTS, projectId, label);
+
   // Update the message in the group
   const successText =
     `\u{2705} <b>${safeDisplayName}</b> \u{2192} ${safeFirstName}\n\n` +
@@ -2713,6 +2800,163 @@ async function handleCategoryReleaseConfirm(
 }
 
 /**
+ * Show pause confirmation dialog.  Explains that tasks will be unassigned
+ * and the category freed, but the branch stays on GitHub.
+ */
+async function handlePause(
+  ctx: Context,
+  env: Env,
+  project: ProjectConfig,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (!claim) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} You don\u2019t have a category to pause.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const safeDisplayName = escapeHtml(claim.displayName);
+
+  const text =
+    `\u{23F8} <b>Pause ${safeDisplayName}?</b>\n\n` +
+    `This will:\n` +
+    `\u{2022} Unassign ${claim.assignedIssues.length} issues from you on GitHub\n` +
+    `\u{2022} Free the category for someone else to claim\n` +
+    `\u{2022} Mark it as \u201Cpaused\u201D so the next person knows the state\n\n` +
+    `\u{2705} Your <b>branch stays on GitHub</b> \u{2014} nothing is lost.\n` +
+    `The next developer can continue right where you left off.`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\u{23F8} Yes, pause", callback_data: "mytasks_pause_confirm" },
+        { text: "\u{274C} Cancel", callback_data: "mytasks_refresh" },
+      ],
+    ],
+  };
+
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+}
+
+/**
+ * Execute the pause: unassign issues, remove claim, store paused marker,
+ * clear active task, and notify the team.
+ */
+async function handlePauseConfirm(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  const firstName = ctx.from?.first_name || "Unknown";
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+
+  if (claimIndex < 0) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} No category to pause.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const claim = claimsState.claims[claimIndex];
+  const safeDisplayName = escapeHtml(claim.displayName);
+  const safeFirstName = escapeHtml(firstName);
+
+  // Count completed tasks: compare originally assigned vs. currently open
+  let completedCount = 0;
+  const totalCount = claim.assignedIssues.length;
+
+  if (project.githubToken && claim.assignedIssues.length > 0) {
+    // Check which of the originally assigned issues are still open
+    let openCount = 0;
+    for (const issueNum of claim.assignedIssues) {
+      try {
+        const res = await githubRequest(
+          "GET",
+          `/repos/${project.githubRepo}/issues/${issueNum}`,
+          project.githubToken
+        );
+        if (res.ok) {
+          const issue = (await res.json()) as { state: string };
+          if (issue.state === "open") {
+            openCount++;
+          }
+        } else {
+          // API error — count as open to be safe
+          openCount++;
+        }
+      } catch {
+        // Network error — count as open to be safe
+        openCount++;
+      }
+    }
+    completedCount = totalCount - openCount;
+  }
+
+  // 1. Unassign all open issues on GitHub
+  await unassignIssuesFromUser(project, claim.assignedIssues, claim.githubUsername);
+
+  // 2. Remove claim from KV
+  claimsState.claims.splice(claimIndex, 1);
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  // 3. Store paused marker so the category picker shows the status
+  const pausedEntry: PausedCategory = {
+    category: claim.category,
+    displayName: claim.displayName,
+    pausedBy: firstName,
+    completedTasks: completedCount,
+    totalTasks: totalCount,
+    pausedAt: new Date().toISOString(),
+  };
+  await addPausedCategory(env.PROJECTS, projectId, pausedEntry);
+
+  // 4. Clear the user's active task
+  await clearActiveTask(env.PROJECTS, telegramId, projectId);
+
+  // 5. Confirm to user
+  await ctx.editMessageText(
+    `\u{23F8} <b>${safeDisplayName}</b> paused by ${safeFirstName}.\n\n` +
+      `${completedCount}/${totalCount} tasks completed.\n` +
+      `Branch preserved on GitHub \u{2014} the next developer can continue.`,
+    { parse_mode: "HTML" }
+  );
+
+  // 6. Notify team in group chat
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `\u{23F8} ${safeDisplayName} paused by ${safeFirstName} (${completedCount}/${totalCount} done) \u{2014} category available!`,
+    project.threadId
+  );
+
+  // 7. Notify subscribers that a category is available
+  await notifySubscribers(
+    env,
+    project.botToken,
+    "tasks",
+    () =>
+      `\u{1F4CB} <b>${safeDisplayName}</b> is available again!\n` +
+      `Paused by ${safeFirstName} (${completedCount}/${totalCount} done).\n` +
+      `Branch is preserved \u{2014} use \u{1F4CB} Aufgabe nehmen to continue.`,
+    telegramId
+  );
+}
+
+/**
  * Show who has which category.
  */
 async function handleCategoryStatus(
@@ -2821,16 +3065,21 @@ async function handleAufgabeNehmen(
   // Build category picker buttons with color indicators
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
   const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const pausedList = await getPausedCategories(env.PROJECTS, projectId);
 
   for (const [label, issues] of sortedCategories) {
     const displayName = label.replace("area:", "");
     const claimer = claimsState.claims.find((c) => c.category === label);
+    const paused = pausedList.find((p) => p.category === label);
 
     let buttonText: string;
     if (claimer) {
       // Claimed — show lock icon + claimer's color + name
       const claimerColor = getUserColor(members, claimer.telegramId);
       buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
+    } else if (paused) {
+      // Paused — show pause icon + who paused + progress
+      buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} paused by ${paused.pausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`;
     } else {
       // Free — show green indicator
       buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
@@ -3869,6 +4118,34 @@ function createBot(
       console.error("mytasks_refresh error:", err);
       try {
         await ctx.answerCallbackQuery({ text: "Could not refresh." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // "Meine Aufgaben" — Pause flow callbacks
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("mytasks_pause", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      await handlePause(ctx, env, project, projectId);
+    } catch (err) {
+      console.error("mytasks_pause error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not show pause dialog." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("mytasks_pause_confirm", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      await handlePauseConfirm(ctx, project, env, projectId);
+    } catch (err) {
+      console.error("mytasks_pause_confirm error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not pause category." });
       } catch {}
     }
   });
@@ -5409,8 +5686,15 @@ export {
   handleCategoryPick,
   handleCategoryConfirm,
   handleCategoryAssign,
+  // Pause flow helpers (Issue #50)
+  getPausedCategories,
+  savePausedCategories,
+  addPausedCategory,
+  removePausedCategory,
+  handlePause,
+  handlePauseConfirm,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
