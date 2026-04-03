@@ -865,6 +865,65 @@ async function upsertTeamMember(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for onboarding wizard
+// ---------------------------------------------------------------------------
+
+type OnboardingStep = "awaiting_github" | "settings" | "tutorial";
+
+/**
+ * Read the current onboarding step for a user (null = not in onboarding).
+ * Keys expire after 24h so abandoned wizards auto-clean.
+ */
+async function getOnboardingState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<OnboardingStep | null> {
+  const raw = await kv.get(`onboarding:${telegramId}`);
+  return raw as OnboardingStep | null;
+}
+
+/**
+ * Persist the user's current onboarding step with a 24h TTL.
+ */
+async function setOnboardingState(
+  kv: KVNamespace,
+  telegramId: number,
+  step: OnboardingStep
+): Promise<void> {
+  await kv.put(`onboarding:${telegramId}`, step, { expirationTtl: 86400 });
+}
+
+/**
+ * Remove the onboarding step key (wizard finished or abandoned).
+ */
+async function clearOnboardingState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<void> {
+  await kv.delete(`onboarding:${telegramId}`);
+}
+
+/**
+ * Check whether a user has completed onboarding before.
+ */
+async function isOnboarded(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<boolean> {
+  return (await kv.get(`onboarded:${telegramId}`)) === "true";
+}
+
+/**
+ * Mark a user as having completed onboarding (permanent).
+ */
+async function markOnboarded(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<void> {
+  await kv.put(`onboarded:${telegramId}`, "true");
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers for dashboard state
 // ---------------------------------------------------------------------------
 
@@ -1837,6 +1896,44 @@ function buildSettingsMessage(prefs: UserPreferences): {
   return { text, keyboard };
 }
 
+/**
+ * Send a 3-message workflow tutorial explaining how the team bot works.
+ * Used as the final onboarding step for new users.
+ */
+async function sendOnboardingTutorial(ctx: Context): Promise<void> {
+  await ctx.reply(
+    "\u{1F4D6} <b>How the Team Bot Works</b>\n" +
+      "\u{2501}".repeat(20) +
+      "\n\n" +
+      "This bot helps your team coordinate work on projects. " +
+      "Here\u2019s the workflow in 3 steps:",
+    { parse_mode: "HTML" }
+  );
+
+  await ctx.reply(
+    "1\u{FE0F}\u{20E3} <b>Claim a Category</b>\n" +
+      "Pick a work area (e.g., \u201CFrontend\u201D, \u201CAPI\u201D). " +
+      "All issues in that area get assigned to you.\n\n" +
+      "2\u{FE0F}\u{20E3} <b>Work on Your Branch</b>\n" +
+      "Create a feature branch and code. " +
+      "When ready, create a PR \u2014 your team gets a preview link to review.\n\n" +
+      "3\u{FE0F}\u{20E3} <b>Pull After Merge</b>\n" +
+      "After your PR is merged, everyone gets a reminder to pull. " +
+      "This keeps the whole team in sync.",
+    { parse_mode: "HTML" }
+  );
+
+  await ctx.reply(
+    "\u{26A1} <b>The Golden Rule</b>\n" +
+      "\u{2501}".repeat(20) +
+      "\n\n" +
+      "<i>One person per category. Always pull after a merge.</i>\n\n" +
+      "This prevents merge conflicts and keeps the team in sync.\n\n" +
+      "\u{2705} You\u2019re all set! Use the buttons below to get started.",
+    { parse_mode: "HTML" }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Category handler functions
 // ---------------------------------------------------------------------------
@@ -2267,8 +2364,31 @@ function createBot(
   // Command handlers
   // -------------------------------------------------------------------
 
-  // /start, /menu — activate the reply keyboard with quick actions
+  // /start, /menu — activate reply keyboard; trigger onboarding for new DM users
   bot.command(["start", "menu"], async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+
+    // In private chat: check if this user needs onboarding first
+    if (ctx.chat?.type === "private" && telegramId) {
+      const members = await getTeamMembers(env.PROJECTS);
+      const isMember = members.some((m) => m.telegram_id === telegramId);
+      const onboarded = await isOnboarded(env.PROJECTS, telegramId);
+
+      if (!isMember && !onboarded) {
+        // Start the 3-step onboarding wizard
+        await setOnboardingState(env.PROJECTS, telegramId, "awaiting_github");
+        await ctx.reply(
+          "\u{1F44B} <b>Welcome to the Team Bot!</b>\n\n" +
+            "Let\u2019s get you set up in 3 quick steps.\n\n" +
+            "<b>Step 1/3: GitHub Account</b>\n" +
+            "Please send me your GitHub username:",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+    }
+
+    // Normal flow for registered / already-onboarded users
     const keyboard = new Keyboard()
       .text("\u{1F4CA} Dashboard").text("\u{1F465} Active").text("\u{1F4CC} My Tasks")
       .row()
@@ -3293,6 +3413,120 @@ function createBot(
     const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
     if (project.threadId) body.message_thread_id = project.threadId;
     await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+  });
+
+  // -------------------------------------------------------------------
+  // Onboarding wizard — "Continue to Tutorial" callback
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("onboard_continue", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    await setOnboardingState(env.PROJECTS, telegramId, "tutorial");
+
+    // Send the 3-message workflow tutorial
+    await sendOnboardingTutorial(ctx);
+
+    // Mark onboarding as permanently complete
+    await markOnboarded(env.PROJECTS, telegramId);
+    await clearOnboardingState(env.PROJECTS, telegramId);
+
+    // Show the normal reply keyboard so the user can start working
+    const keyboard = new Keyboard()
+      .text("\u{1F4CA} Dashboard").text("\u{1F465} Active").text("\u{1F4CC} My Tasks")
+      .row()
+      .text("\u{1F4CB} Board").text("\u{1F500} PRs").text("\u{1F440} Review")
+      .row()
+      .text("\u{1F525} Urgent").text("\u{1F4C8} Report")
+      .resized()
+      .persistent();
+    await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+      reply_markup: keyboard,
+      parse_mode: "HTML",
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Onboarding wizard — GitHub username input handler
+  // Must be AFTER all bot.command() and bot.hears() handlers so it only
+  // catches free-text messages from users currently in onboarding.
+  // -------------------------------------------------------------------
+
+  bot.on("message:text", async (ctx) => {
+    if (ctx.chat?.type !== "private") return;
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getOnboardingState(env.PROJECTS, telegramId);
+    if (state !== "awaiting_github") return;
+
+    const username = ctx.message.text.trim().replace(/^@/, "");
+
+    // Basic username validation before hitting the API
+    if (!username || username.includes(" ") || username.length > 39) {
+      await ctx.reply(
+        "\u{274C} That doesn\u2019t look like a valid GitHub username. " +
+          "Please send just your username (e.g., <code>octocat</code>).",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Verify the GitHub username exists via the public API
+    const token = project.githubToken || env.GITHUB_API_TOKEN || "";
+    const ghRes = await githubRequest(
+      "GET",
+      `/users/${encodeURIComponent(username)}`,
+      token
+    );
+
+    if (!ghRes.ok) {
+      await ctx.reply(
+        `\u{274C} GitHub user <code>${escapeHtml(username)}</code> not found.\n\n` +
+          "Please check the spelling and try again:",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Register the user in the central team registry
+    const telegramUsername = ctx.from?.username || "";
+    const firstName = ctx.from?.first_name || "Unknown";
+
+    await upsertTeamMember(env.PROJECTS, {
+      telegram_id: telegramId,
+      telegram_username: telegramUsername || firstName,
+      github: username,
+      name: firstName,
+    });
+
+    const members = await getTeamMembers(env.PROJECTS);
+    const color = getUserColor(members, telegramId);
+
+    await ctx.reply(
+      `${color} <b>GitHub linked!</b>\n\n` +
+        `GitHub: <code>${escapeHtml(username)}</code>\n` +
+        `Telegram: ${escapeHtml(firstName)}\n\n` +
+        "<b>Step 2/3: Notification Settings</b>",
+      { parse_mode: "HTML" }
+    );
+
+    // Advance to settings step and show the settings panel
+    await setOnboardingState(env.PROJECTS, telegramId, "settings");
+    const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+    const { text, keyboard } = buildSettingsMessage(prefs);
+
+    // Append a "Continue" button below the existing settings keyboard
+    const settingsKb = {
+      inline_keyboard: [
+        ...keyboard.inline_keyboard,
+        [{ text: "\u{27A1}\u{FE0F} Continue to Tutorial", callback_data: "onboard_continue" }],
+      ],
+    };
+
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: settingsKb });
   });
 
   return bot;
@@ -4435,6 +4669,26 @@ function matchRoute(
 
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Test-only exports — onboarding helpers & supporting functions
+// ---------------------------------------------------------------------------
+
+export {
+  getOnboardingState,
+  setOnboardingState,
+  clearOnboardingState,
+  isOnboarded,
+  markOnboarded,
+  sendOnboardingTutorial,
+  getTeamMembers,
+  upsertTeamMember,
+  getUserPreferences,
+  buildSettingsMessage,
+  escapeHtml,
+  githubRequest,
+};
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
