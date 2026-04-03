@@ -1,11 +1,14 @@
 ---
 name: scaffolding
-description: >
-  Set up a new project based on discovery interview results, install Claude Cortex, and prepare
-  everything for development. Use this skill after project-discovery completes and the user
-  approves the tech stack, or when the user says "Erstelle das Projekt", "Set it up",
-  "Projekt aufsetzen", "Initialize the project", "Scaffold it". Also use when the user has
-  a clear tech stack in mind and wants to jump straight to setup without a full discovery interview.
+description: "Use AFTER project-discovery completes and user approves tech stack. Triggers on: 'erstelle das Projekt', 'set it up', 'scaffold it', 'Projekt aufsetzen'"
+context: fork
+allowed-tools: Bash(npm *), Bash(npx *), Write, Edit, Read, Glob
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: prompt
+          prompt: "This runs during project scaffolding. BLOCK if the command could delete existing project files (rm, rmdir, overwrite). ALLOW safe commands (mkdir, npm, npx, git init, cp)."
 ---
 
 # Project Scaffolding Skill
@@ -241,3 +244,15 @@ If the user chose Google Stitch for design, set up the MCP connection:
 - Don't install packages the user didn't ask for — follow the minimal principle
 - Always use latest stable versions — check with `npm view [package] version` if unsure
 - Run session-start hook to verify .env is correctly configured
+
+## Dynamic Context
+
+Project exists:
+!`ls package.json 2>/dev/null && echo "package.json found" || echo "no package.json — fresh project"`
+
+## Gotchas
+
+- Windows: Always use path.join() — never hardcode forward/back slashes
+- If package.json already exists, MERGE dependencies — never overwrite
+- postinstall scripts run during npx too — add guard checks
+- After scaffolding, always run npm install + npm run db:init

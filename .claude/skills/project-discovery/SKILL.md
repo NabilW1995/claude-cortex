@@ -1,11 +1,6 @@
 ---
 name: project-discovery
-description: >
-  Interactive interview process to understand what the user wants to build before any code is written.
-  Use this skill when: the user says "Neues Projekt", "Ich will was bauen", "Lass uns ein Projekt starten",
-  "New project", "Build me a...", "I want to create...", or when /new-project is invoked. Also use when
-  the user describes an app idea without being specific about requirements, or when you need to understand
-  scope before recommending a tech stack. This skill is the FIRST step before any scaffolding or coding begins.
+description: "Use when user says 'neues Projekt', 'new project', 'I want to build', 'lass uns was bauen', 'was sollen wir bauen?'. MUST run before scaffolding skill."
 ---
 
 # Project Discovery — Interview Skill
@@ -239,3 +234,10 @@ Dann aktiviere den Scaffolding-Skill mit diesem Brief.
 - If the user says "mach einfach" or "du entscheidest" — make a reasonable choice and explain why
 - Check the Learning-DB at the start for relevant project setup experience
 - Factor in Cortex skills (Stitch, Browser Use, UI-UX-Guide) in your recommendations
+
+## Gotchas
+
+- This skill MUST complete before scaffolding can start
+- Always use AskUserQuestion tool for structured questions, not free-text
+- Don't skip tech stack discussion — the auto-detection in install.js depends on package.json
+- Ask about deployment target early (Cloudflare, Vercel, Coolify, etc.)
