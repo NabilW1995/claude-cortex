@@ -131,6 +131,7 @@ interface GitHubPRPayload {
     additions: number;
     deletions: number;
     changed_files: number;
+    commits: number;
     merged: boolean;
     base: { ref: string };
     head: { ref: string };
@@ -346,6 +347,23 @@ function verifyBotSecret(request: Request, env: Env): boolean {
   if (!env.TEAM_BOT_SECRET) return true; // No secret configured = dev mode
   const auth = request.headers.get("Authorization");
   return auth === `Bearer ${env.TEAM_BOT_SECRET}`;
+}
+
+/**
+ * Validate that a URL string uses a safe scheme (http or https).
+ * Returns null if the URL is invalid or uses a dangerous scheme
+ * (e.g. javascript:, data:, vbscript:).
+ */
+function sanitizeUrl(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.href;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2571,9 +2589,242 @@ async function handleMeineAufgaben(
   if (myClaim) {
     kb.text("\u{23F8} Pause", "mytasks_pause");
   }
-  kb.text("🔄 Refresh", "mytasks_refresh");
+
+  // Show [Create Preview] when user has a claimed category with a branch
+  // that has commits but no open PR yet
+  if (myClaim && project.githubToken) {
+    const categorySlug = myClaim.category.replace("area:", "").toLowerCase();
+    const branchName = `feature/${categorySlug}`;
+
+    try {
+      // Check if there is already an open PR for this branch
+      const owner = project.githubRepo.split("/")[0];
+      const prsRes = await githubRequest(
+        "GET",
+        `/repos/${project.githubRepo}/pulls?state=open&head=${owner}:${branchName}&per_page=1`,
+        project.githubToken
+      );
+      const prs = prsRes.ok
+        ? ((await prsRes.json()) as Array<{ number: number }>)
+        : [];
+
+      if (prs.length === 0) {
+        // No PR yet — check if branch exists (implies commits)
+        const branchRes = await githubRequest(
+          "GET",
+          `/repos/${project.githubRepo}/branches/${encodeURIComponent(branchName)}`,
+          project.githubToken
+        );
+        if (branchRes.ok) {
+          kb.row();
+          kb.text(
+            "\u{1F680} Create Preview",
+            `preview_create:${projectId}:${myClaim.category}`
+          );
+        }
+      }
+    } catch {
+      // GitHub API error — silently skip button
+    }
+  }
+
+  kb.text("\u{1F504} Refresh", "mytasks_refresh");
 
   return { text: lines.join("\n"), keyboard: kb };
+}
+
+// ---------------------------------------------------------------------------
+// Preview & Merge helpers (Issue #56)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve a Coolify preview URL from KV.
+ * Returns null when no preview has been stored yet.
+ */
+async function getPreviewUrl(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number
+): Promise<string | null> {
+  return kv.get(`preview:${projectId}:${prNumber}`);
+}
+
+/**
+ * Store a Coolify preview URL in KV with a 7-day TTL.
+ * Preview links are ephemeral — they become stale after the branch is merged
+ * or the deployment is torn down.
+ */
+async function setPreviewUrl(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number,
+  url: string
+): Promise<void> {
+  await kv.put(`preview:${projectId}:${prNumber}`, url, { expirationTtl: 604800 });
+}
+
+/**
+ * Create a Pull Request on GitHub for the given branch.
+ * Returns the PR number and URL on success, null on failure.
+ */
+async function createPreviewPR(
+  project: ProjectConfig,
+  branchName: string,
+  title: string,
+  body: string
+): Promise<{ number: number; html_url: string } | null> {
+  if (!project.githubToken) return null;
+
+  const res = await githubRequest(
+    "POST",
+    `/repos/${project.githubRepo}/pulls`,
+    project.githubToken,
+    { title, head: branchName, base: "main", body }
+  );
+
+  if (!res.ok) return null;
+  const pr = (await res.json()) as { number: number; html_url: string };
+  return pr;
+}
+
+/**
+ * Submit a GitHub PR review (approve or request changes).
+ * Returns true on success, false on failure.
+ */
+async function submitPRReview(
+  project: ProjectConfig,
+  prNumber: number,
+  event: "APPROVE" | "REQUEST_CHANGES",
+  body?: string
+): Promise<boolean> {
+  if (!project.githubToken) return false;
+
+  const payload: Record<string, string> = { event };
+  if (body) payload.body = body;
+
+  const res = await githubRequest(
+    "POST",
+    `/repos/${project.githubRepo}/pulls/${prNumber}/reviews`,
+    project.githubToken,
+    payload
+  );
+
+  return res.ok;
+}
+
+/**
+ * Send a "please git pull" DM to all team members except the person who
+ * merged the PR.  Always-on — not controlled by notification preferences
+ * because stale local branches cause real problems.
+ *
+ * Deduplication: stores a KV key with 1h TTL to avoid sending the same
+ * reminder if the webhook fires more than once.
+ */
+async function sendPullReminder(
+  env: Env,
+  botToken: string,
+  mergerGithub: string,
+  prTitle: string,
+  prNumber: number,
+  commitCount: number
+): Promise<void> {
+  // Dedup: check if we already sent this reminder
+  const projects = await getProjectList(env);
+  const projectId = projects.length > 0 ? projects[0].id : "default";
+  const dedupKey = `pullreminder:${projectId}:${prNumber}`;
+  const existing = await env.PROJECTS.get(dedupKey);
+  if (existing) return;
+
+  // Mark as sent (1h TTL) before sending to prevent races
+  await env.PROJECTS.put(dedupKey, "1", { expirationTtl: 3600 });
+
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the person who merged
+    if (member.github === mergerGithub) continue;
+
+    // Respect DND status
+    const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+    if (dnd) continue;
+
+    const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+    if (!prefs.dm_chat_id) continue;
+
+    const commitWord = commitCount === 1 ? "commit" : "commits";
+    const text =
+      `\u{1F504} <b>Pull Reminder</b>\n${"━".repeat(16)}\n\n` +
+      `@${escapeHtml(mergerGithub)} merged PR #${prNumber}:\n` +
+      `"${escapeHtml(prTitle)}"\n\n` +
+      `\u{1F4E6} ${commitCount} ${commitWord} added to main.\n\n` +
+      `\u{26A1} Please <code>git pull</code> before continuing work!`;
+
+    const status = await sendDM(botToken, prefs.dm_chat_id, text);
+
+    if (status === "blocked") {
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+    }
+  }
+}
+
+/**
+ * Send preview link and review buttons to all team members.
+ * Called after a PR is created via the [Create Preview] button.
+ */
+async function sendPreviewNotifications(
+  env: Env,
+  botToken: string,
+  creatorTelegramId: number,
+  prNumber: number,
+  prTitle: string,
+  prUrl: string,
+  previewUrl: string | null
+): Promise<void> {
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the PR creator
+    if (member.telegram_id === creatorTelegramId) continue;
+
+    const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+    if (dnd) continue;
+
+    const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+    if (!prefs.dm_chat_id) continue;
+
+    // Only send to members who opted in for previews or PR reviews
+    if (!prefs.previews && !prefs.pr_reviews) continue;
+
+    const previewLine = previewUrl
+      ? `\n\u{1F310} <a href="${previewUrl}">Preview</a>`
+      : "";
+
+    const text =
+      `\u{1F680} <b>New Preview</b>\n${"━".repeat(16)}\n\n` +
+      `PR #${prNumber}: "${escapeHtml(prTitle)}"\n` +
+      `\u{1F517} <a href="${prUrl}">View on GitHub</a>${previewLine}\n\n` +
+      `Please review:`;
+
+    const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+      inline_keyboard: [
+        [
+          { text: "\u{2705} Approve", callback_data: `review_approve:${prNumber}` },
+          { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNumber}` },
+        ],
+        [
+          { text: "\u{1F517} View PR", url: prUrl },
+        ],
+      ],
+    };
+
+    const status = await sendDM(botToken, prefs.dm_chat_id, text, reviewKb);
+
+    if (status === "blocked") {
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2680,15 +2931,43 @@ async function renderTeamBoard(
         );
         let branchStatus = "in progress";
         if (matchingPR) {
-          branchStatus = "PR open";
+          // Check for a preview URL stored by Coolify webhook
+          const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, matchingPR.number);
+          if (previewUrl) {
+            branchStatus = `PR open \u{00B7} <a href="${previewUrl}">Preview</a>`;
+          } else {
+            branchStatus = "PR open";
+          }
         }
 
         lines.push(
-          `${color} <b>${safeDisplay}</b> → ${safeName}`
+          `${color} <b>${safeDisplay}</b> \u{2192} ${safeName}`
         );
         lines.push(
-          `    📊 ${progressText} · ${branchStatus}`
+          `    \u{1F4CA} ${progressText} \u{00B7} ${branchStatus}`
         );
+
+        // Show [Create Preview] button when this claim's branch exists
+        // but has no open PR yet — the viewer can create one
+        if (!matchingPR && project.githubToken && claim.telegramId === telegramId) {
+          const branchName = `feature/${categorySlug}`;
+          try {
+            const branchRes = await githubRequest(
+              "GET",
+              `/repos/${project.githubRepo}/branches/${encodeURIComponent(branchName)}`,
+              project.githubToken
+            );
+            if (branchRes.ok) {
+              kb.text(
+                "\u{1F680} Create Preview",
+                `preview_create:${projectId}:${claim.category}`
+              );
+              kb.row();
+            }
+          } catch {
+            // Branch does not exist or API error — skip button
+          }
+        }
 
         // Show tasks within this category sorted by priority
         const categoryIssues = openIssuesByCategory.get(claim.category);
@@ -4736,6 +5015,227 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // Preview & Merge — Create Preview, Approve, Request Changes (#56)
+  // -------------------------------------------------------------------
+
+  /**
+   * [Create Preview] button — creates a PR on GitHub and notifies the team.
+   * Callback data format: preview_create:{projectId}:{category}
+   */
+  bot.callbackQuery(/^preview_create:([^:]+):(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery({ text: "Creating PR..." }); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const targetProjectId = ctx.match![1];
+    const category = ctx.match![2];
+
+    try {
+      const targetProject = await getProject(env.PROJECTS, targetProjectId, env);
+      if (!targetProject || !targetProject.githubToken) {
+        try { await ctx.answerCallbackQuery({ text: "Project or token not found." }); } catch {}
+        return;
+      }
+
+      // Resolve who is creating the PR
+      const members = await getTeamMembers(env.PROJECTS);
+      const member = members.find((m) => m.telegram_id === telegramId);
+      if (!member) {
+        try { await ctx.answerCallbackQuery({ text: "You are not registered." }); } catch {}
+        return;
+      }
+
+      const categorySlug = category.replace("area:", "").toLowerCase();
+      const displayName = category.replace("area:", "");
+      const branchName = `feature/${categorySlug}`;
+
+      // Build PR title and body from category info
+      const prTitle = `feat: ${displayName}`;
+      const prBody =
+        `## ${displayName}\n\n` +
+        `Category: \`${category}\`\n` +
+        `Created by: @${member.github} via Cortex Team Bot`;
+
+      const pr = await createPreviewPR(targetProject, branchName, prTitle, prBody);
+      if (!pr) {
+        await ctx.editMessageText(
+          `\u{26A0}\u{FE0F} Could not create PR for branch <code>${escapeHtml(branchName)}</code>.\n` +
+          "The branch may not exist or there may already be a PR.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Log the event
+      await logEvent(env.DB, targetProject.githubRepo, "pr.created_via_bot", member.github, String(pr.number));
+
+      // Check if a preview URL already exists (Coolify may have deployed)
+      const previewUrl = await getPreviewUrl(env.PROJECTS, targetProjectId, pr.number);
+
+      // Update the message with success info
+      const previewLine = previewUrl
+        ? `\n\u{1F310} <a href="${previewUrl}">Preview</a>`
+        : "\n\u{23F3} Waiting for Coolify preview deployment...";
+
+      const successKb = new InlineKeyboard();
+      successKb.url("\u{1F517} View PR", pr.html_url);
+      successKb.row();
+      successKb.text("\u{1F504} Refresh", "mytasks_refresh");
+
+      await ctx.editMessageText(
+        `\u{2705} <b>PR Created!</b>\n${"━".repeat(16)}\n\n` +
+        `PR #${pr.number}: "${escapeHtml(prTitle)}"\n` +
+        `\u{1F517} <a href="${pr.html_url}">View on GitHub</a>${previewLine}`,
+        { parse_mode: "HTML", reply_markup: successKb }
+      );
+
+      // Notify team members about the new preview
+      await sendPreviewNotifications(
+        env,
+        targetProject.botToken,
+        telegramId,
+        pr.number,
+        prTitle,
+        pr.html_url,
+        previewUrl
+      );
+    } catch (err) {
+      console.error("preview_create error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error creating PR." });
+      } catch {}
+    }
+  });
+
+  /**
+   * [Approve] button — submits an APPROVE review via GitHub API.
+   * Self-approve is allowed but marked in the review body.
+   * Callback data format: review_approve:{prNumber}
+   */
+  bot.callbackQuery(/^review_approve:(\d+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery({ text: "Submitting approval..." }); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const prNumber = parseInt(ctx.match![1], 10);
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active || !active.projectConfig.githubToken) {
+        try { await ctx.answerCallbackQuery({ text: "No project configured." }); } catch {}
+        return;
+      }
+
+      const { projectConfig: proj } = active;
+
+      // Look up reviewer's GitHub username
+      const members = await getTeamMembers(env.PROJECTS);
+      const reviewer = members.find((m) => m.telegram_id === telegramId);
+      if (!reviewer) {
+        try { await ctx.answerCallbackQuery({ text: "You are not registered." }); } catch {}
+        return;
+      }
+
+      // Fetch PR to detect self-approve
+      const prRes = await githubRequest(
+        "GET",
+        `/repos/${proj.githubRepo}/pulls/${prNumber}`,
+        proj.githubToken!
+      );
+      let isSelfApprove = false;
+      if (prRes.ok) {
+        const prData = (await prRes.json()) as { user: { login: string } };
+        isSelfApprove = prData.user.login === reviewer.github;
+      }
+
+      const reviewBody = isSelfApprove
+        ? "\u{2705} Self-approved via Cortex Team Bot (self-approved)"
+        : "\u{2705} Approved via Cortex Team Bot";
+
+      const ok = await submitPRReview(proj, prNumber, "APPROVE", reviewBody);
+
+      if (ok) {
+        await logEvent(env.DB, proj.githubRepo, "review.approved.bot", reviewer.github, String(prNumber));
+
+        const label = isSelfApprove ? "Self-Approved" : "Approved";
+        await ctx.editMessageText(
+          `\u{2705} <b>${label}!</b>\n\n` +
+          `PR #${prNumber} approved by @${escapeHtml(reviewer.github)}` +
+          (isSelfApprove ? " (self-approved)" : ""),
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.editMessageText(
+          `\u{26A0}\u{FE0F} Could not approve PR #${prNumber}. GitHub API error.`,
+          { parse_mode: "HTML" }
+        );
+      }
+    } catch (err) {
+      console.error("review_approve error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error submitting review." });
+      } catch {}
+    }
+  });
+
+  /**
+   * [Request Changes] button — submits a REQUEST_CHANGES review via GitHub API.
+   * Callback data format: review_changes:{prNumber}
+   */
+  bot.callbackQuery(/^review_changes:(\d+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery({ text: "Submitting review..." }); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const prNumber = parseInt(ctx.match![1], 10);
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active || !active.projectConfig.githubToken) {
+        try { await ctx.answerCallbackQuery({ text: "No project configured." }); } catch {}
+        return;
+      }
+
+      const { projectConfig: proj } = active;
+
+      // Look up reviewer's GitHub username
+      const members = await getTeamMembers(env.PROJECTS);
+      const reviewer = members.find((m) => m.telegram_id === telegramId);
+      if (!reviewer) {
+        try { await ctx.answerCallbackQuery({ text: "You are not registered." }); } catch {}
+        return;
+      }
+
+      const ok = await submitPRReview(
+        proj,
+        prNumber,
+        "REQUEST_CHANGES",
+        "\u{270F}\u{FE0F} Changes requested via Cortex Team Bot"
+      );
+
+      if (ok) {
+        await logEvent(env.DB, proj.githubRepo, "review.changes_requested.bot", reviewer.github, String(prNumber));
+
+        await ctx.editMessageText(
+          `\u{270F}\u{FE0F} <b>Changes Requested</b>\n\n` +
+          `PR #${prNumber} — @${escapeHtml(reviewer.github)} requested changes.`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.editMessageText(
+          `\u{26A0}\u{FE0F} Could not submit review for PR #${prNumber}. GitHub API error.`,
+          { parse_mode: "HTML" }
+        );
+      }
+    } catch (err) {
+      console.error("review_changes error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error submitting review." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
   // "Meine Aufgaben" — Pause flow callbacks
   // -------------------------------------------------------------------
 
@@ -6356,6 +6856,19 @@ async function handleGitHubPR(
     );
   }
 
+  // Always-on pull reminder when a PR is merged — not preference-gated
+  // because stale local branches cause real merge conflicts
+  if (pr.merged && action === "closed") {
+    await sendPullReminder(
+      env,
+      project.botToken,
+      sender.login,
+      pr.title,
+      pr.number,
+      pr.commits
+    );
+  }
+
   // Log ALL events to D1 for reports (even filtered/draft ones)
   if (eventType) {
     await logEvent(env.DB, project.githubRepo, eventType, sender.login, String(pr.number));
@@ -6817,6 +7330,14 @@ function matchRoute(
     return { handler: "telegram", projectId: telegramMatch[1] };
   }
 
+  // Coolify deployment webhook: POST /coolify/:projectId
+  const coolifyMatch = pathname.match(
+    /^\/coolify\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (coolifyMatch && method === "POST") {
+    return { handler: "coolify", projectId: coolifyMatch[1] };
+  }
+
   return null;
 }
 
@@ -6896,6 +7417,13 @@ export {
   parseIssueBody,
   findRelevantFiles,
   generateClaudePrompt,
+  // Preview & Merge helpers (Issue #56)
+  getPreviewUrl,
+  setPreviewUrl,
+  createPreviewPR,
+  submitPRReview,
+  sendPullReminder,
+  sendPreviewNotifications,
 };
 export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState };
 
@@ -6977,6 +7505,127 @@ export default {
         if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
         const sessions = await getActiveSessions(env.PROJECTS, route.projectId!);
         return Response.json({ sessions });
+      }
+
+      case "coolify": {
+        // Coolify sends deployment_status webhooks when a preview builds.
+        // We extract the preview URL and store it in KV, then DM the team.
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
+        try {
+          const coolifyBody = (await request.json()) as {
+            status?: string;
+            preview_url?: string;
+            url?: string;
+            deployment_url?: string;
+            pull_request_number?: number;
+            pr_number?: number;
+            branch?: string;
+          };
+
+          // Coolify webhooks can come in various shapes depending on version.
+          // We accept the URL from whichever field is present.
+          const rawDeployUrl =
+            coolifyBody.preview_url ||
+            coolifyBody.deployment_url ||
+            coolifyBody.url;
+          const prNum =
+            coolifyBody.pull_request_number ||
+            coolifyBody.pr_number;
+
+          if (!rawDeployUrl || !prNum) {
+            return new Response("Missing preview_url or pr_number", { status: 400 });
+          }
+
+          // Validate URL scheme to prevent javascript: / data: injection
+          const deployUrl = sanitizeUrl(rawDeployUrl);
+          if (!deployUrl) {
+            return new Response("Invalid preview URL scheme", { status: 400 });
+          }
+
+          const coolifyProjectId = route.projectId!;
+
+          // Store the preview URL in KV (7-day TTL)
+          await setPreviewUrl(env.PROJECTS, coolifyProjectId, prNum, deployUrl);
+
+          // Resolve the project to get bot token and notify team
+          const coolifyProject = await getProject(env.PROJECTS, coolifyProjectId, env);
+          if (coolifyProject) {
+            // Look up PR title for a nicer notification
+            let prTitle = `PR #${prNum}`;
+            let prUrl = "";
+            if (coolifyProject.githubToken) {
+              try {
+                const prRes = await githubRequest(
+                  "GET",
+                  `/repos/${coolifyProject.githubRepo}/pulls/${prNum}`,
+                  coolifyProject.githubToken
+                );
+                if (prRes.ok) {
+                  const prData = (await prRes.json()) as { title: string; html_url: string };
+                  prTitle = prData.title;
+                  prUrl = prData.html_url;
+                }
+              } catch {
+                // Best-effort title lookup
+              }
+            }
+
+            // DM all team members with preview link and review buttons
+            const members = await getTeamMembers(env.PROJECTS);
+            for (const member of members) {
+              const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+              if (dnd) continue;
+
+              const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+              if (!prefs.dm_chat_id) continue;
+              if (!prefs.previews && !prefs.pr_reviews) continue;
+
+              const prUrlLine = prUrl
+                ? `\n\u{1F517} <a href="${prUrl}">View PR</a>`
+                : "";
+
+              const text =
+                `\u{1F310} <b>Preview Ready!</b>\n${"━".repeat(16)}\n\n` +
+                `PR #${prNum}: "${escapeHtml(prTitle)}"\n` +
+                `\u{1F680} <a href="${deployUrl}">Open Preview</a>${prUrlLine}\n\n` +
+                `Please review:`;
+
+              const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+                inline_keyboard: [
+                  [
+                    { text: "\u{2705} Approve", callback_data: `review_approve:${prNum}` },
+                    { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNum}` },
+                  ],
+                  [
+                    { text: "\u{1F310} Preview", url: deployUrl },
+                  ],
+                ],
+              };
+
+              const status = await sendDM(coolifyProject.botToken, prefs.dm_chat_id, text, reviewKb);
+              if (status === "blocked") {
+                prefs.dm_chat_id = null;
+                await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+              }
+            }
+
+            // Log the deployment event
+            await logEvent(
+              env.DB,
+              coolifyProject.githubRepo,
+              "preview.deployed",
+              "coolify",
+              String(prNum),
+              { url: deployUrl }
+            );
+          }
+
+          return Response.json({ ok: true, stored: `preview:${coolifyProjectId}:${prNum}` });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Coolify handler error:", msg);
+          return new Response(`Coolify handler error: ${msg}`, { status: 500 });
+        }
       }
 
       default:

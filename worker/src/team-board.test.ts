@@ -1183,7 +1183,7 @@ describe("renderTeamBoard — mixed claimed, paused, and free categories", () =>
     expect(text).toContain("Free categories:");
     expect(text).toContain("devops");
     expect(text).toContain("free");
-    expect(text).toContain("1 issues");
+    expect(text).toContain("1 issue");
   });
 });
 
