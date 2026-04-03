@@ -27,6 +27,9 @@ import {
   isBlockerActive,
   escapeHtml,
   getTeamMembers,
+  getCompletedCategories,
+  fetchClosedIssuesByCategory,
+  buildCategoryPicker,
   PRIORITY_EMOJIS,
   PRIORITY_DEFAULT,
 } from "./index";
@@ -626,7 +629,7 @@ describe("handleAufgabeNehmen", () => {
     expect(replyText).toContain("Blocker active");
     expect(replyText).toContain("#42");
     expect(replyText).toContain("Critical outage");
-    expect(replyText).toContain("claims paused");
+    expect(replyText).toContain("You can still claim a category");
   });
 
   it("shows 'already claimed' message when user has a claim", async () => {
@@ -1171,24 +1174,26 @@ describe("handleCategoryConfirm", () => {
     fetchSpy.mockRestore();
   });
 
-  it("blocks confirmation when a blocker appeared between pick and confirm", async () => {
+  it("proceeds with confirm even if a blocker appeared (user already acknowledged warning)", async () => {
     const project = makeProject();
     const env = createMockEnv();
 
-    // Blocker active
+    // No existing claim for area:frontend — category is free to claim
+    // Mock fetchOpenIssuesByCategory (GitHub labels API)
     fetchSpy.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify([{ number: 99, title: "Outage" }]),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      )
+      new Response(JSON.stringify([]), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      })
     );
 
     const ctx = createMockContext();
     await handleCategoryConfirm(ctx as any, project, env as any, "test-project", "area:frontend");
 
+    // Confirm should proceed (not block) because user already saw the blocker
+    // warning in handleCategoryAssign and chose to continue
+    expect(ctx.editMessageText).toHaveBeenCalledTimes(1);
     const text = (ctx.editMessageText as any).mock.calls[0][0] as string;
-    expect(text).toContain("Blocker active");
-    expect(text).toContain("appeared while you were choosing");
+    expect(text).not.toContain("Blocker active");
   });
 
   it("blocks when category was claimed by someone else (race condition)", async () => {
@@ -1439,5 +1444,267 @@ describe("Edge cases", () => {
     expect(sorted[0][0]).toBe("area:alpha");
     expect(sorted[1][0]).toBe("area:beta");
     expect(sorted[2][0]).toBe("area:zeta");
+  });
+});
+
+// =========================================================================
+// Issue #69 — Completed categories toggle
+// =========================================================================
+
+describe("getCompletedCategories", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("returns labels with no open issues", async () => {
+    const project = makeProject();
+    const openCategories = new Map<string, unknown[]>();
+    openCategories.set("area:api", [{ number: 1 }]);
+
+    // Mock fetchAreaLabels: returns all area labels including completed ones
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { name: "area:api" },
+          { name: "area:ui" },
+          { name: "area:dashboard" },
+          { name: "bug" }, // non-area label, should be filtered
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const completed = await getCompletedCategories(project, openCategories);
+    expect(completed).toEqual(["area:dashboard", "area:ui"]);
+    expect(completed).not.toContain("area:api");
+  });
+
+  it("returns empty array when all categories have open issues", async () => {
+    const project = makeProject();
+    const openCategories = new Map<string, unknown[]>();
+    openCategories.set("area:api", [{ number: 1 }]);
+    openCategories.set("area:ui", [{ number: 2 }]);
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([{ name: "area:api" }, { name: "area:ui" }]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const completed = await getCompletedCategories(project, openCategories);
+    expect(completed).toEqual([]);
+  });
+});
+
+describe("fetchClosedIssuesByCategory", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("fetches closed issues for each category label", async () => {
+    const project = makeProject();
+
+    // Mock for area:ui
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { number: 10, title: "Login redesign" },
+          { number: 11, title: "Button fix" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    // Mock for area:dashboard
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([{ number: 20, title: "Charts" }]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const result = await fetchClosedIssuesByCategory(project, ["area:ui", "area:dashboard"]);
+    expect(result.get("area:ui")).toHaveLength(2);
+    expect(result.get("area:dashboard")).toHaveLength(1);
+    expect(result.get("area:ui")![0].title).toBe("Login redesign");
+  });
+
+  it("returns empty map for empty input", async () => {
+    const project = makeProject();
+    const result = await fetchClosedIssuesByCategory(project, []);
+    expect(result.size).toBe(0);
+  });
+});
+
+describe("buildCategoryPicker", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("shows toggle button with completed count when showCompleted=false", async () => {
+    const project = makeProject();
+    const env = createMockEnv({
+      "test-project:category_claims": JSON.stringify({ claims: [], lastUpdated: "" }),
+    });
+    const claimsState: CategoryClaimsState = { claims: [], lastUpdated: "" };
+
+    // Mock fetchOpenIssuesByCategory (open issues)
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { number: 1, title: "Task A", labels: [{ name: "area:api" }] },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    // Mock fetchAreaLabels (all labels including completed)
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { name: "area:api" },
+          { name: "area:ui" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const result = await buildCategoryPicker(env, project, "test-project", claimsState, false);
+    expect(result).not.toBeNull();
+
+    const allCallbacks = result!.buttons.flat().map((b) => b.callback_data);
+    expect(allCallbacks).toContain("cat_show_completed");
+    expect(allCallbacks).not.toContain("cat_hide_completed");
+
+    const toggleBtn = result!.buttons.flat().find((b) => b.callback_data === "cat_show_completed");
+    expect(toggleBtn!.text).toContain("1"); // 1 completed category
+  });
+
+  it("shows completed categories with issues when showCompleted=true", async () => {
+    const project = makeProject();
+    const env = createMockEnv({
+      "test-project:category_claims": JSON.stringify({ claims: [], lastUpdated: "" }),
+    });
+    const claimsState: CategoryClaimsState = { claims: [], lastUpdated: "" };
+
+    // Mock fetchOpenIssuesByCategory
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { number: 1, title: "Task A", labels: [{ name: "area:api" }] },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    // Mock fetchAreaLabels
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([{ name: "area:api" }, { name: "area:ui" }]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    // Mock fetchClosedIssuesByCategory for area:ui
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { number: 10, title: "Login redesign" },
+          { number: 11, title: "Button component" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const result = await buildCategoryPicker(env, project, "test-project", claimsState, true);
+    expect(result).not.toBeNull();
+
+    // Text should contain completed section with issues
+    expect(result!.text).toContain("Erledigt");
+    expect(result!.text).toContain("ui");
+    expect(result!.text).toContain("#10");
+    expect(result!.text).toContain("Login redesign");
+
+    // Should have hide button, not show
+    const allCallbacks = result!.buttons.flat().map((b) => b.callback_data);
+    expect(allCallbacks).toContain("cat_hide_completed");
+    expect(allCallbacks).not.toContain("cat_show_completed");
+  });
+
+  it("hides toggle when no completed categories exist", async () => {
+    const project = makeProject();
+    const env = createMockEnv({
+      "test-project:category_claims": JSON.stringify({ claims: [], lastUpdated: "" }),
+    });
+    const claimsState: CategoryClaimsState = { claims: [], lastUpdated: "" };
+
+    // Mock fetchOpenIssuesByCategory
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { number: 1, title: "Task A", labels: [{ name: "area:api" }] },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    // Mock fetchAreaLabels — same labels as open, so none are "completed"
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([{ name: "area:api" }]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const result = await buildCategoryPicker(env, project, "test-project", claimsState, false);
+    expect(result).not.toBeNull();
+
+    const allCallbacks = result!.buttons.flat().map((b) => b.callback_data);
+    expect(allCallbacks).not.toContain("cat_show_completed");
+    expect(allCallbacks).not.toContain("cat_hide_completed");
+  });
+
+  it("returns null when no categories exist at all", async () => {
+    const project = makeProject();
+    const env = createMockEnv({
+      "test-project:category_claims": JSON.stringify({ claims: [], lastUpdated: "" }),
+    });
+    const claimsState: CategoryClaimsState = { claims: [], lastUpdated: "" };
+
+    // No open issues
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify([]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    // No labels
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify([]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const result = await buildCategoryPicker(env, project, "test-project", claimsState);
+    expect(result).toBeNull();
   });
 });

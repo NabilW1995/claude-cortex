@@ -806,6 +806,53 @@ async function fetchOpenIssuesByCategory(
 }
 
 /**
+ * Find completed categories: area: labels that exist but have 0 open issues.
+ */
+async function getCompletedCategories(
+  project: ProjectConfig,
+  openCategories: Map<string, unknown[]>
+): Promise<string[]> {
+  const allLabels = await fetchAreaLabels(project);
+  return allLabels.filter((label) => !openCategories.has(label));
+}
+
+/**
+ * Fetch closed issues for specific category labels (max 5 per category).
+ * Used by the "show completed" toggle in the category picker.
+ */
+async function fetchClosedIssuesByCategory(
+  project: ProjectConfig,
+  categoryLabels: string[]
+): Promise<Map<string, Array<{ number: number; title: string }>>> {
+  const result = new Map<string, Array<{ number: number; title: string }>>();
+  if (!project.githubToken || categoryLabels.length === 0) return result;
+
+  for (const label of categoryLabels) {
+    try {
+      const res = await githubRequest(
+        "GET",
+        `/repos/${project.githubRepo}/issues?state=closed&labels=${encodeURIComponent(label)}&per_page=5`,
+        project.githubToken
+      );
+      if (res.ok) {
+        const issues = (await res.json()) as Array<{
+          number: number;
+          title: string;
+          pull_request?: unknown;
+        }>;
+        result.set(
+          label,
+          issues.filter((i) => !i.pull_request).map((i) => ({ number: i.number, title: i.title }))
+        );
+      }
+    } catch {
+      // Non-critical — skip this category
+    }
+  }
+  return result;
+}
+
+/**
  * Batch-assign multiple issues to a GitHub user.
  * Returns which issue numbers succeeded and which failed.
  */
@@ -3269,52 +3316,36 @@ async function handleProjectMyTasks(
  */
 async function autoReleaseDoneCategory(
   env: Env,
-  project: ProjectConfig,
+  _project: ProjectConfig,
   projectId: string,
-  telegramId: number
+  telegramId: number,
+  openIssueNumbers?: number[]
 ): Promise<boolean> {
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
   const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
   if (!myClaim || myClaim.assignedIssues.length === 0) return false;
 
-  // Check if ALL assigned issues are still open
-  let allClosed = true;
-  for (const issueNum of myClaim.assignedIssues) {
-    try {
-      const res = await githubRequest(
-        "GET",
-        `/repos/${project.githubRepo}/issues/${issueNum}`,
-        project.githubToken!
-      );
-      if (res.ok) {
-        const issue = (await res.json()) as { state: string };
-        if (issue.state === "open") {
-          allClosed = false;
-          break;
-        }
-      }
-    } catch {
-      // If API fails, assume issue is still open (safe default)
-      allClosed = false;
-      break;
-    }
+  // Use pre-fetched open issue data when available (zero API calls)
+  if (openIssueNumbers !== undefined) {
+    const openSet = new Set(openIssueNumbers);
+    const hasOpenClaimed = myClaim.assignedIssues.some((n) => openSet.has(n));
+    if (hasOpenClaimed) return false;
+  } else {
+    // No pre-fetched data — skip release check.
+    // Release is handled event-driven by mytasks_done handler instead.
+    return false;
   }
 
-  if (allClosed) {
-    // Auto-release: remove claim from KV
-    claimsState.claims = claimsState.claims.filter((c) => c.telegramId !== telegramId);
-    claimsState.lastUpdated = new Date().toISOString();
-    await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+  // All claimed issues are closed — auto-release
+  claimsState.claims = claimsState.claims.filter((c) => c.telegramId !== telegramId);
+  claimsState.lastUpdated = new Date().toISOString();
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
 
-    // Stop timer
-    try {
-      await stopTimer(env.PROJECTS, telegramId, projectId);
-    } catch {}
+  try {
+    await stopTimer(env.PROJECTS, telegramId, projectId);
+  } catch {}
 
-    return true;
-  }
-
-  return false;
+  return true;
 }
 
 /**
@@ -3348,9 +3379,6 @@ async function handleMeineAufgaben(
       keyboard: kb,
     };
   }
-
-  // Auto-release category if all assigned issues are closed on GitHub
-  await autoReleaseDoneCategory(env, project, projectId, telegramId);
 
   // Look up the caller's GitHub username
   const members = await getTeamMembers(env.PROJECTS);
@@ -3415,7 +3443,12 @@ async function handleMeineAufgaben(
   }
 
   // Filter out pull requests, sort by priority (blocker first)
-  const myIssues = sortByPriority(issues.filter((i) => !i.pull_request));
+  const nonPrIssues = issues.filter((i) => !i.pull_request);
+  const myIssues = sortByPriority(nonPrIssues);
+
+  // Auto-release category if all claimed issues are closed (uses already-fetched data)
+  const openIssueNumbers = nonPrIssues.map((i) => i.number);
+  await autoReleaseDoneCategory(env, project, projectId, telegramId, openIssueNumbers);
 
   // Read the user's currently active task and today's done counter
   const activeTaskNumber = await getActiveTask(env.PROJECTS, telegramId, projectId);
@@ -3501,11 +3534,11 @@ async function handleMeineAufgaben(
       lines.push(
         `\u{1F6A8} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
       );
-      // One row per task — descriptive label so the user knows which task each button controls
+      // Two buttons per task row: Start/Active + Done
       if (isActive) {
         kb.text(
-          `\u{2705} Done #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
-          `mytasks_done:${issue.number}`
+          `\u{25B6} Active #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
         );
       } else {
         kb.text(
@@ -3513,6 +3546,7 @@ async function handleMeineAufgaben(
           `mytasks_start:${issue.number}`
         );
       }
+      kb.text(`\u{2705} Done #${issue.number}`, `mytasks_done:${issue.number}`);
       kb.row();
     }
   }
@@ -3529,11 +3563,11 @@ async function handleMeineAufgaben(
       lines.push(
         `${emoji} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
       );
-      // One row per task — active tasks show Done, others show Start
+      // Two buttons per task row: Start/Active + Done
       if (isActive) {
         kb.text(
-          `\u{2705} Done #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
-          `mytasks_done:${issue.number}`
+          `\u{25B6} Active #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
         );
       } else {
         kb.text(
@@ -3541,6 +3575,7 @@ async function handleMeineAufgaben(
           `mytasks_start:${issue.number}`
         );
       }
+      kb.text(`\u{2705} Done #${issue.number}`, `mytasks_done:${issue.number}`);
       kb.row();
     }
   }
@@ -4349,6 +4384,92 @@ async function sendOnboardingTutorial(ctx: Context): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the category picker UI: open categories as buttons, optional completed
+ * categories section, toggle button, and cancel button.
+ */
+async function buildCategoryPicker(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string,
+  claimsState: CategoryClaimsState,
+  showCompleted: boolean = false
+): Promise<{ text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } | null> {
+  const categories = await fetchOpenIssuesByCategory(project);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  // Count completed categories (labels with no open issues)
+  const completedLabels = await getCompletedCategories(project, categories);
+
+  if (categories.size === 0 && completedLabels.length === 0) {
+    return null; // No categories at all
+  }
+
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+  const lines: string[] = [
+    "\u{1F4CB} <b>Aufgabe nehmen</b>",
+    "Pick a category to claim all its open issues:",
+  ];
+
+  // Open categories as buttons
+  if (categories.size > 0) {
+    const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const pausedList = await getPausedCategories(env.PROJECTS, projectId);
+
+    for (const [label, issues] of sortedCategories) {
+      const displayName = label.replace("area:", "");
+      const claimer = claimsState.claims.find((c) => c.category === label);
+      const paused = pausedList.find((p) => p.category === label);
+
+      let buttonText: string;
+      if (claimer) {
+        const claimerColor = getUserColor(members, claimer.telegramId);
+        buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
+      } else if (paused) {
+        buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} paused by ${paused.pausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`;
+      } else {
+        buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
+      }
+
+      buttons.push([{
+        text: buttonText,
+        callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
+      }]);
+    }
+  }
+
+  // Completed categories section
+  if (completedLabels.length > 0) {
+    if (showCompleted) {
+      // Fetch closed issues for completed categories
+      const closedByCategory = await fetchClosedIssuesByCategory(project, completedLabels);
+
+      lines.push("");
+      lines.push(`\u{2501} <b>Erledigt (${completedLabels.length})</b> \u{2501}`);
+
+      for (const label of completedLabels.sort()) {
+        const displayName = label.replace("area:", "");
+        const closedIssues = closedByCategory.get(label) || [];
+        lines.push(`\u{2705} <b>${escapeHtml(displayName)}</b>`);
+        for (const issue of closedIssues) {
+          lines.push(`  \u{2022} #${issue.number} ${escapeHtml(issue.title)}`);
+        }
+        if (closedIssues.length === 0) {
+          lines.push("  <i>No closed issues found</i>");
+        }
+      }
+
+      buttons.push([{ text: "\u{1F4CA} Erledigte ausblenden", callback_data: "cat_hide_completed" }]);
+    } else {
+      buttons.push([{ text: `\u{1F4CA} Erledigte anzeigen (${completedLabels.length})`, callback_data: "cat_show_completed" }]);
+    }
+  }
+
+  buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
+
+  return { text: lines.join("\n"), buttons };
+}
+
+/**
  * Show the category picker with issue counts per area: label.
  */
 async function handleCategoryAssign(
@@ -4359,9 +4480,6 @@ async function handleCategoryAssign(
 ): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
-  // Auto-release category if all assigned tasks are done on GitHub
-  await autoReleaseDoneCategory(env, project, projectId, telegramId);
 
   // Warn about blocker but allow override
   const blockers = await isBlockerActive(project);
@@ -4413,11 +4531,9 @@ async function handleCategoryAssign(
     return;
   }
 
-  // Fetch categories from GitHub
-  const categories = await fetchOpenIssuesByCategory(project);
-  const members = await getTeamMembers(env.PROJECTS);
-
-  if (categories.size === 0) {
+  // Build category picker with open + optional completed categories
+  const result = await buildCategoryPicker(env, project, projectId, claimsState);
+  if (!result) {
     await ctx.editMessageText(
       "\u{1F4C2} No categories found.\n\nAdd labels with the <code>area:</code> prefix to your GitHub issues to create categories.",
       { parse_mode: "HTML" }
@@ -4425,39 +4541,10 @@ async function handleCategoryAssign(
     return;
   }
 
-  // Build category picker buttons with color indicators
-  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
-  const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  const pausedList = await getPausedCategories(env.PROJECTS, projectId);
-
-  for (const [label, issues] of sortedCategories) {
-    const displayName = label.replace("area:", "");
-    const claimer = claimsState.claims.find((c) => c.category === label);
-    const paused = pausedList.find((p) => p.category === label);
-
-    let buttonText: string;
-    if (claimer) {
-      const claimerColor = getUserColor(members, claimer.telegramId);
-      buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
-    } else if (paused) {
-      // Paused — show pause icon + who paused + progress
-      buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} paused by ${paused.pausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`;
-    } else {
-      buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
-    }
-
-    buttons.push([{
-      text: buttonText,
-      callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
-    }]);
-  }
-
-  buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
-
-  await ctx.editMessageText(
-    "\u{1F4C2} <b>Choose a Category</b>\n\nPick a category to claim all its open issues:",
-    { parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } }
-  );
+  await ctx.editMessageText(result.text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: result.buttons },
+  });
 }
 
 /**
@@ -4552,11 +4639,6 @@ async function handleCategoryConfirm(
   const telegramId = ctx.from?.id;
   const firstName = ctx.from?.first_name || "Unknown";
   if (!telegramId) return;
-
-  // Warn about blocker but do not block — user already chose to proceed
-  const blockers = await isBlockerActive(project);
-  // (blocker override is handled in handleCategoryAssign — if user reached
-  //  confirm, they already acknowledged the warning)
 
   // Race-condition protection: re-read KV before confirming
   const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
@@ -5035,9 +5117,6 @@ async function handleAufgabeNehmen(
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
-  // Auto-release category if all assigned tasks are done on GitHub
-  await autoReleaseDoneCategory(env, project, projectId, telegramId);
-
   // Warn about blocker but allow override via inline button
   const blockers = await isBlockerActive(project);
   if (blockers.length > 0) {
@@ -5084,11 +5163,9 @@ async function handleAufgabeNehmen(
     return;
   }
 
-  // Fetch categories from GitHub
-  const categories = await fetchOpenIssuesByCategory(project);
-  const members = await getTeamMembers(env.PROJECTS);
-
-  if (categories.size === 0) {
+  // Build category picker with open + optional completed categories
+  const result = await buildCategoryPicker(env, project, projectId, claimsState);
+  if (!result) {
     await ctx.reply(
       "\u{1F4C2} No categories found.\n\nAdd labels with the <code>area:</code> prefix to your GitHub issues to create categories.",
       { parse_mode: "HTML" }
@@ -5096,41 +5173,10 @@ async function handleAufgabeNehmen(
     return;
   }
 
-  // Build category picker buttons with color indicators
-  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
-  const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  const pausedList = await getPausedCategories(env.PROJECTS, projectId);
-
-  for (const [label, issues] of sortedCategories) {
-    const displayName = label.replace("area:", "");
-    const claimer = claimsState.claims.find((c) => c.category === label);
-    const paused = pausedList.find((p) => p.category === label);
-
-    let buttonText: string;
-    if (claimer) {
-      // Claimed — show lock icon + claimer's color + name
-      const claimerColor = getUserColor(members, claimer.telegramId);
-      buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
-    } else if (paused) {
-      // Paused — show pause icon + who paused + progress
-      buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} paused by ${paused.pausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`;
-    } else {
-      // Free — show green indicator
-      buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} free`;
-    }
-
-    buttons.push([{
-      text: buttonText,
-      callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
-    }]);
-  }
-
-  buttons.push([{ text: "\u{274C} Cancel", callback_data: "cat_cancel" }]);
-
-  await ctx.reply(
-    "\u{1F4CB} <b>Aufgabe nehmen</b>\n\nPick a category to claim all its open issues:",
-    { parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } }
-  );
+  await ctx.reply(result.text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: result.buttons },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -6075,6 +6121,38 @@ function createBot(
     } catch {}
   });
 
+  bot.callbackQuery("cat_show_completed", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      const result = await buildCategoryPicker(env, project, projectId, claimsState, true);
+      if (result) {
+        await ctx.editMessageText(result.text, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: result.buttons },
+        });
+      }
+    } catch (err) {
+      console.error("cat_show_completed error:", err);
+    }
+  });
+
+  bot.callbackQuery("cat_hide_completed", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      const result = await buildCategoryPicker(env, project, projectId, claimsState, false);
+      if (result) {
+        await ctx.editMessageText(result.text, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: result.buttons },
+        });
+      }
+    } catch (err) {
+      console.error("cat_hide_completed error:", err);
+    }
+  });
+
   bot.callbackQuery("cat_release", async (ctx) => {
     try { await ctx.answerCallbackQuery(); } catch {}
     await handleCategoryRelease(ctx, env, projectId);
@@ -6210,6 +6288,20 @@ function createBot(
       );
       if (currentActive === issueNumber) {
         await clearActiveTask(env.PROJECTS, telegramId, active.projectId);
+      }
+
+      // Update claim: remove completed issue from assignedIssues
+      const currentClaims = await getCategoryClaims(env.PROJECTS, active.projectId);
+      const userClaim = currentClaims.claims.find((c) => c.telegramId === telegramId);
+      if (userClaim) {
+        userClaim.assignedIssues = userClaim.assignedIssues.filter((n) => n !== issueNumber);
+        if (userClaim.assignedIssues.length === 0) {
+          // All assigned issues done — auto-release category
+          currentClaims.claims = currentClaims.claims.filter((c) => c.telegramId !== telegramId);
+          try { await stopTimer(env.PROJECTS, telegramId, active.projectId); } catch {}
+        }
+        currentClaims.lastUpdated = new Date().toISOString();
+        await saveCategoryClaims(env.PROJECTS, active.projectId, currentClaims);
       }
 
       // Increment daily counter
@@ -9370,6 +9462,9 @@ export {
   getCategoryClaims,
   saveCategoryClaims,
   fetchOpenIssuesByCategory,
+  fetchClosedIssuesByCategory,
+  getCompletedCategories,
+  buildCategoryPicker,
   assignIssuesToUser,
   unassignIssuesFromUser,
   getUserColor,
