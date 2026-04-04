@@ -5597,6 +5597,36 @@ function createBot(
     });
   });
 
+  // /preview_onboarding — show the onboarding messages without resetting state (admin only)
+  bot.command("preview_onboarding", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+    // Welcome message
+    const welcomeText = [
+      t(lang, "onboard.welcome_heading"),
+      t(lang, "onboard.welcome_subtitle"),
+      "",
+      t(lang, "onboard.features_heading"),
+      t(lang, "onboard.feature_claim"),
+      t(lang, "onboard.feature_tasks"),
+      t(lang, "onboard.feature_board"),
+      t(lang, "onboard.feature_idea"),
+      t(lang, "onboard.feature_prompt"),
+      "",
+      t(lang, "onboard.step1_heading"),
+      t(lang, "onboard.step1_prompt"),
+    ].join("\n");
+    await ctx.reply(welcomeText, { parse_mode: "HTML" });
+
+    // Tutorial
+    await sendOnboardingTutorial(ctx, lang);
+
+    // Ready message
+    await ctx.reply(t(lang, "onboard.ready"), { parse_mode: "HTML" });
+  });
+
   // /new <title> — create a new GitHub issue
   bot.command("new", async (ctx: Context) => {
     const title = ctx.match as string;
