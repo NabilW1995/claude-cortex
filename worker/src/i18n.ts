@@ -205,6 +205,15 @@ const en: Record<string, string> = {
   "roles.already_admin": "\u{2139}\u{FE0F} {name} is already an admin.",
   "roles.already_member": "\u{2139}\u{FE0F} {name} is already a regular member.",
   "roles.first_admin": "\u{1F451} You're the first team member \u{2014} you've been made admin automatically!",
+
+  // CI / GitHub Actions status
+  "ci.failure_dm": "\u{274C} <b>CI Failed</b>\n\nWorkflow: {workflow}\nBranch: <code>{branch}</code>\n\n<a href=\"{url}\">View details on GitHub</a>",
+  "ci.rerun": "\u{1F504} Re-run workflow",
+  "ci.status_success": "\u{2705} CI passed",
+  "ci.status_failure": "\u{274C} CI failed",
+  "ci.status_cancelled": "\u{23F3} CI cancelled",
+  "ci.rerun_success": "\u{2705} Workflow re-triggered!",
+  "ci.rerun_failed": "Failed to re-run: {status}",
 };
 
 const de: Record<string, string> = {
@@ -393,6 +402,15 @@ const de: Record<string, string> = {
   "roles.already_admin": "\u{2139}\u{FE0F} {name} ist bereits Admin.",
   "roles.already_member": "\u{2139}\u{FE0F} {name} ist bereits normales Mitglied.",
   "roles.first_admin": "\u{1F451} Du bist das erste Teammitglied \u{2014} du wurdest automatisch zum Admin!",
+
+  // CI / GitHub Actions Status
+  "ci.failure_dm": "\u{274C} <b>CI fehlgeschlagen</b>\n\nWorkflow: {workflow}\nBranch: <code>{branch}</code>\n\n<a href=\"{url}\">Details auf GitHub ansehen</a>",
+  "ci.rerun": "\u{1F504} Workflow neu starten",
+  "ci.status_success": "\u{2705} CI bestanden",
+  "ci.status_failure": "\u{274C} CI fehlgeschlagen",
+  "ci.status_cancelled": "\u{23F3} CI abgebrochen",
+  "ci.rerun_success": "\u{2705} Workflow neu gestartet!",
+  "ci.rerun_failed": "Fehler beim Neustarten: {status}",
 };
 
 // ---------------------------------------------------------------------------

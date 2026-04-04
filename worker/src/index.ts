@@ -206,12 +206,26 @@ interface GitHubPushPayload {
 interface GitHubWorkflowPayload {
   action: string;
   workflow_run: {
+    id: number;
     name: string;
     conclusion: string; // "success", "failure", etc.
     html_url: string;
     head_branch: string;
+    pull_requests?: Array<{ number: number }>;
   };
+  repository: { full_name: string };
   sender: { login: string };
+}
+
+/**
+ * CI build status stored in KV for display in "Meine Aufgaben".
+ * TTL: 7 days — stale statuses expire automatically.
+ */
+interface CIStatus {
+  conclusion: "success" | "failure" | "cancelled" | "skipped";
+  workflow: string;
+  updatedAt: string;
+  runId?: number;
 }
 
 interface SessionUpdate {
@@ -1891,6 +1905,43 @@ async function saveUserPreferences(
 ): Promise<void> {
   prefs.updated_at = new Date().toISOString();
   await kv.put(`prefs:${telegramId}`, JSON.stringify(prefs));
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for CI status (GitHub Actions build results)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read CI build status for a specific PR from KV.
+ * Returns null if no status has been stored (or it expired).
+ */
+async function getCIStatus(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number
+): Promise<CIStatus | null> {
+  const data = await kv.get(`ci:${projectId}:${prNumber}`);
+  if (!data) return null;
+  try {
+    return JSON.parse(data) as CIStatus;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store CI build status for a specific PR in KV.
+ * Expires after 7 days so stale build results don't linger.
+ */
+async function setCIStatus(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number,
+  status: CIStatus
+): Promise<void> {
+  await kv.put(`ci:${projectId}:${prNumber}`, JSON.stringify(status), {
+    expirationTtl: 7 * 24 * 60 * 60,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -3719,6 +3770,15 @@ async function handleMeineAufgaben(
             "\u{1F680} Create Preview",
             `preview_create:${projectId}:${myClaim.category}`
           );
+        }
+      } else {
+        // PR exists — show CI status badge if available
+        const ciStatus = await getCIStatus(env.PROJECTS, projectId, prs[0].number);
+        if (ciStatus) {
+          const badge =
+            ciStatus.conclusion === "success" ? "\u{2705}" :
+            ciStatus.conclusion === "failure" ? "\u{274C}" : "\u{23F3}";
+          lines.push(`${badge} CI: ${escapeHtml(ciStatus.workflow)} \u{2014} ${ciStatus.conclusion}`);
         }
       }
     } catch {
@@ -7012,6 +7072,47 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // CI re-run — triggers a GitHub Actions workflow re-run from DM
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^ci_rerun:([^:]+):(\d+)$/, async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const targetProjectId = ctx.match![1];
+    const runId = ctx.match![2];
+
+    try {
+      const targetProject = await getProject(env.PROJECTS, targetProjectId, env);
+      if (!targetProject?.githubToken) {
+        await ctx.answerCallbackQuery({ text: "No GitHub token configured." });
+        return;
+      }
+
+      const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+      const res = await githubRequest(
+        "POST",
+        `/repos/${targetProject.githubRepo}/actions/runs/${runId}/rerun`,
+        targetProject.githubToken
+      );
+
+      if (res.ok || res.status === 201) {
+        await ctx.answerCallbackQuery({ text: t(lang, "ci.rerun_success") });
+      } else {
+        await ctx.answerCallbackQuery({
+          text: t(lang, "ci.rerun_failed", { status: String(res.status) }),
+        });
+      }
+    } catch (err) {
+      console.error("ci_rerun error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error re-running workflow." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
   // "Meine Aufgaben" — Pause flow callbacks
   // -------------------------------------------------------------------
 
@@ -9290,13 +9391,15 @@ async function handleGitHubPush(
 
 /**
  * Handle GitHub "workflow_run" events.
- * Only notifies on failures — successful CI runs are silent to reduce noise.
+ * Stores CI status in KV so "Meine Aufgaben" can show a CI badge,
+ * notifies the group chat on failures, and DMs the branch owner
+ * with a re-run button when CI fails.
  */
 async function handleGitHubWorkflow(
   rawBody: string,
   project: ProjectConfig,
   env: Env,
-  _projectId: string
+  projectId: string
 ): Promise<Response> {
   let payload: GitHubWorkflowPayload;
   try {
@@ -9310,14 +9413,35 @@ async function handleGitHubWorkflow(
   let eventType: string | null = null;
 
   if (action === "completed") {
-    if (run.conclusion === "failure") {
+    const conclusion = run.conclusion as CIStatus["conclusion"];
+
+    // Store CI status in KV for every associated PR
+    const prNumbers = run.pull_requests?.map((pr) => pr.number) || [];
+    const ciStatus: CIStatus = {
+      conclusion,
+      workflow: run.name,
+      updatedAt: new Date().toISOString(),
+      runId: run.id,
+    };
+    for (const prNum of prNumbers) {
+      await setCIStatus(env.PROJECTS, projectId, prNum, ciStatus);
+    }
+
+    if (conclusion === "failure") {
       message =
         `\u{274C} CI failed: ${run.name} on ${run.head_branch}\n` +
         `\u{1F517} ${run.html_url}`;
       eventType = "ci.failure";
+
+      // DM the branch owner with failure details and a re-run button
+      try {
+        await notifyCIFailure(env, project, projectId, run);
+      } catch {
+        // Best-effort — don't break the webhook response
+      }
     } else {
-      // Success, cancelled, skipped, etc. — log but don't notify
-      eventType = `ci.${run.conclusion}`;
+      // Success, cancelled, skipped, etc. — log but don't notify group
+      eventType = `ci.${conclusion}`;
     }
   }
 
@@ -9334,6 +9458,62 @@ async function handleGitHubWorkflow(
   }
 
   return new Response("OK");
+}
+
+/**
+ * Send a DM to the branch owner when CI fails.
+ * Matches the branch name to a category claim to find the responsible
+ * team member. Includes a "Re-run" button and a link to GitHub.
+ */
+async function notifyCIFailure(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string,
+  run: GitHubWorkflowPayload["workflow_run"]
+): Promise<void> {
+  const branch = run.head_branch;
+  const members = await getTeamMembers(env.PROJECTS);
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+
+  // Match branch name to a category claim (e.g. feature/auth → area:auth)
+  const claim = claimsState.claims.find((c) => {
+    const slug = c.category.replace("area:", "").toLowerCase().replace(/\s+/g, "-");
+    return branch === `feature/${slug}`;
+  });
+
+  if (!claim) return;
+
+  const member = members.find((m) => m.telegram_id === claim.telegramId);
+  if (!member) return;
+
+  const prefs = await getUserPreferences(env.PROJECTS, claim.telegramId);
+  if (!prefs.dm_chat_id) return;
+
+  // Respect DND setting
+  if (await isUserDND(env.PROJECTS, claim.telegramId)) return;
+
+  const lang = await getUserLanguage(env.PROJECTS, claim.telegramId);
+
+  const rerunKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+    inline_keyboard: [
+      [
+        { text: t(lang, "ci.rerun"), callback_data: `ci_rerun:${projectId}:${run.id}` },
+        { text: "\u{1F517} GitHub", url: run.html_url },
+      ],
+    ],
+  };
+
+  const dmText = t(lang, "ci.failure_dm", {
+    workflow: run.name,
+    branch,
+    url: run.html_url,
+  });
+
+  const status = await sendDM(project.botToken, prefs.dm_chat_id, dmText, rerunKb);
+  if (status === "blocked") {
+    prefs.dm_chat_id = null;
+    await saveUserPreferences(env.PROJECTS, claim.telegramId, prefs);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -9760,6 +9940,9 @@ export {
   detectFileConflicts,
   isUserDND,
   sendDM,
+  // CI status helpers (GitHub Actions integration)
+  getCIStatus,
+  setCIStatus,
   // Team messaging helpers (Issue #59)
   parseAtMentions,
   parseIssueReferences,
@@ -9802,7 +9985,7 @@ export {
   setUserRole,
   countAdmins,
 };
-export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot, UserRole };
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot, UserRole, CIStatus };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
