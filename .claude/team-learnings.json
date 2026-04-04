@@ -18,6 +18,36 @@
       "times_applied": 0
     },
     {
+      "fingerprint": "f73303badf6b",
+      "category": "skills",
+      "rule": "Skill-Descriptions sind Trigger fuer das Modell, keine Zusammenfassungen",
+      "rule_en": "Skill descriptions are triggers for the model, not summaries",
+      "mistake": "Descriptions beschrieben was statt wann",
+      "mistake_en": "Descriptions said what instead of when",
+      "correction": "Trigger-Woerter: Use when user says X",
+      "correction_en": "Trigger words: Use when user says X",
+      "confidence": 0.95,
+      "project": "Claude Starter Team Template",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-03T02:06:49.462Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "0c6cbc7936c5",
+      "category": "agents",
+      "rule": "Agent-Bodies kurz halten, Rules referenzieren statt kopieren",
+      "rule_en": "Keep agent bodies short, reference rules instead of copying",
+      "mistake": "Jeder Agent kopierte Rules (150-370 Zeilen)",
+      "mistake_en": "Every agent copied rules (150-370 lines)",
+      "correction": "Rules per @.claude/rules/ referenzieren",
+      "correction_en": "Reference rules via @.claude/rules/",
+      "confidence": 0.95,
+      "project": "Claude Starter Team Template",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-03T02:06:49.462Z",
+      "times_applied": 0
+    },
+    {
       "fingerprint": "4e154fdb212e",
       "category": "workflow",
       "rule": "IMMER frontend-design + ui-ux-pro-max Skills aktivieren BEVOR UI/Design-Arbeit gemacht wird. Keine Ausnahmen, auch nicht im Execution-Modus.",
@@ -75,6 +105,21 @@
       "project": "claude-cortex",
       "shared_by": "Nabil",
       "shared_at": "2026-04-02T01:13:57.550Z",
+      "times_applied": 0
+    },
+    {
+      "fingerprint": "d62b154abbd5",
+      "category": "hooks",
+      "rule": "Stop-Hooks sind fuer Logging und Prompts, NICHT fuer Verhaltenssteuerung",
+      "rule_en": "Stop hooks are for logging and prompts, NOT behavior control",
+      "mistake": "Stop-Hook mit continue:true gebaut",
+      "mistake_en": "Built stop hook with continue:true",
+      "correction": "Verifikation als MUST-Regel in CLAUDE.md",
+      "correction_en": "Verification as MUST rule in CLAUDE.md",
+      "confidence": 0.9,
+      "project": "Claude Starter Team Template",
+      "shared_by": "Nabil",
+      "shared_at": "2026-04-03T02:06:49.462Z",
       "times_applied": 0
     },
     {

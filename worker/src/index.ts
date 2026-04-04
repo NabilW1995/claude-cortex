@@ -12,6 +12,7 @@
 
 import { Bot, webhookCallback, Keyboard, InlineKeyboard } from "grammy";
 import type { Context } from "grammy";
+import { t, getUserLanguage, setUserLanguage, type Locale } from "./i18n";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,11 +37,14 @@ interface ProjectConfig {
   members: Array<{ name: string; github: string; telegram: string }>;
 }
 
+type UserRole = "admin" | "member";
+
 interface TeamMember {
   telegram_id: number;
   telegram_username: string;
   github: string;
   name: string;
+  role?: UserRole; // undefined treated as "member" for backward compat
 }
 
 interface ActiveSession {
@@ -52,6 +56,98 @@ interface DashboardState {
   messageId: number | null; // Telegram message_id for editing
   activeSessions: Array<{ user: string; since: string; tasks: number[] }>;
   lastUpdated: string;
+}
+
+// ---------------------------------------------------------------------------
+// User Preferences & Category Assignment types
+// ---------------------------------------------------------------------------
+
+interface UserPreferences {
+  commits: boolean;
+  previews: boolean;
+  tasks: boolean;
+  pr_reviews: boolean;
+  sessions: boolean;
+  dm_chat_id: number | null;
+  updated_at: string;
+}
+
+const DEFAULT_PREFERENCES: UserPreferences = {
+  commits: false,
+  previews: false,
+  tasks: true,
+  pr_reviews: false,
+  sessions: false,
+  dm_chat_id: null,
+  updated_at: new Date().toISOString(),
+};
+
+interface CategoryClaim {
+  telegramId: number;
+  telegramName: string;
+  githubUsername: string;
+  category: string;
+  displayName: string;
+  assignedIssues: number[];
+  claimedAt: string;
+}
+
+interface CategoryClaimsState {
+  claims: CategoryClaim[];
+  lastUpdated: string;
+}
+
+/**
+ * Tracks a category that was paused (not released) — the branch stays on
+ * GitHub so the next developer can continue from where the previous one
+ * stopped.  Stored as a list in KV under `{projectId}:paused_categories`.
+ */
+interface PausedCategory {
+  category: string;
+  displayName: string;
+  pausedBy: string;
+  completedTasks: number;
+  totalTasks: number;
+  pausedAt: string;
+}
+
+/**
+ * Tracks an active category timer for time-tracking purposes.
+ * Stored in KV under `timer:{telegramId}:{projectId}` so it survives
+ * bot restarts.  (Issue #60)
+ */
+interface TimerState {
+  category: string;
+  startedAt: string;
+}
+
+/**
+ * A conversation thread between two team members via the bot.
+ * Stored in KV with a 24h TTL so threads auto-expire.
+ */
+interface MessageThread {
+  senderTelegramId: number;
+  senderName: string;
+  recipientTelegramId: number;
+  recipientName: string;
+  originalMessage: string;
+  issueNumber?: number;
+  createdAt: string;
+}
+
+/**
+ * A snapshot of weekly velocity data for a project.
+ * Stored in D1 velocity table every Friday via cron. (Issue #61)
+ */
+interface VelocitySnapshot {
+  project: string;
+  weekStart: string;
+  tasksCompleted: number;
+  tasksOpened: number;
+  teamHours: number;
+  perMember: Array<{ userId: string; name: string; tasks: number; hours: number }>;
+  fastestTask: { number: number; title: string; minutes: number } | null;
+  longestTask: { number: number; title: string; minutes: number } | null;
 }
 
 interface GitHubIssuesPayload {
@@ -78,6 +174,7 @@ interface GitHubPRPayload {
     additions: number;
     deletions: number;
     changed_files: number;
+    commits: number;
     merged: boolean;
     base: { ref: string };
     head: { ref: string };
@@ -95,6 +192,7 @@ interface GitHubReviewPayload {
   pull_request: {
     number: number;
     title: string;
+    user: { login: string };
   };
   sender: { login: string };
 }
@@ -108,12 +206,26 @@ interface GitHubPushPayload {
 interface GitHubWorkflowPayload {
   action: string;
   workflow_run: {
+    id: number;
     name: string;
     conclusion: string; // "success", "failure", etc.
     html_url: string;
     head_branch: string;
+    pull_requests?: Array<{ number: number }>;
   };
+  repository: { full_name: string };
   sender: { login: string };
+}
+
+/**
+ * CI build status stored in KV for display in "Meine Aufgaben".
+ * TTL: 7 days — stale statuses expire automatically.
+ */
+interface CIStatus {
+  conclusion: "success" | "failure" | "cancelled" | "skipped";
+  workflow: string;
+  updatedAt: string;
+  runId?: number;
 }
 
 interface SessionUpdate {
@@ -135,6 +247,208 @@ interface RegisterPayload {
   githubRepo: string;
   githubToken?: string;
   members: Array<{ name: string; github: string; telegram: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Priority system — 4-level labels used on GitHub issues
+// ---------------------------------------------------------------------------
+
+/** Maps GitHub priority label names to numeric sort weight (lower = higher priority). */
+const PRIORITY_LEVELS: Record<string, number> = {
+  "priority:blocker": 0,
+  "priority:high": 1,
+  "priority:medium": 2,
+  "priority:low": 3,
+};
+
+const PRIORITY_EMOJIS: Record<string, string> = {
+  "priority:blocker": "\u{1F6A8}",
+  "priority:high": "\u{1F534}",
+  "priority:medium": "\u{1F7E1}",
+  "priority:low": "\u{26AA}",
+};
+
+const PRIORITY_DEFAULT = "priority:medium";
+
+// ---------------------------------------------------------------------------
+// Help system — central text registry for the help view (foundation for #65)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a localized help text for the given topic key.
+ * Replaces the old static HELP_TEXTS constant with i18n-aware strings.
+ */
+function getHelpText(key: string, lang: Locale): string {
+  switch (key) {
+    case "overview":
+      return [
+        t(lang, "help.heading"),
+        "",
+        `<b>Workflow:</b>`,
+        t(lang, "help.workflow_1"),
+        t(lang, "help.workflow_2"),
+        t(lang, "help.workflow_3"),
+        t(lang, "help.workflow_4"),
+        "",
+        t(lang, "help.golden_rule"),
+        "",
+        t(lang, "help.choose_topic"),
+      ].join("\n");
+    case "blocker":
+      return [
+        t(lang, "help.blocker_heading"),
+        "",
+        t(lang, "help.blocker_desc"),
+        t(lang, "help.blocker_effect"),
+        t(lang, "help.blocker_label"),
+        t(lang, "help.blocker_resolved"),
+        "",
+        t(lang, "help.blocker_tip"),
+      ].join("\n");
+    case "priorities":
+      return [
+        t(lang, "help.priorities_heading"),
+        "",
+        t(lang, "help.priorities_desc"),
+        t(lang, "help.priority_blocker"),
+        t(lang, "help.priority_high"),
+        t(lang, "help.priority_medium"),
+        t(lang, "help.priority_low"),
+        "",
+        t(lang, "help.priorities_sort"),
+      ].join("\n");
+    case "categories":
+      return [
+        t(lang, "help.categories_heading"),
+        "",
+        t(lang, "help.categories_desc"),
+        t(lang, "help.categories_rule"),
+        "",
+        t(lang, "help.categories_how"),
+        t(lang, "help.categories_step1"),
+        t(lang, "help.categories_step2"),
+        t(lang, "help.categories_step3"),
+        "",
+        t(lang, "help.categories_tip"),
+      ].join("\n");
+    case "preview":
+      return [
+        t(lang, "help.preview_heading"),
+        "",
+        t(lang, "help.preview_desc"),
+        t(lang, "help.preview_link"),
+        "",
+        t(lang, "help.preview_process"),
+        t(lang, "help.preview_step1"),
+        t(lang, "help.preview_step2"),
+        t(lang, "help.preview_step3"),
+        t(lang, "help.preview_step4"),
+        t(lang, "help.preview_step5"),
+      ].join("\n");
+    case "conflicts":
+      return [
+        t(lang, "help.conflicts_heading"),
+        "",
+        t(lang, "help.conflicts_desc"),
+        t(lang, "help.conflicts_rule"),
+        t(lang, "help.conflicts_group"),
+        t(lang, "help.conflicts_benefit"),
+        "",
+        t(lang, "help.conflicts_fallback"),
+        t(lang, "help.conflicts_tip"),
+      ].join("\n");
+    default:
+      return "Unknown help topic.";
+  }
+}
+
+/**
+ * Legacy HELP_TEXTS object — kept for backward compatibility with tests.
+ * Returns German texts (matching the original hardcoded behavior).
+ */
+const HELP_TEXTS = {
+  get overview() { return getHelpText("overview", "de"); },
+  get blocker() { return getHelpText("blocker", "de"); },
+  get priorities() { return getHelpText("priorities", "de"); },
+  get categories() { return getHelpText("categories", "de"); },
+  get preview() { return getHelpText("preview", "de"); },
+  get conflicts() { return getHelpText("conflicts", "de"); },
+};
+
+// ---------------------------------------------------------------------------
+// Contextual Tips Registry (Issue #65)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a localized contextual tip string for the given key.
+ * The tip keys map to i18n keys with the "tip." prefix.
+ */
+function getTipText(tipKey: string, lang: Locale): string {
+  return t(lang, `tip.${tipKey}`);
+}
+
+/**
+ * Legacy CONTEXTUAL_TIPS object — kept for backward compatibility with tests.
+ * Returns German texts (matching the original hardcoded behavior).
+ */
+const CONTEXTUAL_TIPS: Record<string, string> = {
+  get category_taken() { return getTipText("category_taken", "de"); },
+  get blocker_active() { return getTipText("blocker_active", "de"); },
+  get already_has_category() { return getTipText("already_has_category", "de"); },
+  get self_approve_large_pr() { return getTipText("self_approve_large", "de"); },
+  get all_tasks_done() { return getTipText("all_tasks_done", "de"); },
+  get no_tasks_assigned() { return getTipText("no_tasks_assigned", "de"); },
+  get forgot_to_pull() { return getTipText("forgot_to_pull", "de"); },
+  get category_empty() { return getTipText("category_empty", "de"); },
+};
+
+// ---------------------------------------------------------------------------
+// Contextual Tips KV Helpers (Issue #65)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a specific tip was already shown to a user within the
+ * current deduplication window (1 hour TTL in KV).
+ */
+async function getTipShown(
+  kv: KVNamespace,
+  telegramId: number,
+  tipKey: string
+): Promise<boolean> {
+  const val = await kv.get(`tip_shown:${telegramId}:${tipKey}`);
+  return val !== null;
+}
+
+/**
+ * Mark a tip as shown for a user. The KV entry expires after 1 hour,
+ * allowing the same tip to reappear in the next session.
+ */
+async function setTipShown(
+  kv: KVNamespace,
+  telegramId: number,
+  tipKey: string
+): Promise<void> {
+  await kv.put(`tip_shown:${telegramId}:${tipKey}`, "1", {
+    expirationTtl: 3600,
+  });
+}
+
+/**
+ * Return a contextual tip string (with leading newlines) if the tip has
+ * not been shown to this user recently, or an empty string if it was
+ * already displayed within the dedup window.
+ * Accepts an optional lang parameter for localized tips.
+ */
+async function getTip(
+  kv: KVNamespace,
+  telegramId: number,
+  tipKey: string,
+  lang: Locale = "de"
+): Promise<string> {
+  const shown = await getTipShown(kv, telegramId, tipKey);
+  if (shown) return "";
+  await setTipShown(kv, telegramId, tipKey);
+  return "\n\n" + getTipText(tipKey, lang);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +516,23 @@ function verifyBotSecret(request: Request, env: Env): boolean {
   return auth === `Bearer ${env.TEAM_BOT_SECRET}`;
 }
 
+/**
+ * Validate that a URL string uses a safe scheme (http or https).
+ * Returns null if the URL is invalid or uses a dangerous scheme
+ * (e.g. javascript:, data:, vbscript:).
+ */
+function sanitizeUrl(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.href;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Quiet Hours + DND helpers
 // ---------------------------------------------------------------------------
@@ -224,6 +555,17 @@ function isUrgentEvent(eventType: string, labels?: string[]): boolean {
 async function isUserDND(kv: KVNamespace, telegramId: number): Promise<boolean> {
   const dnd = await kv.get(`dnd:${telegramId}`);
   return dnd !== null; // KV TTL auto-deletes when DND expires
+}
+
+/**
+ * Escape user-controlled strings for safe insertion into Telegram HTML messages.
+ * Telegram's HTML mode only requires &, <, > to be escaped.
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +640,107 @@ async function sendTelegramThreaded(
 }
 
 // ---------------------------------------------------------------------------
+// DM helper — send private messages to individual team members
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a private message (DM) to a Telegram user by their chat_id.
+ * Returns a status string so callers can distinguish permanent failures
+ * (user blocked the bot → 403) from transient errors.
+ *
+ * - 'sent'    — message delivered successfully
+ * - 'blocked' — user blocked the bot (HTTP 403); caller should clear dm_chat_id
+ * - 'error'   — transient failure (network, rate-limit, etc.); safe to retry later
+ */
+async function sendDM(
+  botToken: string,
+  chatId: number,
+  text: string,
+  replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> }
+): Promise<"sent" | "blocked" | "error"> {
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(body),
+      }
+    );
+    const result = (await res.json()) as { ok: boolean };
+    if (result.ok) return "sent";
+    // 403 = bot was blocked by user or chat was deleted
+    if (res.status === 403) return "blocked";
+    return "error";
+  } catch {
+    return "error";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DM Notification Engine — send DMs to subscribers of a notification type
+// ---------------------------------------------------------------------------
+
+/**
+ * Iterate team members, check their preferences and DND status, and send
+ * DMs to everyone subscribed to a given notification type.
+ *
+ * IMPORTANT: The textFn callback is responsible for escaping user-controlled
+ * strings with escapeHtml() — this function sends the text as-is with
+ * parse_mode: "HTML".
+ *
+ * @param env - Worker environment (KV, DB)
+ * @param botToken - Telegram bot token
+ * @param prefField - Which preference field to check (e.g. "commits", "pr_reviews")
+ * @param textFn - Function that returns the message text for a given member
+ * @param exclude - Optional telegram_id to skip (e.g. the actor who triggered the event)
+ */
+async function notifySubscribers(
+  env: Env,
+  botToken: string,
+  prefField: keyof UserPreferences,
+  textFn: (member: TeamMember) => string,
+  exclude?: number
+): Promise<void> {
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the actor who triggered the event
+    if (exclude && member.telegram_id === exclude) continue;
+
+    // Check DND status
+    const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+    if (dnd) continue;
+
+    // Load preferences
+    const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+
+    // Check if this notification type is enabled
+    if (!prefs[prefField]) continue;
+
+    // Need a dm_chat_id to send DMs
+    if (!prefs.dm_chat_id) continue;
+
+    const text = textFn(member);
+    const status = await sendDM(botToken, prefs.dm_chat_id, text);
+
+    if (status === "blocked") {
+      // User blocked the bot — clear dm_chat_id so we stop trying
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // User color assignment (for dashboard)
 // ---------------------------------------------------------------------------
 
@@ -364,6 +807,440 @@ async function githubRequest(
   }
 
   return fetch(`${GITHUB_API}${path}`, options);
+}
+
+// ---------------------------------------------------------------------------
+// GitHub helpers for category-based assignment
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch all open issues and group them by `area:*` labels.
+ * Returns a Map where keys are the full label name (e.g. "area:dashboard")
+ * and values are arrays of issues with that label.
+ */
+async function fetchOpenIssuesByCategory(
+  project: ProjectConfig,
+  prefix: string = "area:"
+): Promise<Map<string, Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }> }>>> {
+  if (!project.githubToken) return new Map();
+
+  const res = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&per_page=100`,
+    project.githubToken
+  );
+
+  if (!res.ok) return new Map();
+
+  const issues = (await res.json()) as Array<{
+    number: number;
+    title: string;
+    html_url: string;
+    labels: Array<{ name: string }>;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out PRs (GitHub API returns PRs as issues)
+  const realIssues = issues.filter((i) => !i.pull_request);
+
+  const grouped = new Map<string, Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }> }>>();
+
+  for (const issue of realIssues) {
+    for (const label of issue.labels) {
+      if (label.name.startsWith(prefix)) {
+        const existing = grouped.get(label.name) || [];
+        existing.push({ number: issue.number, title: issue.title, html_url: issue.html_url, labels: issue.labels });
+        grouped.set(label.name, existing);
+      }
+    }
+  }
+
+  return grouped;
+}
+
+/**
+ * Find completed categories: area: labels that exist but have 0 open issues.
+ */
+async function getCompletedCategories(
+  project: ProjectConfig,
+  openCategories: Map<string, unknown[]>
+): Promise<string[]> {
+  const allLabels = await fetchAreaLabels(project);
+  return allLabels.filter((label) => !openCategories.has(label));
+}
+
+/**
+ * Fetch closed issues for specific category labels (max 5 per category).
+ * Used by the "show completed" toggle in the category picker.
+ */
+async function fetchClosedIssuesByCategory(
+  project: ProjectConfig,
+  categoryLabels: string[]
+): Promise<Map<string, Array<{ number: number; title: string }>>> {
+  const result = new Map<string, Array<{ number: number; title: string }>>();
+  if (!project.githubToken || categoryLabels.length === 0) return result;
+
+  for (const label of categoryLabels) {
+    try {
+      const res = await githubRequest(
+        "GET",
+        `/repos/${project.githubRepo}/issues?state=closed&labels=${encodeURIComponent(label)}&per_page=5`,
+        project.githubToken
+      );
+      if (res.ok) {
+        const issues = (await res.json()) as Array<{
+          number: number;
+          title: string;
+          pull_request?: unknown;
+        }>;
+        result.set(
+          label,
+          issues.filter((i) => !i.pull_request).map((i) => ({ number: i.number, title: i.title }))
+        );
+      }
+    } catch {
+      // Non-critical — skip this category
+    }
+  }
+  return result;
+}
+
+/**
+ * Batch-assign multiple issues to a GitHub user.
+ * Returns which issue numbers succeeded and which failed.
+ */
+async function assignIssuesToUser(
+  project: ProjectConfig,
+  issueNumbers: number[],
+  githubUsername: string
+): Promise<{ success: number[]; failed: number[] }> {
+  const success: number[] = [];
+  const failed: number[] = [];
+
+  if (!project.githubToken) return { success, failed: issueNumbers };
+
+  for (const num of issueNumbers) {
+    try {
+      const res = await githubRequest(
+        "POST",
+        `/repos/${project.githubRepo}/issues/${num}/assignees`,
+        project.githubToken,
+        { assignees: [githubUsername] }
+      );
+      if (res.ok) {
+        success.push(num);
+      } else {
+        failed.push(num);
+      }
+    } catch {
+      failed.push(num);
+    }
+  }
+
+  return { success, failed };
+}
+
+/**
+ * Batch-unassign multiple issues from a GitHub user.
+ * Returns which issue numbers succeeded and which failed.
+ */
+async function unassignIssuesFromUser(
+  project: ProjectConfig,
+  issueNumbers: number[],
+  githubUsername: string
+): Promise<{ success: number[]; failed: number[] }> {
+  const success: number[] = [];
+  const failed: number[] = [];
+
+  if (!project.githubToken) return { success, failed: issueNumbers };
+
+  for (const num of issueNumbers) {
+    try {
+      const res = await githubRequest(
+        "DELETE",
+        `/repos/${project.githubRepo}/issues/${num}/assignees`,
+        project.githubToken,
+        { assignees: [githubUsername] }
+      );
+      if (res.ok) {
+        success.push(num);
+      } else {
+        failed.push(num);
+      }
+    } catch {
+      failed.push(num);
+    }
+  }
+
+  return { success, failed };
+}
+
+/**
+ * Fetch all `area:*` labels from the GitHub repo (not from issues).
+ * Returns an array of label names like ["area:dashboard", "area:api"].
+ */
+async function fetchAreaLabels(
+  project: ProjectConfig,
+  prefix: string = "area:"
+): Promise<string[]> {
+  if (!project.githubToken) return [];
+
+  const res = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/labels?per_page=100`,
+    project.githubToken
+  );
+
+  if (!res.ok) return [];
+
+  const labels = (await res.json()) as Array<{ name: string }>;
+  return labels
+    .map((l) => l.name)
+    .filter((name) => name.startsWith(prefix))
+    .sort();
+}
+
+// ---------------------------------------------------------------------------
+// Priority helpers — extract, sort, and check blocker status
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the priority label from an issue's labels array.
+ * Returns the label name (e.g. "priority:high") or the default "priority:medium".
+ */
+function getIssuePriority(labels: Array<{ name: string }>): string {
+  const priorityLabel = labels.find((l) => l.name.startsWith("priority:"));
+  return priorityLabel?.name || PRIORITY_DEFAULT;
+}
+
+/**
+ * Get the numeric sort weight for a priority label (lower = higher priority).
+ */
+function getPrioritySortWeight(priority: string): number {
+  return PRIORITY_LEVELS[priority] ?? PRIORITY_LEVELS[PRIORITY_DEFAULT];
+}
+
+/**
+ * Sort issues by priority (blocker first, then high, medium, low).
+ * Issues without a priority label are treated as medium.
+ */
+function sortByPriority<T extends { labels: Array<{ name: string }> }>(issues: T[]): T[] {
+  return [...issues].sort((a, b) => {
+    const pa = getPrioritySortWeight(getIssuePriority(a.labels));
+    const pb = getPrioritySortWeight(getIssuePriority(b.labels));
+    return pa - pb;
+  });
+}
+
+/**
+ * Check whether any open issue in a project has the priority:blocker label.
+ * Returns the blocker issue(s) if found, empty array otherwise.
+ */
+async function isBlockerActive(
+  project: ProjectConfig
+): Promise<Array<{ number: number; title: string }>> {
+  if (!project.githubToken) return [];
+
+  const res = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&labels=priority:blocker&per_page=100`,
+    project.githubToken
+  );
+
+  if (!res.ok) return [];
+
+  const issues = (await res.json()) as Array<{
+    number: number;
+    title: string;
+    pull_request?: unknown;
+  }>;
+
+  // Filter out PRs (GitHub API returns PRs as issues)
+  return issues
+    .filter((i) => !i.pull_request)
+    .map((i) => ({ number: i.number, title: i.title }));
+}
+
+/**
+ * Format a priority label as a human-readable emoji + text.
+ */
+function formatPriority(priority: string): string {
+  const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+  const level = priority.replace("priority:", "").toUpperCase();
+  return `${emoji} ${level}`;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt generator — builds a Claude Code prompt from a GitHub issue
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the description (text before "## Acceptance criteria") and
+ * the acceptance criteria section from a GitHub issue body.
+ */
+function parseIssueBody(body: string): {
+  description: string;
+  acceptanceCriteria: string;
+} {
+  if (!body) return { description: "", acceptanceCriteria: "" };
+
+  const acHeading = /^##\s+Acceptance\s+[Cc]riteria/m;
+  const acMatch = acHeading.exec(body);
+
+  let description: string;
+  let acceptanceCriteria: string;
+
+  if (acMatch) {
+    // Everything before the AC heading is the description
+    description = body.slice(0, acMatch.index).trim();
+
+    // AC section runs until the next ## heading or end of body
+    const afterAc = body.slice(acMatch.index + acMatch[0].length);
+    const nextHeading = /^##\s+/m.exec(afterAc);
+    acceptanceCriteria = nextHeading
+      ? afterAc.slice(0, nextHeading.index).trim()
+      : afterAc.trim();
+  } else {
+    // No AC section — use first ~300 chars as description
+    description = body.length > 300 ? body.slice(0, 300) + "..." : body;
+    acceptanceCriteria = "";
+  }
+
+  return { description, acceptanceCriteria };
+}
+
+/**
+ * Try to find relevant source files via GitHub Code Search.
+ * Uses 2-3 keywords from the issue title as the search query.
+ * Returns file paths or null if the search fails.
+ */
+async function findRelevantFiles(
+  repo: string,
+  issueTitle: string,
+  githubToken: string
+): Promise<string[] | null> {
+  // Extract meaningful keywords: drop short words and common stop words
+  const stopWords = new Set([
+    "the", "and", "for", "with", "from", "this", "that", "into", "when",
+    "add", "fix", "new", "use", "get", "set", "update", "create", "make",
+    "bug", "feature", "issue", "task", "implement", "should", "must",
+  ]);
+
+  const keywords = issueTitle
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w.toLowerCase()))
+    .slice(0, 3);
+
+  if (keywords.length === 0) return null;
+
+  const query = encodeURIComponent(`${keywords.join(" ")} repo:${repo}`);
+
+  try {
+    const res = await githubRequest(
+      "GET",
+      `/search/code?q=${query}&per_page=5`,
+      githubToken
+    );
+
+    if (!res.ok) return null;
+
+    const data = (await res.json()) as {
+      items?: Array<{ path: string }>;
+    };
+
+    if (!data.items || data.items.length === 0) return null;
+
+    // Deduplicate file paths
+    const paths = [...new Set(data.items.map((item) => item.path))];
+    return paths;
+  } catch {
+    // Code search can fail (rate limit, indexing not ready) — graceful fallback
+    return null;
+  }
+}
+
+/**
+ * Generate a Claude Code prompt for a GitHub issue.
+ * The prompt is plain text designed to be pasted into VS Code's Claude Code.
+ * It includes the issue context, acceptance criteria, and relevant files.
+ */
+async function generateClaudePrompt(
+  project: ProjectConfig,
+  issueNumber: number,
+  category: string | null
+): Promise<string> {
+  if (!project.githubToken) {
+    return `Implement issue #${issueNumber}\n\nNo GitHub token configured — please check the issue manually.`;
+  }
+
+  // Fetch full issue details
+  const issueRes = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues/${issueNumber}`,
+    project.githubToken
+  );
+
+  if (!issueRes.ok) {
+    return `Implement issue #${issueNumber}\n\nCould not fetch issue details (HTTP ${issueRes.status}).`;
+  }
+
+  const issue = (await issueRes.json()) as {
+    title: string;
+    body: string | null;
+    labels: Array<{ name: string }>;
+    html_url: string;
+  };
+
+  const { description, acceptanceCriteria } = parseIssueBody(issue.body || "");
+
+  // Branch name: use category if available, otherwise issue number
+  const branchName = category
+    ? `feature/${category.toLowerCase().replace(/\s+/g, "-")}`
+    : `feature/issue-${issueNumber}`;
+
+  // Try to find relevant files via code search
+  const relevantFiles = await findRelevantFiles(
+    project.githubRepo,
+    issue.title,
+    project.githubToken
+  );
+
+  const filesSection = relevantFiles
+    ? relevantFiles.map((f) => `- ${f}`).join("\n")
+    : "No specific files identified — explore the codebase";
+
+  // Build the prompt as plain text (will be placed inside a <pre> block)
+  const lines: string[] = [
+    `Implement: #${issueNumber} ${issue.title}`,
+    `Branch: ${branchName}`,
+    `Link: ${issue.html_url}`,
+    "",
+  ];
+
+  if (description) {
+    lines.push("Description:");
+    lines.push(description);
+    lines.push("");
+  }
+
+  if (acceptanceCriteria) {
+    lines.push("Acceptance Criteria:");
+    lines.push(acceptanceCriteria);
+    lines.push("");
+  }
+
+  lines.push("Relevant Files:");
+  lines.push(filesSection);
+  lines.push("");
+  lines.push("Instructions:");
+  lines.push(`1. Check out branch: git checkout -b ${branchName}`);
+  lines.push("2. Read the relevant files above before making changes");
+  lines.push("3. Implement all acceptance criteria");
+  lines.push("4. Write tests for new functionality");
+  lines.push("5. Run tests before committing");
+
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +1428,170 @@ async function getActivityData(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for file-level conflict detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Store the list of recently changed files for a user in a specific project.
+ * Used by the conflict detector to compare against other users' file lists.
+ * Auto-expires after 2 hours (matches heartbeat TTL).
+ */
+async function saveChangedFiles(
+  kv: KVNamespace,
+  projectId: string,
+  telegramId: number,
+  files: string[]
+): Promise<void> {
+  const key = `files:${projectId}:${telegramId}`;
+  await kv.put(key, JSON.stringify(files), { expirationTtl: 7200 });
+}
+
+/**
+ * Retrieve the stored changed files for a user in a project.
+ * Returns an empty array if no data exists (expired or never set).
+ */
+async function getChangedFiles(
+  kv: KVNamespace,
+  projectId: string,
+  telegramId: number
+): Promise<string[]> {
+  const raw = await kv.get(`files:${projectId}:${telegramId}`);
+  return raw ? JSON.parse(raw) : [];
+}
+
+/**
+ * Check if a conflict warning was already sent for a specific file between two users.
+ * The key is sorted by user ID so A→B and B→A share the same dedup entry.
+ */
+async function hasConflictWarning(
+  kv: KVNamespace,
+  projectId: string,
+  userA: number,
+  userB: number,
+  file: string
+): Promise<boolean> {
+  const sortedPair = [userA, userB].sort((a, b) => a - b).join("_");
+  const key = `conflict_warn:${projectId}:${sortedPair}:${file}`;
+  return (await kv.get(key)) !== null;
+}
+
+/**
+ * Mark a conflict warning as sent for a specific file between two users.
+ * Expires after 1 hour — ensures warnings are throttled but not permanent.
+ */
+async function setConflictWarning(
+  kv: KVNamespace,
+  projectId: string,
+  userA: number,
+  userB: number,
+  file: string
+): Promise<void> {
+  const sortedPair = [userA, userB].sort((a, b) => a - b).join("_");
+  const key = `conflict_warn:${projectId}:${sortedPair}:${file}`;
+  await kv.put(key, "1", { expirationTtl: 3600 });
+}
+
+/**
+ * Detect file-level conflicts between the current user and all other active
+ * team members in the same project. If overlapping files are found and no
+ * warning has been sent recently, DMs both users with the conflict details.
+ *
+ * Respects DND mode — users in DND won't receive conflict warnings.
+ */
+async function detectFileConflicts(
+  env: Env,
+  projectId: string,
+  currentUser: string,
+  currentTelegramId: number,
+  currentFiles: string[],
+  botToken: string
+): Promise<void> {
+  if (currentFiles.length === 0) return;
+
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the current user
+    if (member.telegram_id === currentTelegramId) continue;
+
+    // Retrieve the other user's changed files for this project
+    const otherFiles = await getChangedFiles(env.PROJECTS, projectId, member.telegram_id);
+    if (otherFiles.length === 0) continue;
+
+    // Find overlapping files
+    const otherFileSet = new Set(otherFiles);
+    const conflicts = currentFiles.filter((f) => otherFileSet.has(f));
+    if (conflicts.length === 0) continue;
+
+    // Filter out files that already had a warning sent recently
+    const newConflicts: string[] = [];
+    for (const file of conflicts) {
+      const alreadyWarned = await hasConflictWarning(
+        env.PROJECTS,
+        projectId,
+        currentTelegramId,
+        member.telegram_id,
+        file
+      );
+      if (!alreadyWarned) {
+        newConflicts.push(file);
+      }
+    }
+    if (newConflicts.length === 0) continue;
+
+    // Set throttle keys for all new conflicts
+    for (const file of newConflicts) {
+      await setConflictWarning(
+        env.PROJECTS,
+        projectId,
+        currentTelegramId,
+        member.telegram_id,
+        file
+      );
+    }
+
+    // Build the conflict file list for the message
+    const fileList = newConflicts
+      .map((f) => `\u2022 <code>${escapeHtml(f)}</code>`)
+      .join("\n");
+
+    const escapedProject = escapeHtml(projectId);
+
+    // Send DM to the current user (about the other user)
+    const currentPrefs = await getUserPreferences(env.PROJECTS, currentTelegramId);
+    if (currentPrefs.dm_chat_id && !(await isUserDND(env.PROJECTS, currentTelegramId))) {
+      const otherName = escapeHtml(member.name || member.telegram_username);
+      const msgForCurrent =
+        `\u26A0\uFE0F <b>File Conflict Warning</b>\n\n` +
+        `You and <b>${otherName}</b> are both editing:\n${fileList}\n\n` +
+        `Project: <b>${escapedProject}</b>\n\n` +
+        `<i>Coordinate to avoid merge conflicts!</i>`;
+      const status = await sendDM(botToken, currentPrefs.dm_chat_id, msgForCurrent);
+      if (status === "blocked") {
+        currentPrefs.dm_chat_id = null;
+        await saveUserPreferences(env.PROJECTS, currentTelegramId, currentPrefs);
+      }
+    }
+
+    // Send DM to the other user (about the current user)
+    const otherPrefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+    if (otherPrefs.dm_chat_id && !(await isUserDND(env.PROJECTS, member.telegram_id))) {
+      const currentName = escapeHtml(currentUser);
+      const msgForOther =
+        `\u26A0\uFE0F <b>File Conflict Warning</b>\n\n` +
+        `You and <b>${currentName}</b> are both editing:\n${fileList}\n\n` +
+        `Project: <b>${escapedProject}</b>\n\n` +
+        `<i>Coordinate to avoid merge conflicts!</i>`;
+      const status = await sendDM(botToken, otherPrefs.dm_chat_id, msgForOther);
+      if (status === "blocked") {
+        otherPrefs.dm_chat_id = null;
+        await saveUserPreferences(env.PROJECTS, member.telegram_id, otherPrefs);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers for central team-members registry
 // ---------------------------------------------------------------------------
 
@@ -594,6 +1635,213 @@ async function upsertTeamMember(
 }
 
 // ---------------------------------------------------------------------------
+// Role helpers — Admin / Member system
+// ---------------------------------------------------------------------------
+
+function getUserRole(member: TeamMember | undefined): UserRole {
+  return member?.role === "admin" ? "admin" : "member";
+}
+
+async function isAdmin(kv: KVNamespace, telegramId: number): Promise<boolean> {
+  const members = await getTeamMembers(kv);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  return getUserRole(member) === "admin";
+}
+
+async function setUserRole(
+  kv: KVNamespace,
+  telegramId: number,
+  role: UserRole
+): Promise<void> {
+  const members = await getTeamMembers(kv);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  if (!member) return;
+  member.role = role;
+  await kv.put("team-members", JSON.stringify(members));
+}
+
+async function countAdmins(kv: KVNamespace): Promise<number> {
+  const members = await getTeamMembers(kv);
+  return members.filter((m) => m.role === "admin").length;
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for onboarding wizard
+// ---------------------------------------------------------------------------
+
+type OnboardingStep = "awaiting_github" | "settings" | "tutorial";
+
+/**
+ * Read the current onboarding step for a user (null = not in onboarding).
+ * Keys expire after 24h so abandoned wizards auto-clean.
+ */
+async function getOnboardingState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<OnboardingStep | null> {
+  const raw = await kv.get(`onboarding:${telegramId}`);
+  return raw as OnboardingStep | null;
+}
+
+/**
+ * Persist the user's current onboarding step with a 24h TTL.
+ */
+async function setOnboardingState(
+  kv: KVNamespace,
+  telegramId: number,
+  step: OnboardingStep
+): Promise<void> {
+  await kv.put(`onboarding:${telegramId}`, step, { expirationTtl: 86400 });
+}
+
+/**
+ * Remove the onboarding step key (wizard finished or abandoned).
+ */
+async function clearOnboardingState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<void> {
+  await kv.delete(`onboarding:${telegramId}`);
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for team messaging threads (Issue #59)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a message thread from KV by its key.
+ * Returns null if the thread has expired or doesn't exist.
+ */
+async function getMessageThread(
+  kv: KVNamespace,
+  threadKey: string
+): Promise<MessageThread | null> {
+  const raw = await kv.get(threadKey);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as MessageThread;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store a message thread in KV with a 24h TTL.
+ * Threads auto-expire so stale conversations don't accumulate.
+ */
+async function setMessageThread(
+  kv: KVNamespace,
+  threadKey: string,
+  data: MessageThread
+): Promise<void> {
+  await kv.put(threadKey, JSON.stringify(data), { expirationTtl: 86400 });
+}
+
+// ---------------------------------------------------------------------------
+// Team messaging helpers — @Name parsing (Issue #59)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract @Name mentions from a message.
+ * Only explicit @-tags are matched — no auto-suggestions.
+ */
+function parseAtMentions(text: string): string[] {
+  const mentions: string[] = [];
+  const regex = /(?:^|\s)@([\p{L}\p{N}_]+)/gu;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    mentions.push(match[1]);
+  }
+  return mentions;
+}
+
+/**
+ * Extract #N issue references from a message.
+ * Returns an array of issue numbers.
+ */
+function parseIssueReferences(text: string): number[] {
+  const refs: number[] = [];
+  const regex = /(?:^|\s)#(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    const num = parseInt(match[1], 10);
+    if (!isNaN(num) && num > 0) refs.push(num);
+  }
+  return refs;
+}
+
+// ---------------------------------------------------------------------------
+// "Neue Idee" wizard state — guided issue creation flow
+// ---------------------------------------------------------------------------
+
+interface NewIdeaState {
+  step: "awaiting_title" | "awaiting_description" | "awaiting_category" | "awaiting_priority";
+  title?: string;
+  description?: string;
+  category?: string; // full label name like "area:dashboard"
+}
+
+/**
+ * Read the current "new idea" wizard state for a user (null = not in wizard).
+ * Keys expire after 1h so abandoned wizards auto-clean.
+ */
+async function getNewIdeaState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<NewIdeaState | null> {
+  const raw = await kv.get(`newidea:${telegramId}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as NewIdeaState;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the user's current "new idea" wizard state with a 1h TTL.
+ */
+async function setNewIdeaState(
+  kv: KVNamespace,
+  telegramId: number,
+  state: NewIdeaState
+): Promise<void> {
+  await kv.put(`newidea:${telegramId}`, JSON.stringify(state), {
+    expirationTtl: 3600,
+  });
+}
+
+/**
+ * Remove the "new idea" wizard state (wizard finished or abandoned).
+ */
+async function clearNewIdeaState(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<void> {
+  await kv.delete(`newidea:${telegramId}`);
+}
+
+/**
+ * Check whether a user has completed onboarding before.
+ */
+async function isOnboarded(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<boolean> {
+  return (await kv.get(`onboarded:${telegramId}`)) === "true";
+}
+
+/**
+ * Mark a user as having completed onboarding (permanent).
+ */
+async function markOnboarded(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<void> {
+  await kv.put(`onboarded:${telegramId}`, "true");
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers for dashboard state
 // ---------------------------------------------------------------------------
 
@@ -628,6 +1876,332 @@ async function saveDashboardState(
 }
 
 // ---------------------------------------------------------------------------
+// KV helpers for user preferences (DM notification settings)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read user preferences from KV. Returns defaults if nothing is stored.
+ */
+async function getUserPreferences(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<UserPreferences> {
+  const raw = await kv.get(`prefs:${telegramId}`);
+  if (!raw) return { ...DEFAULT_PREFERENCES };
+  try {
+    return JSON.parse(raw) as UserPreferences;
+  } catch {
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+/**
+ * Save user preferences to KV.
+ */
+async function saveUserPreferences(
+  kv: KVNamespace,
+  telegramId: number,
+  prefs: UserPreferences
+): Promise<void> {
+  prefs.updated_at = new Date().toISOString();
+  await kv.put(`prefs:${telegramId}`, JSON.stringify(prefs));
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for CI status (GitHub Actions build results)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read CI build status for a specific PR from KV.
+ * Returns null if no status has been stored (or it expired).
+ */
+async function getCIStatus(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number
+): Promise<CIStatus | null> {
+  const data = await kv.get(`ci:${projectId}:${prNumber}`);
+  if (!data) return null;
+  try {
+    return JSON.parse(data) as CIStatus;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store CI build status for a specific PR in KV.
+ * Expires after 7 days so stale build results don't linger.
+ */
+async function setCIStatus(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number,
+  status: CIStatus
+): Promise<void> {
+  await kv.put(`ci:${projectId}:${prNumber}`, JSON.stringify(status), {
+    expirationTtl: 7 * 24 * 60 * 60,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for category claims
+// ---------------------------------------------------------------------------
+
+/**
+ * Read category claims for a project from KV.
+ */
+async function getCategoryClaims(
+  kv: KVNamespace,
+  projectId: string
+): Promise<CategoryClaimsState> {
+  const raw = await kv.get(`${projectId}:category_claims`);
+  if (!raw) return { claims: [], lastUpdated: "" };
+  try {
+    return JSON.parse(raw) as CategoryClaimsState;
+  } catch {
+    return { claims: [], lastUpdated: "" };
+  }
+}
+
+/**
+ * Save category claims for a project to KV.
+ */
+async function saveCategoryClaims(
+  kv: KVNamespace,
+  projectId: string,
+  state: CategoryClaimsState
+): Promise<void> {
+  state.lastUpdated = new Date().toISOString();
+  await kv.put(`${projectId}:category_claims`, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for paused categories
+// ---------------------------------------------------------------------------
+
+/**
+ * Read paused categories for a project from KV.
+ */
+async function getPausedCategories(
+  kv: KVNamespace,
+  projectId: string
+): Promise<PausedCategory[]> {
+  const raw = await kv.get(`${projectId}:paused_categories`);
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as PausedCategory[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Save paused categories for a project to KV.
+ */
+async function savePausedCategories(
+  kv: KVNamespace,
+  projectId: string,
+  paused: PausedCategory[]
+): Promise<void> {
+  await kv.put(`${projectId}:paused_categories`, JSON.stringify(paused));
+}
+
+/**
+ * Add a paused category entry to the KV list.
+ * If the category was already paused, it replaces the old entry.
+ */
+async function addPausedCategory(
+  kv: KVNamespace,
+  projectId: string,
+  entry: PausedCategory
+): Promise<void> {
+  const paused = await getPausedCategories(kv, projectId);
+  const filtered = paused.filter((p) => p.category !== entry.category);
+  filtered.push(entry);
+  await savePausedCategories(kv, projectId, filtered);
+}
+
+/**
+ * Remove a paused category entry (e.g. when someone claims it again).
+ */
+async function removePausedCategory(
+  kv: KVNamespace,
+  projectId: string,
+  category: string
+): Promise<void> {
+  const paused = await getPausedCategories(kv, projectId);
+  const filtered = paused.filter((p) => p.category !== category);
+  await savePausedCategories(kv, projectId, filtered);
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for active project per user
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the user's currently active project ID from KV.
+ */
+async function getActiveProject(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<string | null> {
+  return await kv.get(`active_project:${telegramId}`);
+}
+
+/**
+ * Store the user's active project ID in KV.
+ */
+async function setActiveProject(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<void> {
+  await kv.put(`active_project:${telegramId}`, projectId);
+}
+
+/**
+ * Resolve the user's active project with a fallback to the first available.
+ * Returns null if no projects are registered at all.
+ */
+async function resolveActiveProject(
+  env: Env,
+  telegramId: number
+): Promise<{ projectId: string; projectConfig: ProjectConfig } | null> {
+  const savedId = await getActiveProject(env.PROJECTS, telegramId);
+  if (savedId) {
+    const config = await getProject(env.PROJECTS, savedId, env);
+    if (config) return { projectId: savedId, projectConfig: config };
+  }
+  // Default to first available project
+  const projects = await getProjectList(env);
+  if (projects.length === 0) return null;
+  await setActiveProject(env.PROJECTS, telegramId, projects[0].id);
+  return { projectId: projects[0].id, projectConfig: projects[0].config };
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for active task tracking (per user per project)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the user's currently active task (issue number) for a project.
+ */
+async function getActiveTask(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<number | null> {
+  const raw = await kv.get(`active_task:${telegramId}:${projectId}`);
+  if (!raw) return null;
+  const num = parseInt(raw, 10);
+  return isNaN(num) ? null : num;
+}
+
+/**
+ * Mark an issue as the user's currently active task.
+ */
+async function setActiveTask(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string,
+  issueNumber: number
+): Promise<void> {
+  await kv.put(`active_task:${telegramId}:${projectId}`, String(issueNumber));
+}
+
+/**
+ * Clear the user's active task marker.
+ */
+async function clearActiveTask(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<void> {
+  await kv.delete(`active_task:${telegramId}:${projectId}`);
+}
+
+/**
+ * Read the user's "tasks done today" counter from KV.
+ * Returns 0 when the key has expired (daily reset via TTL).
+ */
+async function getTodayDoneCount(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<number> {
+  const raw = await kv.get(`today_done:${telegramId}`);
+  if (!raw) return 0;
+  const num = parseInt(raw, 10);
+  return isNaN(num) ? 0 : num;
+}
+
+/**
+ * Increment the user's "tasks done today" counter.
+ * Uses a 24-hour TTL so the counter resets automatically each day.
+ */
+async function incrementTodayDoneCount(
+  kv: KVNamespace,
+  telegramId: number
+): Promise<number> {
+  const current = await getTodayDoneCount(kv, telegramId);
+  const next = current + 1;
+  await kv.put(`today_done:${telegramId}`, String(next), {
+    expirationTtl: 86400,
+  });
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// KV helpers for category timer (Issue #60)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the active category timer for a user in a project.
+ */
+async function getTimer(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<TimerState | null> {
+  const raw = await kv.get(`timer:${telegramId}:${projectId}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as TimerState;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start a category timer — stores the category name and current timestamp.
+ * Safe: one-category-per-user guard in handleCategoryConfirm prevents double-start.
+ * If a timer already exists (e.g. KV/claim state drift), it is overwritten.
+ */
+async function startTimer(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string,
+  category: string
+): Promise<void> {
+  const state: TimerState = { category, startedAt: new Date().toISOString() };
+  await kv.put(`timer:${telegramId}:${projectId}`, JSON.stringify(state));
+}
+
+/**
+ * Stop a category timer — removes the KV entry and returns the state
+ * so the caller can calculate the duration.
+ */
+async function stopTimer(
+  kv: KVNamespace,
+  telegramId: number,
+  projectId: string
+): Promise<TimerState | null> {
+  const state = await getTimer(kv, telegramId, projectId);
+  if (!state) return null;
+  await kv.delete(`timer:${telegramId}:${projectId}`);
+  return state;
+}
+
 // ---------------------------------------------------------------------------
 // D1 helpers — event logging and session history
 // ---------------------------------------------------------------------------
@@ -736,6 +2310,433 @@ async function getWorkHoursToday(
 }
 
 // ---------------------------------------------------------------------------
+// D1 helpers — time tracking (Issue #60)
+// ---------------------------------------------------------------------------
+
+/**
+ * Log a completed category timer session to the time_logs table.
+ * Best-effort — errors are swallowed so they don't break the main flow.
+ */
+async function logTimeEntry(
+  db: D1Database,
+  entry: {
+    userId: number;
+    project: string;
+    category: string;
+    startedAt: string;
+    endedAt: string;
+    durationMinutes: number;
+    tasksCompleted: number;
+  }
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        "INSERT INTO time_logs (user_id, project, category, started_at, ended_at, duration_minutes, tasks_completed) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .bind(
+        String(entry.userId),
+        entry.project,
+        entry.category,
+        entry.startedAt,
+        entry.endedAt,
+        entry.durationMinutes,
+        entry.tasksCompleted
+      )
+      .run();
+  } catch {
+    // Best-effort — don't break main flow
+  }
+}
+
+/**
+ * Total tracked minutes for a user on a specific date (YYYY-MM-DD).
+ */
+async function getDailyHours(
+  db: D1Database,
+  userId: number,
+  date: string
+): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT COALESCE(SUM(duration_minutes), 0) as total FROM time_logs WHERE user_id = ? AND date(started_at) = ?"
+      )
+      .bind(String(userId), date)
+      .first<{ total: number }>();
+    return row?.total || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Total tracked minutes for a user from weekStart onwards (7 days).
+ */
+async function getWeeklyHours(
+  db: D1Database,
+  userId: number,
+  weekStart: string
+): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT COALESCE(SUM(duration_minutes), 0) as total FROM time_logs WHERE user_id = ? AND date(started_at) >= ? AND date(started_at) < date(?, '+7 days')"
+      )
+      .bind(String(userId), weekStart, weekStart)
+      .first<{ total: number }>();
+    return row?.total || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Format a duration in minutes as a human-readable string.
+ * 0 → "0m", 45 → "45m", 90 → "1h 30m", 120 → "2h 0m"
+ */
+function formatDuration(minutes: number): string {
+  const clamped = Math.max(0, Math.round(minutes));
+  if (clamped < 60) return `${clamped}m`;
+  const h = Math.floor(clamped / 60);
+  const m = clamped % 60;
+  return `${h}h ${m}m`;
+}
+
+// ---------------------------------------------------------------------------
+// D1 helpers — velocity snapshots (Issue #61)
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist a weekly velocity snapshot to D1.
+ * Best-effort — errors are swallowed so they don't break the cron job.
+ */
+async function saveVelocitySnapshot(
+  db: D1Database,
+  snapshot: VelocitySnapshot
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        "INSERT OR REPLACE INTO velocity (project, week_start, tasks_completed, tasks_opened, team_hours, per_member, fastest_task, longest_task) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .bind(
+        snapshot.project,
+        snapshot.weekStart,
+        snapshot.tasksCompleted,
+        snapshot.tasksOpened,
+        snapshot.teamHours,
+        JSON.stringify(snapshot.perMember),
+        snapshot.fastestTask ? JSON.stringify(snapshot.fastestTask) : null,
+        snapshot.longestTask ? JSON.stringify(snapshot.longestTask) : null
+      )
+      .run();
+  } catch {
+    // Best-effort — don't break the cron job
+  }
+}
+
+/**
+ * Fetch a velocity snapshot for a specific project and week.
+ */
+async function getVelocityData(
+  db: D1Database,
+  project: string,
+  weekStart: string
+): Promise<VelocitySnapshot | null> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT project, week_start, tasks_completed, tasks_opened, team_hours, per_member, fastest_task, longest_task FROM velocity WHERE project = ? AND week_start = ? LIMIT 1"
+      )
+      .bind(project, weekStart)
+      .first<{
+        project: string;
+        week_start: string;
+        tasks_completed: number;
+        tasks_opened: number;
+        team_hours: number;
+        per_member: string | null;
+        fastest_task: string | null;
+        longest_task: string | null;
+      }>();
+    if (!row) return null;
+    return {
+      project: row.project,
+      weekStart: row.week_start,
+      tasksCompleted: row.tasks_completed,
+      tasksOpened: row.tasks_opened,
+      teamHours: row.team_hours,
+      perMember: row.per_member ? JSON.parse(row.per_member) : [],
+      fastestTask: row.fastest_task ? JSON.parse(row.fastest_task) : null,
+      longestTask: row.longest_task ? JSON.parse(row.longest_task) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch velocity snapshots for the last two weeks (this week + last week).
+ * Returns [thisWeek, lastWeek] — either may be null if no data exists.
+ */
+async function getLastTwoWeeksVelocity(
+  db: D1Database,
+  project: string
+): Promise<[VelocitySnapshot | null, VelocitySnapshot | null]> {
+  try {
+    const rows = await db
+      .prepare(
+        "SELECT project, week_start, tasks_completed, tasks_opened, team_hours, per_member, fastest_task, longest_task FROM velocity WHERE project = ? ORDER BY week_start DESC LIMIT 2"
+      )
+      .bind(project)
+      .all<{
+        project: string;
+        week_start: string;
+        tasks_completed: number;
+        tasks_opened: number;
+        team_hours: number;
+        per_member: string | null;
+        fastest_task: string | null;
+        longest_task: string | null;
+      }>();
+
+    const results = (rows.results || []).map((row) => ({
+      project: row.project,
+      weekStart: row.week_start,
+      tasksCompleted: row.tasks_completed,
+      tasksOpened: row.tasks_opened,
+      teamHours: row.team_hours,
+      perMember: row.per_member ? JSON.parse(row.per_member) : [],
+      fastestTask: row.fastest_task ? JSON.parse(row.fastest_task) : null,
+      longestTask: row.longest_task ? JSON.parse(row.longest_task) : null,
+    }));
+
+    return [results[0] || null, results[1] || null];
+  } catch {
+    return [null, null];
+  }
+}
+
+/**
+ * Calculate the Monday (start) of the ISO week containing the given date.
+ */
+function getWeekStartDate(date: Date): string {
+  const d = new Date(date);
+  const day = d.getUTCDay();
+  // Shift so Monday = 0: (day + 6) % 7
+  const diff = (day + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Aggregate current-week data from time_logs + events to build a
+ * VelocitySnapshot.  Does NOT persist — the caller decides when to save.
+ */
+async function calculateVelocitySnapshot(
+  db: D1Database,
+  project: string,
+  members: TeamMember[]
+): Promise<VelocitySnapshot> {
+  const now = new Date();
+  const weekStart = getWeekStartDate(now);
+
+  // Tasks completed (issues closed) this week
+  let tasksCompleted = 0;
+  let tasksOpened = 0;
+  try {
+    const closed = await db
+      .prepare(
+        "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days')"
+      )
+      .bind(weekStart, weekStart)
+      .first<{ c: number }>();
+    tasksCompleted = closed?.c || 0;
+
+    const opened = await db
+      .prepare(
+        "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.opened' AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days')"
+      )
+      .bind(weekStart, weekStart)
+      .first<{ c: number }>();
+    tasksOpened = opened?.c || 0;
+  } catch {
+    // Best-effort
+  }
+
+  // Per-member breakdown from time_logs
+  const perMember: VelocitySnapshot["perMember"] = [];
+  let totalTeamMinutes = 0;
+  for (const member of members) {
+    const hours = await getWeeklyHours(db, member.telegram_id, weekStart);
+    // Count tasks completed by this member (issues they closed)
+    let memberTasks = 0;
+    try {
+      const row = await db
+        .prepare(
+          "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND actor = ? AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days')"
+        )
+        .bind(member.github, weekStart, weekStart)
+        .first<{ c: number }>();
+      memberTasks = row?.c || 0;
+    } catch {
+      // Best-effort
+    }
+
+    totalTeamMinutes += hours;
+    perMember.push({
+      userId: String(member.telegram_id),
+      name: member.name,
+      tasks: memberTasks,
+      hours,
+    });
+  }
+
+  // Fastest and longest tasks — find issues.closed events with time_logs data
+  let fastestTask: VelocitySnapshot["fastestTask"] = null;
+  let longestTask: VelocitySnapshot["longestTask"] = null;
+  try {
+    const closedEvents = await db
+      .prepare(
+        "SELECT target, metadata FROM events WHERE event_type = 'issues.closed' AND date(created_at) >= ? AND date(created_at) < date(?, '+7 days') AND target IS NOT NULL"
+      )
+      .bind(weekStart, weekStart)
+      .all<{ target: string; metadata: string | null }>();
+
+    if (closedEvents.results && closedEvents.results.length > 0) {
+      // Try to find time data for closed issues from time_logs
+      const taskTimings: Array<{ number: number; title: string; minutes: number }> = [];
+
+      for (const event of closedEvents.results) {
+        const issueNumber = parseInt(event.target, 10);
+        if (isNaN(issueNumber)) continue;
+
+        // Extract title from metadata if available
+        let title = `#${issueNumber}`;
+        if (event.metadata) {
+          try {
+            const meta = JSON.parse(event.metadata);
+            if (meta.title) title = meta.title;
+          } catch {
+            // Ignore parse errors
+          }
+        }
+
+        // Look for time log entries related to this issue's category
+        const timeRow = await db
+          .prepare(
+            "SELECT SUM(duration_minutes) as total FROM time_logs WHERE date(started_at) >= ? AND date(started_at) < date(?, '+7 days') AND tasks_completed > 0"
+          )
+          .bind(weekStart, weekStart)
+          .first<{ total: number | null }>();
+
+        if (timeRow?.total && timeRow.total > 0) {
+          taskTimings.push({ number: issueNumber, title, minutes: timeRow.total });
+        }
+      }
+
+      if (taskTimings.length > 0) {
+        taskTimings.sort((a, b) => a.minutes - b.minutes);
+        fastestTask = taskTimings[0];
+        longestTask = taskTimings[taskTimings.length - 1];
+        // Only show fastest/longest if they're different tasks
+        if (fastestTask.number === longestTask.number) {
+          longestTask = null;
+        }
+      }
+    }
+  } catch {
+    // Best-effort
+  }
+
+  return {
+    project,
+    weekStart,
+    tasksCompleted,
+    tasksOpened,
+    teamHours: totalTeamMinutes,
+    perMember,
+    fastestTask,
+    longestTask,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// D1 helpers — learning bridge (Issue #64)
+// ---------------------------------------------------------------------------
+
+/** Save a new learning to D1. Returns the new row id. */
+async function saveLearning(
+  db: D1Database,
+  userId: string,
+  project: string,
+  content: string,
+  scope: string = "private"
+): Promise<number> {
+  const result = await db
+    .prepare(
+      "INSERT INTO learnings_telegram (user_id, project, content, scope) VALUES (?, ?, ?, ?)"
+    )
+    .bind(userId, project, content, scope)
+    .run();
+  return result.meta.last_row_id as number;
+}
+
+/** Update the scope of an existing learning. */
+async function updateLearningScope(
+  db: D1Database,
+  learningId: number,
+  scope: "team" | "private",
+  userId: string
+): Promise<void> {
+  await db
+    .prepare("UPDATE learnings_telegram SET scope = ? WHERE id = ? AND user_id = ?")
+    .bind(scope, learningId, userId)
+    .run();
+}
+
+/** Fetch today's "team" learnings for the evening group digest. */
+async function getTodayTeamLearnings(
+  db: D1Database,
+  project: string
+): Promise<Array<{ content: string; user_id: string }>> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT content, user_id FROM learnings_telegram
+         WHERE project = ? AND scope = 'team' AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 20`
+      )
+      .bind(project)
+      .all<{ content: string; user_id: string }>();
+    return result.results || [];
+  } catch {
+    return [];
+  }
+}
+
+/** Fetch today's learnings for a specific user (all scopes). */
+async function getTodayUserLearnings(
+  db: D1Database,
+  userId: string
+): Promise<Array<{ content: string; scope: string }>> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT content, scope FROM learnings_telegram
+         WHERE user_id = ? AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 20`
+      )
+      .bind(userId)
+      .all<{ content: string; scope: string }>();
+    return result.results || [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Project config from KV
 // ---------------------------------------------------------------------------
 
@@ -800,6 +2801,19 @@ async function renderDashboard(
     }
   } else {
     lines.push("\u{1F465} <b>Online:</b> nobody right now");
+  }
+
+  // Category claims section
+  const catClaims = await getCategoryClaims(env.PROJECTS, projectId);
+  if (catClaims.claims.length > 0) {
+    lines.push("");
+    lines.push("\u{1F4C2} <b>Category Claims:</b>");
+    for (const claim of catClaims.claims) {
+      const color = getUserColor(members, claim.telegramId);
+      lines.push(
+        `${color} ${escapeHtml(claim.displayName)} \u{2192} ${escapeHtml(claim.telegramName)} (${claim.assignedIssues.length} issues)`
+      );
+    }
   }
 
   // Fetch GitHub issues
@@ -1163,6 +3177,10 @@ async function sendProjectControlMessage(
       [
         { text: "\u{1F4C8} Weekly Report", callback_data: "project_weekly" },
       ],
+      [
+        { text: "\u{1F4C2} Assign Category", callback_data: "cat_assign" },
+        { text: "\u{1F4CA} Category Status", callback_data: "cat_status" },
+      ],
     ],
   };
 
@@ -1271,6 +3289,7 @@ async function handleProjectBoard(
     number: number;
     title: string;
     assignee?: { login: string } | null;
+    labels: Array<{ name: string }>;
     pull_request?: unknown;
   }>;
 
@@ -1282,18 +3301,33 @@ async function handleProjectBoard(
       `\u{1F4CB} <b>${projectId}</b> \u{2014} Board\n\u{2501}${"\u{2501}".repeat(15)}\n\nNo open issues.`;
   }
 
-  const assigned = realIssues.filter((i) => i.assignee);
-  const unassigned = realIssues.filter((i) => !i.assignee);
+  // Check for active blockers — show prominently at top
+  const blockers = realIssues.filter((i) =>
+    i.labels.some((l) => l.name === "priority:blocker")
+  );
+
+  const assigned = sortByPriority(realIssues.filter((i) => i.assignee));
+  const unassigned = sortByPriority(realIssues.filter((i) => !i.assignee));
 
   const lines: string[] = [
     `\u{1F4CB} <b>${projectId}</b> \u{2014} Board`,
     "\u{2501}".repeat(16),
   ];
 
+  // Blocker banner — shown when any blocker issue exists
+  if (blockers.length > 0) {
+    lines.push("");
+    lines.push("\u{1F6A8} <b>BLOCKER</b> \u{2014} category claims paused:");
+    for (const b of blockers) {
+      lines.push(`  \u{2022} #${b.number} ${escapeHtml(b.title)}`);
+    }
+  }
+
   if (unassigned.length > 0) {
     lines.push(`\nOpen (${unassigned.length}):`);
     for (const issue of unassigned.slice(0, 15)) {
-      lines.push(`\u{2022} #${issue.number} ${issue.title} [open]`);
+      const pri = formatPriority(getIssuePriority(issue.labels));
+      lines.push(`${pri} #${issue.number} ${escapeHtml(issue.title)} [open]`);
     }
     if (unassigned.length > 15) {
       lines.push(`  ... and ${unassigned.length - 15} more`);
@@ -1303,8 +3337,9 @@ async function handleProjectBoard(
   if (assigned.length > 0) {
     lines.push(`\nIn Progress (${assigned.length}):`);
     for (const issue of assigned.slice(0, 15)) {
+      const pri = formatPriority(getIssuePriority(issue.labels));
       lines.push(
-        `\u{2022} #${issue.number} ${issue.title} [${issue.assignee!.login}]`
+        `${pri} #${issue.number} ${escapeHtml(issue.title)} [${escapeHtml(issue.assignee!.login)}]`
       );
     }
     if (assigned.length > 15) {
@@ -1357,16 +3392,29 @@ async function handleProjectMyTasks(
   const issues = (await response.json()) as Array<{
     number: number;
     title: string;
+    labels: Array<{ name: string }>;
     pull_request?: unknown;
   }>;
 
-  // Filter out pull requests
-  const myIssues = issues.filter((i) => !i.pull_request);
+  // Filter out pull requests, then sort by priority
+  const myIssues = sortByPriority(issues.filter((i) => !i.pull_request));
 
+  // Check for active blockers — warn the user
+  const blockers = await isBlockerActive(project);
+
+  const safeFirstName = escapeHtml(callerFirstName);
   const lines: string[] = [
-    `\u{1F4CC} <b>Your Tasks, ${callerFirstName}</b>`,
+    `\u{1F4CC} <b>Your Tasks, ${safeFirstName}</b>`,
     "\u{2501}".repeat(16),
   ];
+
+  if (blockers.length > 0) {
+    lines.push("");
+    lines.push("\u{1F6A8} <b>BLOCKER active</b> \u{2014} focus on these first:");
+    for (const b of blockers) {
+      lines.push(`  \u{2022} #${b.number} ${escapeHtml(b.title)}`);
+    }
+  }
 
   if (myIssues.length === 0) {
     lines.push("\nNo tasks assigned to you.");
@@ -1374,11 +3422,1021 @@ async function handleProjectMyTasks(
   } else {
     lines.push(`\nAssigned to you (${myIssues.length}):`);
     for (const issue of myIssues) {
-      lines.push(`\u{2022} #${issue.number} ${issue.title}`);
+      const pri = formatPriority(getIssuePriority(issue.labels));
+      lines.push(`${pri} #${issue.number} ${escapeHtml(issue.title)}`);
     }
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Check if all issues in a user's category claim are closed on GitHub.
+ * If yes, auto-release the claim and stop the timer.
+ * Returns true if the category was released (all tasks done).
+ */
+async function autoReleaseDoneCategory(
+  env: Env,
+  _project: ProjectConfig,
+  projectId: string,
+  telegramId: number,
+  openIssueNumbers?: number[]
+): Promise<boolean> {
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (!myClaim || myClaim.assignedIssues.length === 0) return false;
+
+  // Use pre-fetched open issue data when available (zero API calls)
+  if (openIssueNumbers !== undefined) {
+    const openSet = new Set(openIssueNumbers);
+    const hasOpenClaimed = myClaim.assignedIssues.some((n) => openSet.has(n));
+    if (hasOpenClaimed) return false;
+  } else {
+    // No pre-fetched data — skip release check.
+    // Release is handled event-driven by mytasks_done handler instead.
+    return false;
+  }
+
+  // All claimed issues are closed — auto-release
+  claimsState.claims = claimsState.claims.filter((c) => c.telegramId !== telegramId);
+  claimsState.lastUpdated = new Date().toISOString();
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  try {
+    await stopTimer(env.PROJECTS, telegramId, projectId);
+  } catch {}
+
+  return true;
+}
+
+/**
+ * Handle "Meine Aufgaben" — DM task list with priority sorting and
+ * inline [Start] / [Done] buttons per task.
+ *
+ * Returns { text, keyboard } so the caller can send or edit the message.
+ */
+async function handleMeineAufgaben(
+  env: Env,
+  telegramId: number,
+  firstName: string,
+  lang: Locale = "en"
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const kb = new InlineKeyboard();
+  const safeFirstName = escapeHtml(firstName);
+
+  // Resolve active project
+  const active = await resolveActiveProject(env, telegramId);
+  if (!active) {
+    return {
+      text: `${t(lang, "tasks.heading", { name: safeFirstName })}\n${"━".repeat(16)}\n\nNo project configured yet.`,
+      keyboard: kb,
+    };
+  }
+
+  const { projectId, projectConfig: project } = active;
+
+  if (!project.githubToken) {
+    return {
+      text: `${t(lang, "tasks.heading", { name: safeFirstName })}\n${"━".repeat(16)}\n\nNo GitHub token configured.`,
+      keyboard: kb,
+    };
+  }
+
+  // Look up the caller's GitHub username
+  const members = await getTeamMembers(env.PROJECTS);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  const githubUsername = member?.github;
+
+  if (!githubUsername) {
+    return {
+      text:
+        `${t(lang, "tasks.heading", { name: safeFirstName })}\n${"━".repeat(16)}\n\n` +
+        "You are not registered yet.\n" +
+        "Use /register &lt;github-username&gt; to link your account.",
+      keyboard: kb,
+    };
+  }
+
+  // Fetch open issues assigned to this user
+  const response = await githubRequest(
+    "GET",
+    `/repos/${project.githubRepo}/issues?state=open&assignee=${githubUsername}&per_page=30`,
+    project.githubToken
+  );
+
+  if (!response.ok) {
+    return {
+      text: `${t(lang, "tasks.heading_error")}\n\nGitHub API error: ${response.status}`,
+      keyboard: kb,
+    };
+  }
+
+  const issues = (await response.json()) as Array<{
+    number: number;
+    title: string;
+    labels: Array<{ name: string }>;
+    pull_request?: unknown;
+    closed_at?: string | null;
+  }>;
+
+  // Fetch recently closed issues so the user can see completed tasks (Issue #68)
+  let closedIssues: Array<{
+    number: number;
+    title: string;
+    labels: Array<{ name: string }>;
+    pull_request?: unknown;
+    closed_at?: string | null;
+  }> = [];
+  try {
+    // Only fetch issues closed in the last 7 days to keep the list relevant
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const closedRes = await githubRequest(
+      "GET",
+      `/repos/${project.githubRepo}/issues?state=closed&assignee=${githubUsername}&since=${since}&per_page=10`,
+      project.githubToken
+    );
+    if (closedRes.ok) {
+      closedIssues = ((await closedRes.json()) as typeof closedIssues).filter(
+        (i) => !i.pull_request
+      );
+    }
+  } catch {
+    // Non-critical — continue without closed issues
+  }
+
+  // Filter out pull requests, sort by priority (blocker first)
+  const nonPrIssues = issues.filter((i) => !i.pull_request);
+  const myIssues = sortByPriority(nonPrIssues);
+
+  // Auto-release category if all claimed issues are closed (uses already-fetched data)
+  const openIssueNumbers = nonPrIssues.map((i) => i.number);
+  await autoReleaseDoneCategory(env, project, projectId, telegramId, openIssueNumbers);
+
+  // Read the user's currently active task and today's done counter
+  const activeTaskNumber = await getActiveTask(env.PROJECTS, telegramId, projectId);
+  const todayDone = await getTodayDoneCount(env.PROJECTS, telegramId);
+
+  // Build the message
+  const lines: string[] = [
+    t(lang, "tasks.heading", { name: safeFirstName }),
+    "━".repeat(16),
+  ];
+
+  // Show active category claim and branch name in header
+  const claimsForHeader = await getCategoryClaims(env.PROJECTS, projectId);
+  const myClaimHeader = claimsForHeader.claims.find((c) => c.telegramId === telegramId);
+  if (myClaimHeader) {
+    const branchName = `feature/${myClaimHeader.displayName.toLowerCase().replace(/\s+/g, "-")}`;
+    lines.push(`\u{1F4C2} Category: <b>${escapeHtml(myClaimHeader.displayName)}</b>`);
+    lines.push(`\u{1F33F} Branch: <code>${escapeHtml(branchName)}</code>`);
+  }
+
+  if (myIssues.length === 0) {
+    lines.push("");
+
+    // Show completed tasks even when no open tasks remain (Issue #68)
+    if (closedIssues.length > 0) {
+      lines.push(t(lang, "tasks.all_done"));
+      lines.push("");
+      lines.push(t(lang, "tasks.recently_completed", { count: closedIssues.length }));
+      for (const issue of closedIssues) {
+        lines.push(
+          `\u{2611}\u{FE0F} <s>#${issue.number} ${escapeHtml(issue.title)}</s>`
+        );
+      }
+    } else {
+      lines.push(t(lang, "tasks.no_tasks"));
+    }
+
+    lines.push("");
+    lines.push(t(lang, "claim.use_claim_task"));
+    lines.push("");
+    lines.push(t(lang, "tasks.today_completed", { count: todayDone }));
+
+    // Show daily tracked time (Issue #60)
+    const dailyMinutes0 = await getDailyHours(env.DB, telegramId, new Date().toISOString().slice(0, 10));
+    const currentTimer0 = await getTimer(env.PROJECTS, telegramId, projectId);
+    let runningMinutes0 = 0;
+    if (currentTimer0) {
+      runningMinutes0 = Math.round(
+        (Date.now() - new Date(currentTimer0.startedAt).getTime()) / 60000
+      );
+    }
+    const totalMinutes0 = dailyMinutes0 + runningMinutes0;
+    if (totalMinutes0 > 0) {
+      lines.push(t(lang, "tasks.today_time", { duration: formatDuration(totalMinutes0) }));
+    }
+
+    // Suggest claiming a category when the user has no tasks
+    const noTasksTip = await getTip(env.PROJECTS, telegramId, "no_tasks_assigned", lang);
+    if (noTasksTip) lines.push(noTasksTip.trim());
+
+    return { text: lines.join("\n"), keyboard: kb };
+  }
+
+  // Separate blockers from the rest for prominent display
+  const blockerIssues = myIssues.filter(
+    (i) => getIssuePriority(i.labels) === "priority:blocker"
+  );
+  const otherIssues = myIssues.filter(
+    (i) => getIssuePriority(i.labels) !== "priority:blocker"
+  );
+
+  // Helper: truncate a title to fit Telegram's inline button label limit
+  const shortTitle = (title: string, maxLen: number = 22): string =>
+    title.length > maxLen ? title.slice(0, maxLen - 1) + "\u{2026}" : title;
+
+  // Show blocker warning at top
+  if (blockerIssues.length > 0) {
+    lines.push("");
+    lines.push("\u{1F6A8} <b>BLOCKER \u{2014} fix these first:</b>");
+    for (const issue of blockerIssues) {
+      const isActive = issue.number === activeTaskNumber;
+      const activeTag = isActive ? " \u{25B6} <b>ACTIVE</b>" : "";
+      lines.push(
+        `\u{1F6A8} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
+      );
+      // Two buttons per task row: Start/Active + Done
+      if (isActive) {
+        kb.text(
+          `\u{25B6} Active #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
+        );
+      } else {
+        kb.text(
+          `\u{25B6}\u{FE0F} Start #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
+        );
+      }
+      kb.text(`\u{2705} Done #${issue.number}`, `mytasks_done:${issue.number}`);
+      kb.row();
+    }
+  }
+
+  // Show remaining tasks grouped by priority
+  if (otherIssues.length > 0) {
+    lines.push("");
+    lines.push(`\u{1F4CB} <b>Assigned to you (${otherIssues.length}):</b>`);
+    for (const issue of otherIssues) {
+      const priority = getIssuePriority(issue.labels);
+      const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+      const isActive = issue.number === activeTaskNumber;
+      const activeTag = isActive ? " \u{25B6} <b>ACTIVE</b>" : "";
+      lines.push(
+        `${emoji} #${issue.number} ${escapeHtml(issue.title)}${activeTag}`
+      );
+      // Two buttons per task row: Start/Active + Done
+      if (isActive) {
+        kb.text(
+          `\u{25B6} Active #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
+        );
+      } else {
+        kb.text(
+          `\u{25B6}\u{FE0F} Start #${issue.number} \u{2014} ${shortTitle(issue.title)}`,
+          `mytasks_start:${issue.number}`
+        );
+      }
+      kb.text(`\u{2705} Done #${issue.number}`, `mytasks_done:${issue.number}`);
+      kb.row();
+    }
+  }
+
+  // Show recently completed tasks so the user sees what's done (Issue #68)
+  if (closedIssues.length > 0) {
+    lines.push("");
+    lines.push(`\u{2705} <b>Recently completed (${closedIssues.length}):</b>`);
+    for (const issue of closedIssues) {
+      lines.push(
+        `\u{2611}\u{FE0F} <s>#${issue.number} ${escapeHtml(issue.title)}</s>`
+      );
+    }
+  }
+
+  // Footer: today counter + time tracker + refresh + pause
+  lines.push("");
+  lines.push(`\u{1F3C6} Today completed: <b>${todayDone}</b>`);
+
+  // Show daily tracked time (Issue #60)
+  const dailyMinutes = await getDailyHours(env.DB, telegramId, new Date().toISOString().slice(0, 10));
+  const currentTimer = await getTimer(env.PROJECTS, telegramId, projectId);
+  let runningMinutes = 0;
+  if (currentTimer) {
+    runningMinutes = Math.round(
+      (Date.now() - new Date(currentTimer.startedAt).getTime()) / 60000
+    );
+  }
+  const totalMinutes = dailyMinutes + runningMinutes;
+  if (totalMinutes > 0) {
+    lines.push(`\u{23F1} Today: <b>${formatDuration(totalMinutes)}</b>`);
+  }
+
+  // Show Pause button when user has a claimed category
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const myClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  // Action buttons row: Pause + Show Prompts + Refresh
+  if (myClaim) {
+    kb.text("\u{23F8} Pause", "mytasks_pause");
+  }
+
+  // Show [Create Preview] when user has a claimed category with a branch
+  // that has commits but no open PR yet
+  if (myClaim && project.githubToken) {
+    const categorySlug = myClaim.category.replace("area:", "").toLowerCase();
+    const branchName = `feature/${categorySlug}`;
+
+    try {
+      // Check if there is already an open PR for this branch
+      const owner = project.githubRepo.split("/")[0];
+      const prsRes = await githubRequest(
+        "GET",
+        `/repos/${project.githubRepo}/pulls?state=open&head=${owner}:${branchName}&per_page=1`,
+        project.githubToken
+      );
+      const prs = prsRes.ok
+        ? ((await prsRes.json()) as Array<{ number: number }>)
+        : [];
+
+      if (prs.length === 0) {
+        // No PR yet — check if branch exists (implies commits)
+        const branchRes = await githubRequest(
+          "GET",
+          `/repos/${project.githubRepo}/branches/${encodeURIComponent(branchName)}`,
+          project.githubToken
+        );
+        if (branchRes.ok) {
+          kb.text(
+            "\u{1F680} Create Preview",
+            `preview_create:${projectId}:${myClaim.category}`
+          );
+        }
+      } else {
+        // PR exists — show CI status badge if available
+        const ciStatus = await getCIStatus(env.PROJECTS, projectId, prs[0].number);
+        if (ciStatus) {
+          const badge =
+            ciStatus.conclusion === "success" ? "\u{2705}" :
+            ciStatus.conclusion === "failure" ? "\u{274C}" : "\u{23F3}";
+          lines.push(`${badge} CI: ${escapeHtml(ciStatus.workflow)} \u{2014} ${ciStatus.conclusion}`);
+        }
+      }
+    } catch {
+      // GitHub API error — silently skip button
+    }
+  }
+
+  kb.row();
+  // "Show All Prompts" sends Claude Code prompts for every assigned issue as DMs
+  kb.text("\u{1F4CB} Show All Prompts", "mytasks_show_prompts");
+  kb.text("\u{1F504} Refresh", "mytasks_refresh");
+
+  return { text: lines.join("\n"), keyboard: kb };
+}
+
+// ---------------------------------------------------------------------------
+// Preview & Merge helpers (Issue #56)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve a Coolify preview URL from KV.
+ * Returns null when no preview has been stored yet.
+ */
+async function getPreviewUrl(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number
+): Promise<string | null> {
+  return kv.get(`preview:${projectId}:${prNumber}`);
+}
+
+/**
+ * Store a Coolify preview URL in KV with a 7-day TTL.
+ * Preview links are ephemeral — they become stale after the branch is merged
+ * or the deployment is torn down.
+ */
+async function setPreviewUrl(
+  kv: KVNamespace,
+  projectId: string,
+  prNumber: number,
+  url: string
+): Promise<void> {
+  await kv.put(`preview:${projectId}:${prNumber}`, url, { expirationTtl: 604800 });
+}
+
+/**
+ * Look up the branch name for a Vercel deployment by PR number.
+ * Vercel webhooks include the PR ID but not the branch — we fetch it from GitHub.
+ * Returns the branch name, or null if lookup fails.
+ */
+async function resolveVercelBranch(
+  project: ProjectConfig,
+  prNumber: number
+): Promise<string | null> {
+  if (!project.githubToken) return null;
+  try {
+    const res = await githubRequest(
+      "GET",
+      `/repos/${project.githubRepo}/pulls/${prNumber}`,
+      project.githubToken
+    );
+    if (!res.ok) return null;
+    const pr = (await res.json()) as { head: { ref: string } };
+    return pr.head.ref;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send a deployment status DM (building/failed) to the branch owner.
+ * Finds the PR author via GitHub, then maps to a team member for the DM.
+ */
+async function notifyBranchOwner(
+  env: Env,
+  project: ProjectConfig,
+  branch: string,
+  status: "building" | "failed",
+  platform: string
+): Promise<void> {
+  // Try to find the branch owner by matching team members' active branches
+  const members = await getTeamMembers(env.PROJECTS);
+  if (!project.githubToken) return;
+
+  // Look up open PRs to find who owns this branch
+  try {
+    const res = await githubRequest(
+      "GET",
+      `/repos/${project.githubRepo}/pulls?state=open&head=${encodeURIComponent(`${project.githubRepo.split("/")[0]}:${branch}`)}&per_page=1`,
+      project.githubToken
+    );
+    if (!res.ok) return;
+
+    const prs = (await res.json()) as Array<{ user: { login: string } }>;
+    if (prs.length === 0) return;
+
+    const prAuthorGithub = prs[0].user.login;
+    const ownerMember = members.find((m) => m.github === prAuthorGithub);
+    if (!ownerMember) return;
+
+    const prefs = await getUserPreferences(env.PROJECTS, ownerMember.telegram_id);
+    if (!prefs.dm_chat_id) return;
+
+    const dnd = await isUserDND(env.PROJECTS, ownerMember.telegram_id);
+    if (dnd) return;
+
+    const lang = await getUserLanguage(env.PROJECTS, ownerMember.telegram_id);
+    const i18nKey = status === "building" ? "deploy.building" : "deploy.failed";
+    const text = t(lang, i18nKey, { platform, branch });
+
+    await sendDM(project.botToken, prefs.dm_chat_id, text);
+  } catch {
+    // Best-effort notification — don't break the webhook response
+  }
+}
+
+/**
+ * Create a Pull Request on GitHub for the given branch.
+ * Returns the PR number and URL on success, null on failure.
+ */
+async function createPreviewPR(
+  project: ProjectConfig,
+  branchName: string,
+  title: string,
+  body: string
+): Promise<{ number: number; html_url: string } | null> {
+  if (!project.githubToken) return null;
+
+  const res = await githubRequest(
+    "POST",
+    `/repos/${project.githubRepo}/pulls`,
+    project.githubToken,
+    { title, head: branchName, base: "main", body }
+  );
+
+  if (!res.ok) return null;
+  const pr = (await res.json()) as { number: number; html_url: string };
+  return pr;
+}
+
+/**
+ * Submit a GitHub PR review (approve or request changes).
+ * Returns true on success, false on failure.
+ */
+async function submitPRReview(
+  project: ProjectConfig,
+  prNumber: number,
+  event: "APPROVE" | "REQUEST_CHANGES",
+  body?: string
+): Promise<boolean> {
+  if (!project.githubToken) return false;
+
+  const payload: Record<string, string> = { event };
+  if (body) payload.body = body;
+
+  const res = await githubRequest(
+    "POST",
+    `/repos/${project.githubRepo}/pulls/${prNumber}/reviews`,
+    project.githubToken,
+    payload
+  );
+
+  return res.ok;
+}
+
+/**
+ * Send a "please git pull" DM to all team members except the person who
+ * merged the PR.  Always-on — not controlled by notification preferences
+ * because stale local branches cause real problems.
+ *
+ * Deduplication: stores a KV key with 1h TTL to avoid sending the same
+ * reminder if the webhook fires more than once.
+ */
+async function sendPullReminder(
+  env: Env,
+  botToken: string,
+  mergerGithub: string,
+  prTitle: string,
+  prNumber: number,
+  commitCount: number
+): Promise<void> {
+  // Dedup: check if we already sent this reminder
+  const projects = await getProjectList(env);
+  const projectId = projects.length > 0 ? projects[0].id : "default";
+  const dedupKey = `pullreminder:${projectId}:${prNumber}`;
+  const existing = await env.PROJECTS.get(dedupKey);
+  if (existing) return;
+
+  // Mark as sent (1h TTL) before sending to prevent races
+  await env.PROJECTS.put(dedupKey, "1", { expirationTtl: 3600 });
+
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the person who merged
+    if (member.github === mergerGithub) continue;
+
+    // Respect DND status
+    const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+    if (dnd) continue;
+
+    const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+    if (!prefs.dm_chat_id) continue;
+
+    const commitWord = commitCount === 1 ? "commit" : "commits";
+    const pullTip = await getTip(env.PROJECTS, member.telegram_id, "forgot_to_pull");
+    const text =
+      `\u{1F504} <b>Pull Reminder</b>\n${"━".repeat(16)}\n\n` +
+      `@${escapeHtml(mergerGithub)} merged PR #${prNumber}:\n` +
+      `"${escapeHtml(prTitle)}"\n\n` +
+      `\u{1F4E6} ${commitCount} ${commitWord} added to main.\n\n` +
+      `\u{26A1} Please <code>git pull</code> before continuing work!` +
+      pullTip;
+
+    const status = await sendDM(botToken, prefs.dm_chat_id, text);
+
+    if (status === "blocked") {
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+    }
+  }
+}
+
+/**
+ * Send preview link and review buttons to all team members.
+ * Called after a PR is created via the [Create Preview] button.
+ */
+async function sendPreviewNotifications(
+  env: Env,
+  botToken: string,
+  creatorTelegramId: number,
+  prNumber: number,
+  prTitle: string,
+  prUrl: string,
+  previewUrl: string | null
+): Promise<void> {
+  const members = await getTeamMembers(env.PROJECTS);
+
+  for (const member of members) {
+    // Skip the PR creator
+    if (member.telegram_id === creatorTelegramId) continue;
+
+    const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+    if (dnd) continue;
+
+    const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+    if (!prefs.dm_chat_id) continue;
+
+    // Only send to members who opted in for previews or PR reviews
+    if (!prefs.previews && !prefs.pr_reviews) continue;
+
+    const previewLine = previewUrl
+      ? `\n\u{1F310} <a href="${previewUrl}">Preview</a>`
+      : "";
+
+    const text =
+      `\u{1F680} <b>New Preview</b>\n${"━".repeat(16)}\n\n` +
+      `PR #${prNumber}: "${escapeHtml(prTitle)}"\n` +
+      `\u{1F517} <a href="${prUrl}">View on GitHub</a>${previewLine}\n\n` +
+      `Please review:`;
+
+    const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+      inline_keyboard: [
+        [
+          { text: "\u{2705} Approve", callback_data: `review_approve:${prNumber}` },
+          { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNumber}` },
+        ],
+        [
+          { text: "\u{1F517} View PR", url: prUrl },
+        ],
+      ],
+    };
+
+    const status = await sendDM(botToken, prefs.dm_chat_id, text, reviewKb);
+
+    if (status === "blocked") {
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Team Board — overview of all members, categories, and progress
+// ---------------------------------------------------------------------------
+
+/**
+ * Render the Team Board view showing all team members with their current
+ * category assignment, task progress, and branch status across all projects.
+ *
+ * Returns { text, keyboard } so the caller can send or edit the message.
+ */
+async function renderTeamBoard(
+  env: Env,
+  telegramId: number
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const kb = new InlineKeyboard();
+  const members = await getTeamMembers(env.PROJECTS);
+  const projects = await getProjectList(env);
+
+  if (projects.length === 0) {
+    return {
+      text: "👥 <b>Team Board</b>\n━━━━━━━━━━━━━━━━\n\nNo projects configured yet.",
+      keyboard: kb,
+    };
+  }
+
+  const lines: string[] = [
+    "👥 <b>Team Board</b>",
+    "━".repeat(16),
+  ];
+
+  for (const { id: projectId, config: project } of projects) {
+    lines.push("");
+    lines.push(`📂 <b>${escapeHtml(projectId)}</b>`);
+    lines.push("─".repeat(14));
+
+    // Fetch all data for this project in parallel where possible
+    const [claimsState, pausedCategories, openIssuesByCategory, openPRs] =
+      await Promise.all([
+        getCategoryClaims(env.PROJECTS, projectId),
+        getPausedCategories(env.PROJECTS, projectId),
+        project.githubToken
+          ? fetchOpenIssuesByCategory(project, "area:")
+          : Promise.resolve(new Map() as Map<string, Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }> }>>),
+        project.githubToken
+          ? githubRequest(
+              "GET",
+              `/repos/${project.githubRepo}/pulls?state=open&per_page=30`,
+              project.githubToken
+            )
+              .then(async (res) => {
+                if (!res.ok) return [];
+                return (await res.json()) as Array<{
+                  number: number;
+                  title: string;
+                  head: { ref: string };
+                  user: { login: string };
+                }>;
+              })
+              .catch(() => [] as Array<{ number: number; title: string; head: { ref: string }; user: { login: string } }>)
+          : Promise.resolve([] as Array<{ number: number; title: string; head: { ref: string }; user: { login: string } }>),
+      ]);
+
+    // Build a set of open issue numbers for progress calculation
+    const allOpenIssueNumbers = new Set<number>();
+    for (const issues of openIssuesByCategory.values()) {
+      for (const issue of issues) {
+        allOpenIssueNumbers.add(issue.number);
+      }
+    }
+
+    // Track which categories are claimed or paused so we know which are free
+    const claimedCategories = new Set(
+      claimsState.claims.map((c) => c.category)
+    );
+    const pausedCategoryNames = new Set(
+      pausedCategories.map((p) => p.category)
+    );
+
+    // ── Claimed categories ──
+    if (claimsState.claims.length > 0) {
+      lines.push("");
+      for (const claim of claimsState.claims) {
+        const color = getUserColor(members, claim.telegramId);
+        const safeName = escapeHtml(claim.telegramName);
+        const safeDisplay = escapeHtml(claim.displayName);
+
+        // Task progress: assigned issues that are no longer open = done
+        const totalAssigned = claim.assignedIssues.length;
+        const stillOpen = claim.assignedIssues.filter((n) =>
+          allOpenIssueNumbers.has(n)
+        ).length;
+        const done = totalAssigned - stillOpen;
+        const progressText =
+          totalAssigned > 0 ? `${done}/${totalAssigned} done` : "0 issues";
+
+        // Branch status: check for a matching open PR
+        const categorySlug = claim.category
+          .replace("area:", "")
+          .toLowerCase();
+        const matchingPR = openPRs.find((pr) =>
+          pr.head.ref.includes(categorySlug)
+        );
+        let branchStatus = "in progress";
+        if (matchingPR) {
+          // Check for a preview URL stored by Coolify webhook
+          const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, matchingPR.number);
+          if (previewUrl) {
+            branchStatus = `PR open \u{00B7} <a href="${previewUrl}">Preview</a>`;
+          } else {
+            branchStatus = "PR open";
+          }
+        }
+
+        lines.push(
+          `${color} <b>${safeDisplay}</b> \u{2192} ${safeName}`
+        );
+        lines.push(
+          `    \u{1F4CA} ${progressText} \u{00B7} ${branchStatus}`
+        );
+
+        // Show [Create Preview] button when this claim's branch exists
+        // but has no open PR yet — the viewer can create one
+        if (!matchingPR && project.githubToken && claim.telegramId === telegramId) {
+          const branchName = `feature/${categorySlug}`;
+          try {
+            const branchRes = await githubRequest(
+              "GET",
+              `/repos/${project.githubRepo}/branches/${encodeURIComponent(branchName)}`,
+              project.githubToken
+            );
+            if (branchRes.ok) {
+              kb.text(
+                "\u{1F680} Create Preview",
+                `preview_create:${projectId}:${claim.category}`
+              );
+              kb.row();
+            }
+          } catch {
+            // Branch does not exist or API error — skip button
+          }
+        }
+
+        // Show tasks within this category sorted by priority
+        const categoryIssues = openIssuesByCategory.get(claim.category);
+        if (categoryIssues && categoryIssues.length > 0) {
+          const sorted = sortByPriority(categoryIssues);
+          for (const issue of sorted) {
+            const priority = getIssuePriority(issue.labels);
+            const emoji =
+              PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+            lines.push(
+              `    ${emoji} #${issue.number} ${escapeHtml(issue.title)}`
+            );
+          }
+        }
+      }
+    }
+
+    // ── Paused categories ──
+    if (pausedCategories.length > 0) {
+      lines.push("");
+      for (const paused of pausedCategories) {
+        const safePausedBy = escapeHtml(paused.pausedBy);
+        const safeDisplay = escapeHtml(paused.displayName);
+        lines.push(
+          `⏸ <b>${safeDisplay}</b> — paused by ${safePausedBy} (${paused.completedTasks}/${paused.totalTasks} done)`
+        );
+      }
+    }
+
+    // ── Unclaimed categories (not claimed, not paused) ──
+    const unclaimedCategories: Array<{ category: string; issueCount: number }> =
+      [];
+    for (const [category, issues] of openIssuesByCategory.entries()) {
+      if (!claimedCategories.has(category) && !pausedCategoryNames.has(category)) {
+        unclaimedCategories.push({ category, issueCount: issues.length });
+      }
+    }
+
+    if (unclaimedCategories.length > 0) {
+      lines.push("");
+      lines.push("<i>Free categories:</i>");
+      for (const { category, issueCount } of unclaimedCategories) {
+        const displayName = category.replace("area:", "");
+        lines.push(
+          `⬜ ${escapeHtml(displayName)} — free (${issueCount} ${issueCount === 1 ? "issue" : "issues"})`
+        );
+      }
+    }
+
+    // Show "nothing here" if project has no categories at all
+    if (
+      claimsState.claims.length === 0 &&
+      pausedCategories.length === 0 &&
+      unclaimedCategories.length === 0
+    ) {
+      lines.push("");
+      lines.push("<i>No categories found.</i>");
+    }
+  }
+
+  // Footer with timestamp and refresh button
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  lines.push("");
+  lines.push(`🕐 Updated: ${timeStr}`);
+
+  kb.text("\u{1F4CA} Velocity", "board_velocity");
+  kb.text("\u{1F504} Refresh", "teamboard_refresh");
+
+  return { text: lines.join("\n"), keyboard: kb };
+}
+
+// ---------------------------------------------------------------------------
+// Velocity View — weekly comparison accessible from Team Board (Issue #61)
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a delta value with a +/- prefix and directional arrow.
+ * Positive = up (good for tasks, neutral for hours), negative = down.
+ */
+function formatDelta(current: number, previous: number): string {
+  const diff = current - previous;
+  if (diff === 0) return "\u{2796} 0";
+  const sign = diff > 0 ? "+" : "";
+  const arrow = diff > 0 ? "\u{2B06}" : "\u{2B07}";
+  return `${arrow} ${sign}${diff}`;
+}
+
+/**
+ * Render the Velocity view showing this week vs last week comparison,
+ * per-person breakdown, and fastest/longest task highlights.
+ *
+ * Returns { text, keyboard } so the caller can send or edit the message.
+ */
+async function renderVelocityView(
+  env: Env
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const kb = new InlineKeyboard();
+  const projects = await getProjectList(env);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  if (projects.length === 0) {
+    kb.text("\u{2B05}\u{FE0F} Back", "velocity_back");
+    return {
+      text: "\u{1F4CA} <b>Velocity</b>\n\u{2501}".repeat(16) + "\n\nNo projects configured yet.",
+      keyboard: kb,
+    };
+  }
+
+  const lines: string[] = [
+    "\u{1F4CA} <b>Velocity Report</b>",
+    "\u{2501}".repeat(16),
+  ];
+
+  for (const { id: projectId } of projects) {
+    lines.push("");
+    lines.push(`\u{1F4C2} <b>${escapeHtml(projectId)}</b>`);
+    lines.push("\u{2500}".repeat(14));
+
+    // Fetch the last two weeks of saved velocity data
+    const [thisWeek, lastWeek] = await getLastTwoWeeksVelocity(
+      env.DB,
+      projectId
+    );
+
+    if (!thisWeek) {
+      // No saved data yet — calculate live from current week
+      const liveSnapshot = await calculateVelocitySnapshot(
+        env.DB,
+        projectId,
+        members
+      );
+
+      lines.push("");
+      lines.push(`\u{1F4C5} This week (${escapeHtml(liveSnapshot.weekStart)}):`);
+      lines.push(`   \u{2705} Tasks closed: ${liveSnapshot.tasksCompleted}`);
+      lines.push(`   \u{1F4DD} Tasks opened: ${liveSnapshot.tasksOpened}`);
+      lines.push(`   \u{23F1} Team hours: ${formatDuration(liveSnapshot.teamHours)}`);
+
+      if (liveSnapshot.perMember.length > 0) {
+        lines.push("");
+        lines.push("<b>Per Person:</b>");
+        for (const pm of liveSnapshot.perMember) {
+          const color = getUserColorByName(members, pm.name);
+          lines.push(
+            `${color} ${escapeHtml(pm.name)}: ${pm.tasks} tasks \u{00B7} ${formatDuration(pm.hours)}`
+          );
+        }
+      }
+
+      if (liveSnapshot.fastestTask) {
+        lines.push("");
+        lines.push(
+          `\u{26A1} Fastest: #${liveSnapshot.fastestTask.number} ${escapeHtml(liveSnapshot.fastestTask.title)} (${formatDuration(liveSnapshot.fastestTask.minutes)})`
+        );
+      }
+      if (liveSnapshot.longestTask) {
+        lines.push(
+          `\u{1F422} Longest: #${liveSnapshot.longestTask.number} ${escapeHtml(liveSnapshot.longestTask.title)} (${formatDuration(liveSnapshot.longestTask.minutes)})`
+        );
+      }
+
+      lines.push("");
+      lines.push("<i>No previous week data for comparison yet.</i>");
+      continue;
+    }
+
+    // We have at least this week's data — show it with comparison if available
+    lines.push("");
+    lines.push(`\u{1F4C5} This week (${escapeHtml(thisWeek.weekStart)}):`);
+    lines.push(`   \u{2705} Tasks closed: ${thisWeek.tasksCompleted}`);
+    lines.push(`   \u{1F4DD} Tasks opened: ${thisWeek.tasksOpened}`);
+    lines.push(`   \u{23F1} Team hours: ${formatDuration(thisWeek.teamHours)}`);
+
+    if (lastWeek) {
+      lines.push("");
+      lines.push(`\u{1F4C5} Last week (${escapeHtml(lastWeek.weekStart)}):`);
+      lines.push(`   \u{2705} Tasks closed: ${lastWeek.tasksCompleted}`);
+      lines.push(`   \u{1F4DD} Tasks opened: ${lastWeek.tasksOpened}`);
+      lines.push(`   \u{23F1} Team hours: ${formatDuration(lastWeek.teamHours)}`);
+
+      // Delta comparison
+      lines.push("");
+      lines.push("<b>Week-over-Week:</b>");
+      lines.push(
+        `   Tasks: ${formatDelta(thisWeek.tasksCompleted, lastWeek.tasksCompleted)}`
+      );
+      lines.push(
+        `   Hours: ${formatDelta(thisWeek.teamHours, lastWeek.teamHours)}`
+      );
+    }
+
+    // Per-person breakdown (from this week's data)
+    if (thisWeek.perMember.length > 0) {
+      lines.push("");
+      lines.push("<b>Per Person:</b>");
+      for (const pm of thisWeek.perMember) {
+        const color = getUserColorByName(members, pm.name);
+        const safeName = escapeHtml(pm.name);
+        lines.push(
+          `${color} ${safeName}: ${pm.tasks} tasks \u{00B7} ${formatDuration(pm.hours)}`
+        );
+      }
+    }
+
+    // Fastest / longest task highlights
+    if (thisWeek.fastestTask) {
+      lines.push("");
+      lines.push(
+        `\u{26A1} Fastest: #${thisWeek.fastestTask.number} ${escapeHtml(thisWeek.fastestTask.title)} (${formatDuration(thisWeek.fastestTask.minutes)})`
+      );
+    }
+    if (thisWeek.longestTask) {
+      lines.push(
+        `\u{1F422} Longest: #${thisWeek.longestTask.number} ${escapeHtml(thisWeek.longestTask.title)} (${formatDuration(thisWeek.longestTask.minutes)})`
+      );
+    }
+  }
+
+  // Footer
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  lines.push("");
+  lines.push(`\u{1F555} Updated: ${timeStr}`);
+
+  kb.text("\u{2B05}\u{FE0F} Back", "velocity_back");
+  kb.text("\u{1F504} Refresh", "velocity_refresh");
+
+  return { text: lines.join("\n"), keyboard: kb };
 }
 
 /**
@@ -1438,6 +4496,951 @@ async function handleProjectPRs(
 }
 
 // ---------------------------------------------------------------------------
+// Settings Wizard — message builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the settings message text and inline keyboard for the notification
+ * preferences panel. Shows toggle buttons with checkmarks/X marks.
+ */
+function buildSettingsMessage(prefs: UserPreferences): {
+  text: string;
+  keyboard: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+} {
+  const on = "\u{2705}";  // green checkmark
+  const off = "\u{274C}"; // red X
+
+  const text =
+    "\u{2699}\u{FE0F} <b>Notification Settings</b>\n" +
+    "\u{2501}".repeat(20) + "\n\n" +
+    `\u{1F512} Task Assignments \u{2014} always on\n` +
+    `${prefs.commits ? on : off} Commit Notifications\n` +
+    `${prefs.previews ? on : off} Preview Deployments\n` +
+    `${prefs.pr_reviews ? on : off} PR Review Requests\n` +
+    `${prefs.sessions ? on : off} Teammate Online/Offline\n\n` +
+    "Tap a button to toggle notifications on/off:";
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: `${prefs.commits ? on : off} Commits`, callback_data: "pref_toggle:commits" },
+        { text: `${prefs.previews ? on : off} Previews`, callback_data: "pref_toggle:previews" },
+      ],
+      [
+        { text: `${prefs.pr_reviews ? on : off} PR Reviews`, callback_data: "pref_toggle:pr_reviews" },
+        { text: `${prefs.sessions ? on : off} Online/Offline`, callback_data: "pref_toggle:sessions" },
+      ],
+      [
+        { text: "\u{1F4E6} Recent Commits", callback_data: "info:commits" },
+        { text: "\u{1F310} Previews", callback_data: "info:previews" },
+      ],
+      [
+        { text: "\u{1F465} Who is Online?", callback_data: "info:online" },
+      ],
+    ],
+  };
+
+  return { text, keyboard };
+}
+
+/**
+ * Send a single concise Quick Start tutorial message.
+ * Used as the final onboarding step for new users.
+ */
+async function sendOnboardingTutorial(
+  ctx: Context,
+  lang: Locale
+): Promise<void> {
+  const tutorialText = [
+    t(lang, "onboard.tutorial_heading"),
+    "",
+    t(lang, "onboard.tutorial_step1"),
+    t(lang, "onboard.tutorial_step2"),
+    t(lang, "onboard.tutorial_step3"),
+    "",
+    t(lang, "onboard.golden_rule"),
+  ].join("\n");
+
+  await ctx.reply(tutorialText, { parse_mode: "HTML" });
+}
+
+// ---------------------------------------------------------------------------
+// Category handler functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the category picker UI: open categories as buttons, optional completed
+ * categories section, toggle button, and cancel button.
+ */
+async function buildCategoryPicker(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string,
+  claimsState: CategoryClaimsState,
+  showCompleted: boolean = false,
+  lang: Locale = "en"
+): Promise<{ text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } | null> {
+  const categories = await fetchOpenIssuesByCategory(project);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  // Count completed categories (labels with no open issues)
+  const completedLabels = await getCompletedCategories(project, categories);
+
+  if (categories.size === 0 && completedLabels.length === 0) {
+    return null; // No categories at all
+  }
+
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+  const lines: string[] = [
+    t(lang, "picker.heading"),
+    t(lang, "picker.subtitle"),
+  ];
+
+  // Open categories as buttons
+  if (categories.size > 0) {
+    const sortedCategories = [...categories.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const pausedList = await getPausedCategories(env.PROJECTS, projectId);
+
+    for (const [label, issues] of sortedCategories) {
+      const displayName = label.replace("area:", "");
+      const claimer = claimsState.claims.find((c) => c.category === label);
+      const paused = pausedList.find((p) => p.category === label);
+
+      let buttonText: string;
+      if (claimer) {
+        const claimerColor = getUserColor(members, claimer.telegramId);
+        buttonText = `${claimerColor} ${displayName} (${issues.length}) \u{2014} \u{1F512}${claimer.telegramName}`;
+      } else if (paused) {
+        buttonText = `\u{23F8} ${displayName} (${issues.length}) \u{2014} ${t(lang, "picker.paused_by", { name: paused.pausedBy, done: paused.completedTasks, total: paused.totalTasks })}`;
+      } else {
+        buttonText = `\u{1F7E2} ${displayName} (${issues.length}) \u{2014} ${t(lang, "picker.free")}`;
+      }
+
+      buttons.push([{
+        text: buttonText,
+        callback_data: claimer ? "cat_cancel" : `cat_pick:${label}`,
+      }]);
+    }
+  }
+
+  // Completed categories section
+  if (completedLabels.length > 0) {
+    if (showCompleted) {
+      // Fetch closed issues for completed categories
+      const closedByCategory = await fetchClosedIssuesByCategory(project, completedLabels);
+
+      lines.push("");
+      lines.push(t(lang, "picker.completed_section", { count: completedLabels.length }));
+
+      for (const label of completedLabels.sort()) {
+        const displayName = label.replace("area:", "");
+        const closedIssues = closedByCategory.get(label) || [];
+        lines.push(`\u{2705} <b>${escapeHtml(displayName)}</b>`);
+        for (const issue of closedIssues) {
+          lines.push(`  \u{2022} #${issue.number} ${escapeHtml(issue.title)}`);
+        }
+        if (closedIssues.length === 0) {
+          lines.push(`  <i>${t(lang, "picker.no_closed_issues")}</i>`);
+        }
+      }
+
+      buttons.push([{ text: t(lang, "picker.hide_completed"), callback_data: "cat_hide_completed" }]);
+    } else {
+      buttons.push([{ text: t(lang, "picker.show_completed", { count: completedLabels.length }), callback_data: "cat_show_completed" }]);
+    }
+  }
+
+  buttons.push([{ text: t(lang, "picker.cancel"), callback_data: "cat_cancel" }]);
+
+  return { text: lines.join("\n"), buttons };
+}
+
+/**
+ * Show the category picker with issue counts per area: label.
+ */
+async function handleCategoryAssign(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+  // Warn about blocker but allow override
+  const blockers = await isBlockerActive(project);
+  if (blockers.length > 0 && !ctx.callbackQuery?.data?.includes("cat_override")) {
+    const blockerList = blockers
+      .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
+      .join("\n");
+    const blockerTip = await getTip(env.PROJECTS, telegramId, "blocker_active", lang);
+    await ctx.editMessageText(
+      `${t(lang, "blocker.heading")}\n\n` +
+        `${t(lang, "blocker.resolve_first")}\n${blockerList}\n\n` +
+        t(lang, "blocker.soft_warning") +
+        blockerTip,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: t(lang, "picker.override_blocker"), callback_data: "cat_override" }],
+            [{ text: t(lang, "picker.cancel"), callback_data: "cat_cancel" }],
+          ],
+        },
+      }
+    );
+    return;
+  }
+
+  // Check if user already has a category claimed
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (existingClaim) {
+    const alreadyTip = await getTip(env.PROJECTS, telegramId, "already_has_category", lang);
+    const text =
+      t(lang, "claim.already_have", {
+        category: escapeHtml(existingClaim.displayName),
+        count: existingClaim.assignedIssues.length,
+      }) +
+      alreadyTip;
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: t(lang, "claim.release_btn"), callback_data: "cat_release" },
+          { text: t(lang, "picker.cancel"), callback_data: "cat_cancel" },
+        ],
+      ],
+    };
+
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+
+  // Build category picker with open + optional completed categories
+  const result = await buildCategoryPicker(env, project, projectId, claimsState, false, lang);
+  if (!result) {
+    await ctx.editMessageText(
+      t(lang, "picker.no_categories"),
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  await ctx.editMessageText(result.text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: result.buttons },
+  });
+}
+
+/**
+ * Show confirmation with the list of issues that will be assigned.
+ */
+async function handleCategoryPick(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string,
+  label: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  // Re-check race condition: is this category still available?
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaimer = claimsState.claims.find((c) => c.category === label);
+
+  if (existingClaimer) {
+    const tip = await getTip(env.PROJECTS, telegramId!, "category_taken");
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} <b>${escapeHtml(label.replace("area:", ""))}</b> was just claimed by ${escapeHtml(existingClaimer.telegramName)}!` + tip,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Check if the caller already has a category
+  const callerClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (callerClaim) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(callerClaim.displayName)}</b>. Release it first.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Fetch issues for this category, now including labels for priority sorting
+  const categories = await fetchOpenIssuesByCategory(project);
+  const issues = categories.get(label) || [];
+
+  if (issues.length === 0) {
+    await ctx.editMessageText(
+      `\u{1F4C2} No open issues with label <code>${escapeHtml(label)}</code>.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Sort by priority (blocker → high → medium → low)
+  const sorted = sortByPriority(issues);
+
+  const displayName = label.replace("area:", "");
+  const issueList = sorted
+    .slice(0, 10)
+    .map((i) => {
+      const priority = getIssuePriority(i.labels);
+      const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+      return `${emoji} #${i.number} ${escapeHtml(i.title)}`;
+    })
+    .join("\n");
+  const overflow = issues.length > 10 ? `\n...and ${issues.length - 10} more` : "";
+
+  const text =
+    `\u{1F4C2} <b>${escapeHtml(displayName)}</b> \u{2014} ${issues.length} issues\n\n` +
+    `These issues will be assigned to you:\n${issueList}${overflow}\n\n` +
+    "Confirm?";
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\u{2705} Confirm", callback_data: `cat_confirm:${label}` },
+        { text: "\u{2B05} Back", callback_data: "cat_assign" },
+      ],
+    ],
+  };
+
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+}
+
+/**
+ * Confirm category claim: assign issues on GitHub, save to KV, notify.
+ */
+async function handleCategoryConfirm(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string,
+  label: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  const firstName = ctx.from?.first_name || "Unknown";
+  if (!telegramId) return;
+
+  // Race-condition protection: re-read KV before confirming
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaimer = claimsState.claims.find((c) => c.category === label);
+  if (existingClaimer) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} Too late! <b>${escapeHtml(label.replace("area:", ""))}</b> was claimed by ${escapeHtml(existingClaimer.telegramName)}.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Double-check caller doesn't already have a category
+  const callerClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+  if (callerClaim) {
+    await ctx.editMessageText(
+      `\u{26A0}\u{FE0F} You already have <b>${escapeHtml(callerClaim.displayName)}</b>.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Look up GitHub username
+  const members = await getTeamMembers(env.PROJECTS);
+  const member = members.find((m) => m.telegram_id === telegramId);
+  const githubUsername = member?.github || firstName;
+
+  // Fetch issues for this label
+  const categories = await fetchOpenIssuesByCategory(project);
+  const issues = categories.get(label) || [];
+  const issueNumbers = issues.map((i) => i.number);
+
+  // Assign on GitHub
+  const result = await assignIssuesToUser(project, issueNumbers, githubUsername);
+
+  const displayName = label.replace("area:", "");
+  const safeDisplayName = escapeHtml(displayName);
+  const safeFirstName = escapeHtml(firstName);
+
+  // Save claim to KV
+  const claim: CategoryClaim = {
+    telegramId,
+    telegramName: firstName,
+    githubUsername,
+    category: label,
+    displayName,
+    assignedIssues: result.success,
+    claimedAt: new Date().toISOString(),
+  };
+  claimsState.claims.push(claim);
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  // Start category timer (Issue #60)
+  await startTimer(env.PROJECTS, telegramId, projectId, label);
+
+  // Remove any paused marker for this category (someone is picking it up)
+  await removePausedCategory(env.PROJECTS, projectId, label);
+
+  // Tip when the claimed category has no open issues (edge case)
+  const emptyTip = issues.length === 0
+    ? await getTip(env.PROJECTS, telegramId, "category_empty")
+    : "";
+
+  // Update the message in the group
+  const successText =
+    `\u{2705} <b>${safeDisplayName}</b> \u{2192} ${safeFirstName}\n\n` +
+    `${result.success.length} issues assigned` +
+    (result.failed.length > 0 ? `, ${result.failed.length} failed` : "") +
+    "." +
+    emptyTip;
+
+  await ctx.editMessageText(successText, { parse_mode: "HTML" });
+
+  // Send DM with full task list, priority emojis, links, and branch name
+  const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+  if (prefs.dm_chat_id) {
+    const assignedIssues = sortByPriority(
+      issues.filter((i) => result.success.includes(i.number))
+    );
+    const dmIssueList = assignedIssues
+      .map((i) => {
+        const priority = getIssuePriority(i.labels);
+        const emoji = PRIORITY_EMOJIS[priority] || PRIORITY_EMOJIS[PRIORITY_DEFAULT];
+        return `${emoji} <a href="${i.html_url}">#${i.number} ${escapeHtml(i.title)}</a>`;
+      })
+      .join("\n");
+
+    // Branch name: feature/{category}, lowercased, spaces → dashes
+    const branchName = `feature/${displayName.toLowerCase().replace(/\s+/g, "-")}`;
+
+    const dmStatus = await sendDM(
+      project.botToken,
+      prefs.dm_chat_id,
+      `\u{1F4C2} <b>Category Assigned: ${safeDisplayName}</b>\n` +
+        `\u{1F4C2} Branch: <code>${escapeHtml(branchName)}</code>\n\n` +
+        `You now own ${result.success.length} issues:\n${dmIssueList}\n\n` +
+        "Use /done #N when you finish an issue."
+    );
+    if (dmStatus === "blocked") {
+      prefs.dm_chat_id = null;
+      await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+    }
+
+    // Send Claude Code prompts for each assigned issue so the user can
+    // start working immediately without navigating to "Meine Aufgaben" first.
+    if (prefs.dm_chat_id) {
+      for (const issue of assignedIssues) {
+        try {
+          const prompt = await generateClaudePrompt(project, issue.number, displayName);
+          const MAX_PROMPT_CHARS = 3400;
+          const safePrompt = prompt.length > MAX_PROMPT_CHARS
+            ? prompt.slice(0, MAX_PROMPT_CHARS) + "\n... (truncated)"
+            : prompt;
+
+          await sendDM(
+            project.botToken,
+            prefs.dm_chat_id,
+            `\u{1F680} <b>Prompt for #${issue.number} ${escapeHtml(issue.title)}</b>\n\n` +
+              `<pre>${escapeHtml(safePrompt)}</pre>\n\n` +
+              `<i>\u{1F4A1} Long-press the code block to copy, then paste into VS Code.</i>`
+          );
+
+          // Small delay between DMs to avoid Telegram rate limits
+          await new Promise((r) => setTimeout(r, 300));
+        } catch (promptErr) {
+          console.error(`Prompt generation failed for #${issue.number}:`, promptErr);
+        }
+      }
+    }
+  }
+
+  // Post to group
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `\u{1F4C2} ${safeDisplayName} \u{2192} ${safeFirstName} (${result.success.length} issues)`,
+    project.threadId
+  );
+}
+
+/**
+ * Show release confirmation for the user's current category.
+ */
+async function handleCategoryRelease(
+  ctx: Context,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (!claim) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} You don't have a category claimed.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const text =
+    `\u{1F5D1} Release <b>${escapeHtml(claim.displayName)}</b>?\n\n` +
+    `${claim.assignedIssues.length} issues will be unassigned from you on GitHub.`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\u{2705} Yes, release", callback_data: "cat_release_confirm" },
+        { text: "\u{274C} Cancel", callback_data: "cat_cancel" },
+      ],
+    ],
+  };
+
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+}
+
+/**
+ * Confirm release: unassign on GitHub, remove from KV.
+ */
+async function handleCategoryReleaseConfirm(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  const firstName = ctx.from?.first_name || "Unknown";
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+
+  if (claimIndex < 0) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} No category to release.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const claim = claimsState.claims[claimIndex];
+
+  // Unassign on GitHub
+  await unassignIssuesFromUser(project, claim.assignedIssues, claim.githubUsername);
+
+  // Remove from KV
+  claimsState.claims.splice(claimIndex, 1);
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  // Stop category timer and log time (Issue #60)
+  const timerState = await stopTimer(env.PROJECTS, telegramId, projectId);
+  if (timerState) {
+    const endedAt = new Date().toISOString();
+    const durationMinutes = Math.round(
+      (new Date(endedAt).getTime() - new Date(timerState.startedAt).getTime()) / 60000
+    );
+    await logTimeEntry(env.DB, {
+      userId: telegramId,
+      project: projectId,
+      category: timerState.category,
+      startedAt: timerState.startedAt,
+      endedAt,
+      durationMinutes,
+      tasksCompleted: 0,
+    });
+  }
+
+  const safeDisplayName = escapeHtml(claim.displayName);
+  const safeFirstName = escapeHtml(firstName);
+
+  await ctx.editMessageText(
+    `\u{1F5D1} <b>${safeDisplayName}</b> released by ${safeFirstName}.\n` +
+      `${claim.assignedIssues.length} issues unassigned.`,
+    { parse_mode: "HTML" }
+  );
+
+  // Post to group
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `\u{1F5D1} ${safeDisplayName} released by ${safeFirstName}`,
+    project.threadId
+  );
+}
+
+/**
+ * Show pause confirmation dialog.  Explains that tasks will be unassigned
+ * and the category freed, but the branch stays on GitHub.
+ */
+async function handlePause(
+  ctx: Context,
+  env: Env,
+  project: ProjectConfig,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (!claim) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} You don\u2019t have a category to pause.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const safeDisplayName = escapeHtml(claim.displayName);
+
+  const text =
+    `\u{23F8} <b>Pause ${safeDisplayName}?</b>\n\n` +
+    `This will:\n` +
+    `\u{2022} Unassign ${claim.assignedIssues.length} issues from you on GitHub\n` +
+    `\u{2022} Free the category for someone else to claim\n` +
+    `\u{2022} Mark it as \u201Cpaused\u201D so the next person knows the state\n\n` +
+    `\u{2705} Your <b>branch stays on GitHub</b> \u{2014} nothing is lost.\n` +
+    `The next developer can continue right where you left off.`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "\u{23F8} Yes, pause", callback_data: "mytasks_pause_confirm" },
+        { text: "\u{274C} Cancel", callback_data: "mytasks_refresh" },
+      ],
+    ],
+  };
+
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+}
+
+/**
+ * Execute the pause: unassign issues, remove claim, store paused marker,
+ * clear active task, and notify the team.
+ */
+async function handlePauseConfirm(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  const firstName = ctx.from?.first_name || "Unknown";
+  if (!telegramId) return;
+
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+
+  if (claimIndex < 0) {
+    await ctx.editMessageText(
+      "\u{2139}\u{FE0F} No category to pause.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const claim = claimsState.claims[claimIndex];
+  const safeDisplayName = escapeHtml(claim.displayName);
+  const safeFirstName = escapeHtml(firstName);
+
+  // Count completed tasks: compare originally assigned vs. currently open
+  let completedCount = 0;
+  const totalCount = claim.assignedIssues.length;
+
+  if (project.githubToken && claim.assignedIssues.length > 0) {
+    // Check which of the originally assigned issues are still open
+    let openCount = 0;
+    for (const issueNum of claim.assignedIssues) {
+      try {
+        const res = await githubRequest(
+          "GET",
+          `/repos/${project.githubRepo}/issues/${issueNum}`,
+          project.githubToken
+        );
+        if (res.ok) {
+          const issue = (await res.json()) as { state: string };
+          if (issue.state === "open") {
+            openCount++;
+          }
+        } else {
+          // API error — count as open to be safe
+          openCount++;
+        }
+      } catch {
+        // Network error — count as open to be safe
+        openCount++;
+      }
+    }
+    completedCount = totalCount - openCount;
+  }
+
+  // 1. Unassign all open issues on GitHub
+  await unassignIssuesFromUser(project, claim.assignedIssues, claim.githubUsername);
+
+  // 2. Remove claim from KV
+  claimsState.claims.splice(claimIndex, 1);
+  await saveCategoryClaims(env.PROJECTS, projectId, claimsState);
+
+  // 3. Store paused marker so the category picker shows the status
+  const pausedEntry: PausedCategory = {
+    category: claim.category,
+    displayName: claim.displayName,
+    pausedBy: firstName,
+    completedTasks: completedCount,
+    totalTasks: totalCount,
+    pausedAt: new Date().toISOString(),
+  };
+  await addPausedCategory(env.PROJECTS, projectId, pausedEntry);
+
+  // 4. Clear the user's active task
+  await clearActiveTask(env.PROJECTS, telegramId, projectId);
+
+  // 5. Stop category timer and log time (Issue #60)
+  const timerState = await stopTimer(env.PROJECTS, telegramId, projectId);
+  if (timerState) {
+    const endedAt = new Date().toISOString();
+    const durationMinutes = Math.round(
+      (new Date(endedAt).getTime() - new Date(timerState.startedAt).getTime()) / 60000
+    );
+    await logTimeEntry(env.DB, {
+      userId: telegramId,
+      project: projectId,
+      category: timerState.category,
+      startedAt: timerState.startedAt,
+      endedAt,
+      durationMinutes,
+      tasksCompleted: completedCount,
+    });
+  }
+
+  // 6. Confirm to user
+  await ctx.editMessageText(
+    `\u{23F8} <b>${safeDisplayName}</b> paused by ${safeFirstName}.\n\n` +
+      `${completedCount}/${totalCount} tasks completed.\n` +
+      `Branch preserved on GitHub \u{2014} the next developer can continue.`,
+    { parse_mode: "HTML" }
+  );
+
+  // 7. Notify team in group chat
+  await sendTelegram(
+    project.botToken,
+    project.chatId,
+    `\u{23F8} ${safeDisplayName} paused by ${safeFirstName} (${completedCount}/${totalCount} done) \u{2014} category available!`,
+    project.threadId
+  );
+
+  // 8. Notify subscribers that a category is available
+  await notifySubscribers(
+    env,
+    project.botToken,
+    "tasks",
+    () =>
+      `\u{1F4CB} <b>${safeDisplayName}</b> is available again!\n` +
+      `Paused by ${safeFirstName} (${completedCount}/${totalCount} done).\n` +
+      `Branch is preserved \u{2014} use \u{1F4CB} Aufgabe nehmen to continue.`,
+    telegramId
+  );
+}
+
+/**
+ * Show who has which category.
+ */
+async function handleCategoryStatus(
+  ctx: Context,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const members = await getTeamMembers(env.PROJECTS);
+
+  if (claimsState.claims.length === 0) {
+    await ctx.editMessageText(
+      "\u{1F4CA} <b>Category Status</b>\n\nNo categories claimed yet.\nUse the \u{1F4C2} Assign Category button to get started.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const lines: string[] = ["\u{1F4CA} <b>Category Status</b>", ""];
+
+  for (const claim of claimsState.claims) {
+    const color = getUserColor(members, claim.telegramId);
+    lines.push(
+      `${color} <b>${escapeHtml(claim.displayName)}</b> \u{2192} ${escapeHtml(claim.telegramName)} ` +
+        `(${claim.assignedIssues.length} issues, since ${claim.claimedAt.substring(0, 10)})`
+    );
+  }
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "\u{1F504} Refresh", callback_data: "cat_status" }],
+    ],
+  };
+
+  await ctx.editMessageText(lines.join("\n"), {
+    parse_mode: "HTML",
+    reply_markup: keyboard,
+  });
+}
+
+/**
+ * Handle the "Aufgabe nehmen" reply keyboard button.
+ * Mirrors handleCategoryAssign but uses ctx.reply() instead of
+ * ctx.editMessageText(), since reply keyboard buttons produce new messages
+ * rather than inline callback edits.
+ */
+async function handleAufgabeNehmen(
+  ctx: Context,
+  project: ProjectConfig,
+  env: Env,
+  projectId: string
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+  // Warn about blocker but allow override via inline button
+  const blockers = await isBlockerActive(project);
+  if (blockers.length > 0) {
+    const blockerList = blockers
+      .map((b) => `\u{2022} #${b.number} ${escapeHtml(b.title)}`)
+      .join("\n");
+    await ctx.reply(
+      `${t(lang, "blocker.heading")}\n\n` +
+        `${t(lang, "blocker.resolve_first")}\n${blockerList}\n\n` +
+        t(lang, "blocker.soft_warning"),
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: t(lang, "picker.override_blocker"), callback_data: "cat_override" }],
+            [{ text: t(lang, "picker.cancel"), callback_data: "cat_cancel" }],
+          ],
+        },
+      }
+    );
+    return;
+  }
+
+  // Check if user already has a category claimed
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+  const existingClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+  if (existingClaim) {
+    const text = t(lang, "claim.already_have", {
+      category: escapeHtml(existingClaim.displayName),
+      count: existingClaim.assignedIssues.length,
+    });
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: t(lang, "claim.release_btn"), callback_data: "cat_release" },
+          { text: t(lang, "picker.cancel"), callback_data: "cat_cancel" },
+        ],
+      ],
+    };
+
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+
+  // Build category picker with open + optional completed categories
+  const result = await buildCategoryPicker(env, project, projectId, claimsState, false, lang);
+  if (!result) {
+    await ctx.reply(
+      t(lang, "picker.no_categories"),
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  await ctx.reply(result.text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: result.buttons },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Project list helper — used by createBot and cron handlers
+// ---------------------------------------------------------------------------
+
+async function getProjectList(env: Env): Promise<Array<{ id: string; config: ProjectConfig }>> {
+  const keys = await env.PROJECTS.list();
+  const projects: Array<{ id: string; config: ProjectConfig }> = [];
+  for (const key of keys.keys) {
+    if (key.name.includes(":") || key.name === "team-members") continue;
+    const config = await getProject(env.PROJECTS, key.name, env);
+    if (config) projects.push({ id: key.name, config });
+  }
+  return projects;
+}
+
+// ---------------------------------------------------------------------------
+// Localized reply keyboard builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the 6-button reply keyboard with localized button labels.
+ */
+function buildReplyKeyboard(lang: Locale): ReturnType<Keyboard["resized"]> {
+  return new Keyboard()
+    .text(t(lang, "btn.claim_task")).text(t(lang, "btn.my_tasks"))
+    .row()
+    .text(t(lang, "btn.team_board")).text(t(lang, "btn.new_idea"))
+    .row()
+    .text(t(lang, "btn.help")).text(t(lang, "btn.switch_project"))
+    .resized()
+    .persistent();
+}
+
+// ---------------------------------------------------------------------------
+// Home screen helper — re-used by /start, onboarding, and project switch
+// ---------------------------------------------------------------------------
+
+/**
+ * Send the project header (with Switch button) and the 5-button reply
+ * keyboard.  Extracted so that project switching can re-render the home
+ * screen without duplicating the layout logic.
+ */
+async function renderHomeScreen(
+  ctx: Context,
+  env: Env,
+  telegramId: number
+): Promise<void> {
+  const lang = await getUserLanguage(env.PROJECTS, telegramId);
+  const active = await resolveActiveProject(env, telegramId);
+  if (active) {
+    const projectName = escapeHtml(active.projectId);
+    await ctx.reply(
+      `\u{1F4C2} <b>Project:</b> ${projectName}`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[{ text: "\u{1F504} Switch", callback_data: "home_switch_project" }]],
+        },
+      }
+    );
+  }
+
+  const keyboard = buildReplyKeyboard(lang);
+
+  await ctx.reply(t(lang, "onboard.quick_actions"), {
+    reply_markup: keyboard,
+    parse_mode: "HTML",
+  });
+}
+
+// ---------------------------------------------------------------------------
 // grammy bot factory — creates a bot instance with all handlers registered
 // ---------------------------------------------------------------------------
 
@@ -1461,21 +5464,82 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // Private-chat middleware — auto-save dm_chat_id on first DM
+  // -------------------------------------------------------------------
+
+  bot.use(async (ctx, next) => {
+    if (ctx.chat?.type === "private" && ctx.from?.id) {
+      const telegramId = ctx.from.id;
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      if (!prefs.dm_chat_id || prefs.dm_chat_id !== ctx.chat.id) {
+        prefs.dm_chat_id = ctx.chat.id;
+        await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+      }
+    }
+    await next();
+  });
+
+  // -------------------------------------------------------------------
   // Command handlers
   // -------------------------------------------------------------------
 
-  // /start, /menu — activate the reply keyboard with quick actions
+  // /start, /menu — activate reply keyboard; trigger onboarding for new DM users
   bot.command(["start", "menu"], async (ctx: Context) => {
-    const keyboard = new Keyboard()
-      .text("\u{1F4CA} Dashboard").text("\u{1F465} Active").text("\u{1F4CC} My Tasks")
-      .row()
-      .text("\u{1F4CB} Board").text("\u{1F500} PRs").text("\u{1F440} Review")
-      .row()
-      .text("\u{1F525} Urgent").text("\u{1F4C8} Report")
-      .resized()
-      .persistent();
+    const telegramId = ctx.from?.id;
 
-    await ctx.reply("\u{2328}\u{FE0F} Quick actions activated! Use the buttons below.", {
+    // In private chat: check if this user needs onboarding first
+    if (ctx.chat?.type === "private" && telegramId) {
+      const members = await getTeamMembers(env.PROJECTS);
+      const isMember = members.some((m) => m.telegram_id === telegramId);
+      const onboarded = await isOnboarded(env.PROJECTS, telegramId);
+
+      if (!isMember && !onboarded) {
+        // Start the 3-step onboarding wizard
+        await setOnboardingState(env.PROJECTS, telegramId, "awaiting_github");
+        const lang = await getUserLanguage(env.PROJECTS, telegramId);
+        const welcomeText = [
+          t(lang, "onboard.welcome_heading"),
+          t(lang, "onboard.welcome_subtitle"),
+          "",
+          t(lang, "onboard.features_heading"),
+          t(lang, "onboard.feature_claim"),
+          t(lang, "onboard.feature_tasks"),
+          t(lang, "onboard.feature_board"),
+          t(lang, "onboard.feature_idea"),
+          t(lang, "onboard.feature_prompt"),
+          "",
+          t(lang, "onboard.step1_heading"),
+          t(lang, "onboard.step1_prompt"),
+        ].join("\n");
+        await ctx.reply(welcomeText, { parse_mode: "HTML" });
+        return;
+      }
+    }
+
+    // Normal flow for registered / already-onboarded users
+    const lang = telegramId ? await getUserLanguage(env.PROJECTS, telegramId) : "en" as Locale;
+
+    // Project header with inline [Switch] button
+    if (telegramId) {
+      const active = await resolveActiveProject(env, telegramId);
+      if (active) {
+        const projectName = escapeHtml(active.projectId);
+        await ctx.reply(
+          `\u{1F4C2} <b>Project:</b> ${projectName}`,
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[{ text: "\u{1F504} Switch", callback_data: "home_switch_project" }]],
+            },
+          }
+        );
+      }
+    }
+
+    // New 6-button reply keyboard
+    const keyboard = buildReplyKeyboard(lang);
+
+    await ctx.reply(t(lang, "onboard.quick_actions"), {
       reply_markup: keyboard,
       parse_mode: "HTML",
     });
@@ -1499,6 +5563,38 @@ function createBot(
   // /wer — show who is currently working (German alias)
   bot.command("wer", async () => {
     await handleWerCommand(env, project, projectId);
+  });
+
+  // /language [en|de] — view or switch the bot UI language
+  bot.command("language", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const args = ((ctx.match as string) || "").trim().toLowerCase();
+    if (!args) {
+      const currentLang = await getUserLanguage(env.PROJECTS, telegramId);
+      await ctx.reply(
+        t(currentLang, "lang.current", { lang: currentLang === "en" ? "English" : "Deutsch" }),
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    if (args !== "en" && args !== "de") {
+      const currentLang = await getUserLanguage(env.PROJECTS, telegramId);
+      await ctx.reply(t(currentLang, "lang.unsupported"));
+      return;
+    }
+    await setUserLanguage(env.PROJECTS, telegramId, args as Locale);
+    const langName = args === "en" ? "English" : "Deutsch";
+    await ctx.reply(
+      t(args as Locale, "lang.switched", { lang: langName }),
+      { parse_mode: "HTML" }
+    );
+    // Re-render the reply keyboard with the new language
+    const keyboard = buildReplyKeyboard(args as Locale);
+    await ctx.reply(t(args as Locale, "onboard.quick_actions"), {
+      reply_markup: keyboard,
+      parse_mode: "HTML",
+    });
   });
 
   // /new <title> — create a new GitHub issue
@@ -1655,6 +5751,10 @@ function createBot(
       return;
     }
 
+    // Auto-promote first team member to admin
+    const existingMembers = await getTeamMembers(env.PROJECTS);
+    const isFirstMember = existingMembers.length === 0;
+
     // Save to central team registry
     await upsertTeamMember(env.PROJECTS, {
       telegram_id: telegramId,
@@ -1663,19 +5763,127 @@ function createBot(
       name: firstName,
     });
 
+    if (isFirstMember) {
+      await setUserRole(env.PROJECTS, telegramId, "admin");
+    }
+
     // Retrieve updated member list to show the assigned color
     const members = await getTeamMembers(env.PROJECTS);
     const color = getUserColor(members, telegramId);
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
 
-    await ctx.reply(
+    let replyText =
       `${color} <b>Registered!</b>\n\n` +
-        `Telegram: @${telegramUsername || firstName}\n` +
-        `GitHub: ${githubUsername.replace(/^@/, "")}\n\n` +
-        `You can now use:\n` +
-        `\u{1F4CB} /tasks \u{2014} see open tasks\n` +
-        `\u{1F4CC} /grab #1 #2 \u{2014} claim tasks\n` +
-        `\u{2705} /done #5 \u{2014} mark task done\n` +
-        `\u{1F4CA} /dashboard \u{2014} live dashboard`,
+      `Telegram: @${telegramUsername || firstName}\n` +
+      `GitHub: ${githubUsername.replace(/^@/, "")}\n\n` +
+      `You can now use:\n` +
+      `\u{1F4CB} /tasks \u{2014} see open tasks\n` +
+      `\u{1F4CC} /grab #1 #2 \u{2014} claim tasks\n` +
+      `\u{2705} /done #5 \u{2014} mark task done\n` +
+      `\u{1F4CA} /dashboard \u{2014} live dashboard`;
+
+    if (isFirstMember) {
+      replyText += `\n\n${t(lang, "roles.first_admin")}`;
+    }
+
+    await ctx.reply(replyText, { parse_mode: "HTML" });
+  });
+
+  // /promote @username — promote a team member to admin (admin-only)
+  bot.command("promote", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+    if (!(await isAdmin(env.PROJECTS, telegramId))) {
+      await ctx.reply(t(lang, "roles.admin_only"));
+      return;
+    }
+
+    const args = ((ctx.match as string) || "").trim();
+    if (!args) {
+      await ctx.reply(t(lang, "roles.promote_usage"));
+      return;
+    }
+
+    const targetName = args.replace(/^@/, "");
+    const members = await getTeamMembers(env.PROJECTS);
+    const target = members.find(
+      (m) =>
+        m.name?.toLowerCase() === targetName.toLowerCase() ||
+        m.telegram_username?.toLowerCase() === targetName.toLowerCase() ||
+        m.github?.toLowerCase() === targetName.toLowerCase()
+    );
+
+    if (!target) {
+      await ctx.reply(t(lang, "roles.user_not_found", { name: targetName }));
+      return;
+    }
+
+    if (getUserRole(target) === "admin") {
+      await ctx.reply(t(lang, "roles.already_admin", { name: target.name || targetName }));
+      return;
+    }
+
+    await setUserRole(env.PROJECTS, target.telegram_id, "admin");
+    await ctx.reply(
+      t(lang, "roles.promoted", { name: target.name || targetName }),
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // /demote @username — demote an admin to regular member (admin-only)
+  bot.command("demote", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+    if (!(await isAdmin(env.PROJECTS, telegramId))) {
+      await ctx.reply(t(lang, "roles.admin_only"));
+      return;
+    }
+
+    const args = ((ctx.match as string) || "").trim();
+    if (!args) {
+      await ctx.reply(t(lang, "roles.demote_usage"));
+      return;
+    }
+
+    const targetName = args.replace(/^@/, "");
+    const members = await getTeamMembers(env.PROJECTS);
+    const target = members.find(
+      (m) =>
+        m.name?.toLowerCase() === targetName.toLowerCase() ||
+        m.telegram_username?.toLowerCase() === targetName.toLowerCase() ||
+        m.github?.toLowerCase() === targetName.toLowerCase()
+    );
+
+    if (!target) {
+      await ctx.reply(t(lang, "roles.user_not_found", { name: targetName }));
+      return;
+    }
+
+    if (getUserRole(target) === "member") {
+      await ctx.reply(t(lang, "roles.already_member", { name: target.name || targetName }));
+      return;
+    }
+
+    // Prevent self-demotion
+    if (target.telegram_id === telegramId) {
+      await ctx.reply(t(lang, "roles.cannot_demote_self"));
+      return;
+    }
+
+    // Prevent demoting the last admin
+    const adminCount = await countAdmins(env.PROJECTS);
+    if (adminCount <= 1) {
+      await ctx.reply(t(lang, "roles.last_admin"));
+      return;
+    }
+
+    await setUserRole(env.PROJECTS, target.telegram_id, "member");
+    await ctx.reply(
+      t(lang, "roles.demoted", { name: target.name || targetName }),
       { parse_mode: "HTML" }
     );
   });
@@ -1695,6 +5903,36 @@ function createBot(
     } else {
       await sendProjectControlMessage(project, env, projectId);
       await ctx.reply("\u{2705} Project Control Panel sent and pinned.");
+    }
+  });
+
+  // /settings — open notification preferences
+  bot.command("settings", async (ctx: Context) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    if (ctx.chat?.type === "private") {
+      // In private chat: show settings panel directly
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      const { text, keyboard } = buildSettingsMessage(prefs);
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } else {
+      // In group: ask the user to go to DM
+      await ctx.reply(
+        "\u{2699}\u{FE0F} Send me /settings in a private chat to manage your notifications.",
+        { parse_mode: "HTML" }
+      );
+
+      // Also try to send a DM with the settings panel
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      if (prefs.dm_chat_id) {
+        const { text, keyboard } = buildSettingsMessage(prefs);
+        const dmStatus = await sendDM(project.botToken, prefs.dm_chat_id, text, keyboard);
+        if (dmStatus === "blocked") {
+          prefs.dm_chat_id = null;
+          await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+        }
+      }
     }
   });
 
@@ -2113,6 +6351,867 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
+  // Preference toggle callbacks (Settings Wizard)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^pref_toggle:(commits|previews|pr_reviews|sessions)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const field = ctx.match![1] as keyof UserPreferences;
+    const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+
+    // Flip the boolean
+    (prefs as unknown as Record<string, unknown>)[field] = !prefs[field];
+    await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+
+    // Re-render the settings message in place
+    const { text, keyboard } = buildSettingsMessage(prefs);
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {
+      // Message unchanged or expired — safe to ignore
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // On-demand info callbacks (Settings Wizard)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("info:commits", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+
+    // Query D1 events table for recent pushes
+    const lines: string[] = ["\u{1F4E6} <b>Recent Commits</b>", ""];
+    try {
+      const events = await env.DB.prepare(
+        `SELECT actor, target, metadata, created_at
+         FROM events
+         WHERE event_type LIKE 'push%'
+         ORDER BY created_at DESC LIMIT 10`
+      ).all<{ actor: string; target: string; metadata: string; created_at: string }>();
+
+      if (events.results && events.results.length > 0) {
+        for (const e of events.results) {
+          let commitCount = "";
+          try {
+            const meta = JSON.parse(e.metadata || "{}");
+            commitCount = meta.commit_count ? ` (${meta.commit_count} commits)` : "";
+          } catch {}
+          lines.push(`\u{2022} ${e.actor} \u{2192} ${e.target}${commitCount}`);
+          lines.push(`  ${e.created_at}`);
+        }
+      } else {
+        lines.push("No recent push events recorded.");
+      }
+    } catch {
+      lines.push("Could not load commit data.");
+    }
+
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+  });
+
+  bot.callbackQuery("info:previews", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await ctx.reply("\u{1F310} No active previews right now.\n\nThis feature will show deployment preview links in a future update.");
+  });
+
+  bot.callbackQuery("info:online", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+
+    const sessions = await getActiveSessions(env.PROJECTS, projectId);
+    const members = await getTeamMembers(env.PROJECTS);
+
+    if (sessions.length === 0) {
+      await ctx.reply("\u{1F465} Nobody is currently online.");
+      return;
+    }
+
+    const lines: string[] = ["\u{1F465} <b>Currently Online</b>", ""];
+    for (const s of sessions) {
+      const color = getUserColorByName(members, s.user);
+      lines.push(`${color} ${s.user} (since ${s.since})`);
+    }
+
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+  });
+
+  // -------------------------------------------------------------------
+  // Category assignment callbacks
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("cat_assign", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryAssign(ctx, project, env, projectId);
+  });
+
+  bot.callbackQuery(/^cat_pick:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const label = ctx.match![1];
+    await handleCategoryPick(ctx, project, env, projectId, label);
+  });
+
+  bot.callbackQuery(/^cat_confirm:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const label = ctx.match![1];
+    await handleCategoryConfirm(ctx, project, env, projectId, label);
+  });
+
+  bot.callbackQuery("cat_override", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    // User chose to override blocker warning — show category picker anyway
+    await handleCategoryAssign(ctx, project, env, projectId);
+  });
+
+  bot.callbackQuery("cat_cancel", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      await ctx.editMessageText("\u{274C} Cancelled.", { parse_mode: "HTML" });
+    } catch {}
+  });
+
+  bot.callbackQuery("cat_show_completed", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      const result = await buildCategoryPicker(env, project, projectId, claimsState, true);
+      if (result) {
+        await ctx.editMessageText(result.text, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: result.buttons },
+        });
+      }
+    } catch (err) {
+      console.error("cat_show_completed error:", err);
+    }
+  });
+
+  bot.callbackQuery("cat_hide_completed", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      const result = await buildCategoryPicker(env, project, projectId, claimsState, false);
+      if (result) {
+        await ctx.editMessageText(result.text, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: result.buttons },
+        });
+      }
+    } catch (err) {
+      console.error("cat_hide_completed error:", err);
+    }
+  });
+
+  bot.callbackQuery("cat_release", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryRelease(ctx, env, projectId);
+  });
+
+  bot.callbackQuery("cat_release_confirm", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryReleaseConfirm(ctx, project, env, projectId);
+  });
+
+  bot.callbackQuery("cat_status", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await handleCategoryStatus(ctx, env, projectId);
+  });
+
+  // -------------------------------------------------------------------
+  // "Meine Aufgaben" inline button callbacks — Start, Done, Refresh
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^mytasks_start:(\d+)$/, async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const issueNumber = parseInt(ctx.match![1], 10);
+    const firstName = ctx.from?.first_name || "User";
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.answerCallbackQuery({ text: "No project configured." });
+        return;
+      }
+
+      // Set as active task in KV
+      await setActiveTask(env.PROJECTS, telegramId, active.projectId, issueNumber);
+
+      // Refresh the whole task list to reflect the new active state
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+      try { await ctx.answerCallbackQuery(); } catch {}
+
+      // Generate and send Claude Code prompt as DM (non-blocking)
+      try {
+        const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+        if (prefs.dm_chat_id) {
+          // Find the user's category claim to use for branch naming
+          const claimsState = await getCategoryClaims(env.PROJECTS, active.projectId);
+          const userClaim = claimsState.claims.find(
+            (c) => c.telegramId === telegramId
+          );
+          const category = userClaim?.displayName || null;
+
+          const prompt = await generateClaudePrompt(
+            active.projectConfig,
+            issueNumber,
+            category
+          );
+
+          // Truncate prompt to stay within Telegram's 4096-char message limit
+          const MAX_PROMPT_CHARS = 3400;
+          const safePrompt = prompt.length > MAX_PROMPT_CHARS
+            ? prompt.slice(0, MAX_PROMPT_CHARS) + "\n... (truncated)"
+            : prompt;
+
+          const dmText =
+            `\u{1F680} <b>Claude Code Prompt for #${issueNumber}</b>\n\n` +
+            `<pre>${escapeHtml(safePrompt)}</pre>\n\n` +
+            `<i>\u{1F4A1} Long-press the code block above to copy, then paste into VS Code.</i>`;
+
+          const dmStatus = await sendDM(
+            active.projectConfig.botToken,
+            prefs.dm_chat_id,
+            dmText
+          );
+
+          if (dmStatus === "blocked") {
+            prefs.dm_chat_id = null;
+            await saveUserPreferences(env.PROJECTS, telegramId, prefs);
+          }
+        }
+      } catch (promptErr) {
+        // Prompt generation is best-effort — don't fail the task start
+        console.error("generateClaudePrompt DM error:", promptErr);
+      }
+    } catch (err) {
+      console.error("mytasks_start error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not start task." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery(/^mytasks_done:(\d+)$/, async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const issueNumber = parseInt(ctx.match![1], 10);
+    const firstName = ctx.from?.first_name || "User";
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.answerCallbackQuery({ text: "No project configured." });
+        return;
+      }
+
+      const { projectConfig: proj } = active;
+      if (!proj.githubToken) {
+        await ctx.answerCallbackQuery({ text: "No GitHub token configured." });
+        return;
+      }
+
+      // Close the issue on GitHub
+      const closeRes = await githubRequest(
+        "PATCH",
+        `/repos/${proj.githubRepo}/issues/${issueNumber}`,
+        proj.githubToken,
+        { state: "closed" }
+      );
+
+      if (!closeRes.ok) {
+        await ctx.answerCallbackQuery({
+          text: `GitHub error closing #${issueNumber}: ${closeRes.status}`,
+        });
+        return;
+      }
+
+      // Clear active task if it was the one being completed
+      const currentActive = await getActiveTask(
+        env.PROJECTS,
+        telegramId,
+        active.projectId
+      );
+      if (currentActive === issueNumber) {
+        await clearActiveTask(env.PROJECTS, telegramId, active.projectId);
+      }
+
+      // Update claim: remove completed issue from assignedIssues
+      const currentClaims = await getCategoryClaims(env.PROJECTS, active.projectId);
+      const userClaim = currentClaims.claims.find((c) => c.telegramId === telegramId);
+      if (userClaim) {
+        userClaim.assignedIssues = userClaim.assignedIssues.filter((n) => n !== issueNumber);
+        if (userClaim.assignedIssues.length === 0) {
+          // All assigned issues done — auto-release category
+          currentClaims.claims = currentClaims.claims.filter((c) => c.telegramId !== telegramId);
+          try { await stopTimer(env.PROJECTS, telegramId, active.projectId); } catch {}
+        }
+        currentClaims.lastUpdated = new Date().toISOString();
+        await saveCategoryClaims(env.PROJECTS, active.projectId, currentClaims);
+      }
+
+      // Increment daily counter
+      const newCount = await incrementTodayDoneCount(env.PROJECTS, telegramId);
+
+      // Refresh the task list to show the issue removed
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      // Show celebration tip when all tasks are done
+      const allDoneTip = text.includes("No tasks assigned")
+        ? await getTip(env.PROJECTS, telegramId, "all_tasks_done")
+        : "";
+      const footer = `\n\n✅ <b>#${issueNumber} closed!</b> (Today: ${newCount})` + allDoneTip;
+      await ctx.editMessageText(text + footer, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+      try { await ctx.answerCallbackQuery(); } catch {}
+    } catch (err) {
+      console.error("mytasks_done error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not complete task." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("mytasks_refresh", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const firstName = ctx.from?.first_name || "User";
+
+    try {
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("mytasks_refresh error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not refresh." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // "Meine Aufgaben" — Show All Prompts callback
+  // Generates Claude Code prompts for every assigned issue and sends
+  // them as individual DMs so the user can copy-paste into VS Code.
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("mytasks_show_prompts", async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    try {
+      await ctx.answerCallbackQuery({ text: "Generating prompts\u{2026}" });
+
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) return;
+
+      const { projectId: promptProjectId, projectConfig: promptProject } = active;
+
+      const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+      if (!prefs.dm_chat_id) {
+        await sendDM(
+          promptProject.botToken,
+          ctx.from!.id,
+          "\u{26A0}\u{FE0F} DM not set up. Send /start to the bot first."
+        );
+        return;
+      }
+
+      if (!promptProject.githubToken) return;
+
+      // Look up the caller's GitHub username
+      const promptMembers = await getTeamMembers(env.PROJECTS);
+      const promptMember = promptMembers.find((m) => m.telegram_id === telegramId);
+      const promptGithub = promptMember?.github;
+      if (!promptGithub) return;
+
+      // Fetch issues assigned to this user
+      const promptResponse = await githubRequest(
+        "GET",
+        `/repos/${promptProject.githubRepo}/issues?state=open&assignee=${promptGithub}&per_page=30`,
+        promptProject.githubToken
+      );
+      if (!promptResponse.ok) return;
+
+      const promptIssues = (await promptResponse.json()) as Array<{
+        number: number;
+        title: string;
+        labels: Array<{ name: string }>;
+        pull_request?: unknown;
+      }>;
+
+      const myPromptIssues = sortByPriority(
+        promptIssues.filter((i) => !i.pull_request)
+      );
+
+      if (myPromptIssues.length === 0) {
+        await sendDM(
+          promptProject.botToken,
+          prefs.dm_chat_id,
+          "No open issues assigned to you."
+        );
+        return;
+      }
+
+      // Determine category for branch naming
+      const promptClaims = await getCategoryClaims(env.PROJECTS, promptProjectId);
+      const promptClaim = promptClaims.claims.find(
+        (c) => c.telegramId === telegramId
+      );
+      const promptCategory = promptClaim?.displayName || null;
+
+      // Send a header DM, then one prompt per issue
+      await sendDM(
+        promptProject.botToken,
+        prefs.dm_chat_id,
+        `\u{1F4CB} <b>Claude Code Prompts (${myPromptIssues.length} issues)</b>\n\n` +
+          "Each prompt below is ready to paste into VS Code."
+      );
+
+      for (const issue of myPromptIssues) {
+        try {
+          const prompt = await generateClaudePrompt(
+            promptProject,
+            issue.number,
+            promptCategory
+          );
+          const MAX_PROMPT_CHARS = 3400;
+          const safePrompt = prompt.length > MAX_PROMPT_CHARS
+            ? prompt.slice(0, MAX_PROMPT_CHARS) + "\n... (truncated)"
+            : prompt;
+
+          await sendDM(
+            promptProject.botToken,
+            prefs.dm_chat_id,
+            `\u{1F680} <b>Prompt for #${issue.number} ${escapeHtml(issue.title)}</b>\n\n` +
+              `<pre>${escapeHtml(safePrompt)}</pre>\n\n` +
+              `<i>\u{1F4A1} Long-press the code block to copy, then paste into VS Code.</i>`
+          );
+
+          // Small delay between DMs to avoid Telegram rate limits
+          await new Promise((r) => setTimeout(r, 300));
+        } catch (promptErr) {
+          console.error(`Show prompts: failed for #${issue.number}:`, promptErr);
+        }
+      }
+    } catch (err) {
+      console.error("mytasks_show_prompts error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not generate prompts." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Team Board — Refresh callback
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("teamboard_refresh", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    try {
+      const { text, keyboard } = await renderTeamBoard(env, telegramId);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("teamboard_refresh error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not refresh Team Board." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Velocity — View, Refresh, Back callbacks (Issue #61)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("board_velocity", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const { text, keyboard } = await renderVelocityView(env);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("board_velocity error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not load Velocity view." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("velocity_refresh", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      const { text, keyboard } = await renderVelocityView(env);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("velocity_refresh error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not refresh Velocity." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("velocity_back", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+    try {
+      const { text, keyboard } = await renderTeamBoard(env, telegramId);
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("velocity_back error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not go back." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Learning Bridge — scope selection callback (Issue #64)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^learning_scope:(\d+):(team|private)$/, async (ctx) => {
+    const match = ctx.match!;
+    const learningId = parseInt(match[1], 10);
+    const scope = match[2];
+
+    try {
+      const callerTelegramId = ctx.from?.id;
+      if (!callerTelegramId) {
+        await ctx.answerCallbackQuery({ text: "Could not identify user." });
+        return;
+      }
+      await updateLearningScope(env.DB, learningId, scope as "team" | "private", String(callerTelegramId));
+
+      const scopeLabel = scope === "team" ? "\u{1F465} For everyone" : "\u{1F512} Only for me";
+
+      await ctx.editMessageText(
+        "\u{1F4DD} <b>Learning saved!</b>\n\n" +
+        `Scope: ${scopeLabel}\n\n` +
+        "<i>This learning will appear in your evening summary.</i>" +
+        (scope === "team" ? "\n<i>It will also be shared in the team digest.</i>" : ""),
+        { parse_mode: "HTML" }
+      );
+      await ctx.answerCallbackQuery("Learning scope updated!");
+    } catch (err) {
+      console.error("learning_scope callback error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not update learning scope." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Preview & Merge — Create Preview, Approve, Request Changes (#56)
+  // -------------------------------------------------------------------
+
+  /**
+   * [Create Preview] button — creates a PR on GitHub and notifies the team.
+   * Callback data format: preview_create:{projectId}:{category}
+   */
+  bot.callbackQuery(/^preview_create:([^:]+):(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery({ text: "Creating PR..." }); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const targetProjectId = ctx.match![1];
+    const category = ctx.match![2];
+
+    try {
+      const targetProject = await getProject(env.PROJECTS, targetProjectId, env);
+      if (!targetProject || !targetProject.githubToken) {
+        try { await ctx.answerCallbackQuery({ text: "Project or token not found." }); } catch {}
+        return;
+      }
+
+      // Resolve who is creating the PR
+      const members = await getTeamMembers(env.PROJECTS);
+      const member = members.find((m) => m.telegram_id === telegramId);
+      if (!member) {
+        try { await ctx.answerCallbackQuery({ text: "You are not registered." }); } catch {}
+        return;
+      }
+
+      const categorySlug = category.replace("area:", "").toLowerCase();
+      const displayName = category.replace("area:", "");
+      const branchName = `feature/${categorySlug}`;
+
+      // Build PR title and body from category info
+      const prTitle = `feat: ${displayName}`;
+      const prBody =
+        `## ${displayName}\n\n` +
+        `Category: \`${category}\`\n` +
+        `Created by: @${member.github} via Cortex Team Bot`;
+
+      const pr = await createPreviewPR(targetProject, branchName, prTitle, prBody);
+      if (!pr) {
+        await ctx.editMessageText(
+          `\u{26A0}\u{FE0F} Could not create PR for branch <code>${escapeHtml(branchName)}</code>.\n` +
+          "The branch may not exist or there may already be a PR.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Log the event
+      await logEvent(env.DB, targetProject.githubRepo, "pr.created_via_bot", member.github, String(pr.number));
+
+      // Check if a preview URL already exists (Coolify may have deployed)
+      const previewUrl = await getPreviewUrl(env.PROJECTS, targetProjectId, pr.number);
+
+      // Update the message with success info
+      const previewLine = previewUrl
+        ? `\n\u{1F310} <a href="${previewUrl}">Preview</a>`
+        : "\n\u{23F3} Waiting for Coolify preview deployment...";
+
+      const successKb = new InlineKeyboard();
+      successKb.url("\u{1F517} View PR", pr.html_url);
+      successKb.row();
+      successKb.text("\u{1F504} Refresh", "mytasks_refresh");
+
+      await ctx.editMessageText(
+        `\u{2705} <b>PR Created!</b>\n${"━".repeat(16)}\n\n` +
+        `PR #${pr.number}: "${escapeHtml(prTitle)}"\n` +
+        `\u{1F517} <a href="${pr.html_url}">View on GitHub</a>${previewLine}`,
+        { parse_mode: "HTML", reply_markup: successKb }
+      );
+
+      // Notify team members about the new preview
+      await sendPreviewNotifications(
+        env,
+        targetProject.botToken,
+        telegramId,
+        pr.number,
+        prTitle,
+        pr.html_url,
+        previewUrl
+      );
+    } catch (err) {
+      console.error("preview_create error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error creating PR." });
+      } catch {}
+    }
+  });
+
+  /**
+   * [Approve] button — submits an APPROVE review via GitHub API.
+   * Self-approve is allowed but marked in the review body.
+   * Callback data format: review_approve:{prNumber}
+   */
+  bot.callbackQuery(/^review_approve:(\d+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery({ text: "Submitting approval..." }); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const prNumber = parseInt(ctx.match![1], 10);
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active || !active.projectConfig.githubToken) {
+        try { await ctx.answerCallbackQuery({ text: "No project configured." }); } catch {}
+        return;
+      }
+
+      const { projectConfig: proj } = active;
+
+      // Look up reviewer's GitHub username
+      const members = await getTeamMembers(env.PROJECTS);
+      const reviewer = members.find((m) => m.telegram_id === telegramId);
+      if (!reviewer) {
+        try { await ctx.answerCallbackQuery({ text: "You are not registered." }); } catch {}
+        return;
+      }
+
+      // Fetch PR to detect self-approve and size (for contextual tip)
+      const prRes = await githubRequest(
+        "GET",
+        `/repos/${proj.githubRepo}/pulls/${prNumber}`,
+        proj.githubToken!
+      );
+      let isSelfApprove = false;
+      let prLinesChanged = 0;
+      if (prRes.ok) {
+        const prData = (await prRes.json()) as {
+          user: { login: string };
+          additions: number;
+          deletions: number;
+        };
+        isSelfApprove = prData.user.login === reviewer.github;
+        prLinesChanged = (prData.additions || 0) + (prData.deletions || 0);
+      }
+
+      const reviewBody = isSelfApprove
+        ? "\u{2705} Self-approved via Cortex Team Bot (self-approved)"
+        : "\u{2705} Approved via Cortex Team Bot";
+
+      const ok = await submitPRReview(proj, prNumber, "APPROVE", reviewBody);
+
+      if (ok) {
+        await logEvent(env.DB, proj.githubRepo, "review.approved.bot", reviewer.github, String(prNumber));
+
+        // Show peer-review tip for large self-approved PRs (>200 lines)
+        let selfApproveTip = "";
+        if (isSelfApprove && prLinesChanged > 200) {
+          selfApproveTip = await getTip(env.PROJECTS, telegramId!, "self_approve_large_pr");
+        }
+
+        const label = isSelfApprove ? "Self-Approved" : "Approved";
+        await ctx.editMessageText(
+          `\u{2705} <b>${label}!</b>\n\n` +
+          `PR #${prNumber} approved by @${escapeHtml(reviewer.github)}` +
+          (isSelfApprove ? " (self-approved)" : "") +
+          selfApproveTip,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.editMessageText(
+          `\u{26A0}\u{FE0F} Could not approve PR #${prNumber}. GitHub API error.`,
+          { parse_mode: "HTML" }
+        );
+      }
+    } catch (err) {
+      console.error("review_approve error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error submitting review." });
+      } catch {}
+    }
+  });
+
+  /**
+   * [Request Changes] button — submits a REQUEST_CHANGES review via GitHub API.
+   * Callback data format: review_changes:{prNumber}
+   */
+  bot.callbackQuery(/^review_changes:(\d+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery({ text: "Submitting review..." }); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const prNumber = parseInt(ctx.match![1], 10);
+
+    try {
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active || !active.projectConfig.githubToken) {
+        try { await ctx.answerCallbackQuery({ text: "No project configured." }); } catch {}
+        return;
+      }
+
+      const { projectConfig: proj } = active;
+
+      // Look up reviewer's GitHub username
+      const members = await getTeamMembers(env.PROJECTS);
+      const reviewer = members.find((m) => m.telegram_id === telegramId);
+      if (!reviewer) {
+        try { await ctx.answerCallbackQuery({ text: "You are not registered." }); } catch {}
+        return;
+      }
+
+      const ok = await submitPRReview(
+        proj,
+        prNumber,
+        "REQUEST_CHANGES",
+        "\u{270F}\u{FE0F} Changes requested via Cortex Team Bot"
+      );
+
+      if (ok) {
+        await logEvent(env.DB, proj.githubRepo, "review.changes_requested.bot", reviewer.github, String(prNumber));
+
+        await ctx.editMessageText(
+          `\u{270F}\u{FE0F} <b>Changes Requested</b>\n\n` +
+          `PR #${prNumber} — @${escapeHtml(reviewer.github)} requested changes.`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.editMessageText(
+          `\u{26A0}\u{FE0F} Could not submit review for PR #${prNumber}. GitHub API error.`,
+          { parse_mode: "HTML" }
+        );
+      }
+    } catch (err) {
+      console.error("review_changes error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error submitting review." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // CI re-run — triggers a GitHub Actions workflow re-run from DM
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^ci_rerun:([^:]+):(\d+)$/, async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const targetProjectId = ctx.match![1];
+    const runId = ctx.match![2];
+
+    try {
+      const targetProject = await getProject(env.PROJECTS, targetProjectId, env);
+      if (!targetProject?.githubToken) {
+        await ctx.answerCallbackQuery({ text: "No GitHub token configured." });
+        return;
+      }
+
+      const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+      const res = await githubRequest(
+        "POST",
+        `/repos/${targetProject.githubRepo}/actions/runs/${runId}/rerun`,
+        targetProject.githubToken
+      );
+
+      if (res.ok || res.status === 201) {
+        await ctx.answerCallbackQuery({ text: t(lang, "ci.rerun_success") });
+      } else {
+        await ctx.answerCallbackQuery({
+          text: t(lang, "ci.rerun_failed", { status: String(res.status) }),
+        });
+      }
+    } catch (err) {
+      console.error("ci_rerun error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Error re-running workflow." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // "Meine Aufgaben" — Pause flow callbacks
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("mytasks_pause", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      await handlePause(ctx, env, project, projectId);
+    } catch (err) {
+      console.error("mytasks_pause error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not show pause dialog." });
+      } catch {}
+    }
+  });
+
+  bot.callbackQuery("mytasks_pause_confirm", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    try {
+      await handlePauseConfirm(ctx, project, env, projectId);
+    } catch (err) {
+      console.error("mytasks_pause_confirm error:", err);
+      try {
+        await ctx.answerCallbackQuery({ text: "Could not pause category." });
+      } catch {}
+    }
+  });
+
+  // -------------------------------------------------------------------
   // New group member detection — auto-greet and prompt for registration
   // Past work — show last 5 days of activity from D1
   bot.callbackQuery("past_work", async (ctx) => {
@@ -2213,123 +7312,1068 @@ function createBot(
   });
 
   // -------------------------------------------------------------------
-  // Reply keyboard button handlers (plain text messages)
+  // Reply keyboard button handlers — v4 (5-button layout)
   // -------------------------------------------------------------------
 
-  bot.hears("\u{1F4CA} Dashboard", async () => {
-    await sendOrEditDashboard(env, projectId, project);
+  bot.hears(["\u{1F4CB} Aufgabe nehmen", "\u{1F4CB} Claim Task"], async (ctx) => {
+    await handleAufgabeNehmen(ctx, project, env, projectId);
   });
 
-  bot.hears("\u{1F465} Active", async () => {
-    await sendActiveInfo(env, project, projectId);
-  });
+  bot.hears(["\u{2705} Meine Aufgaben", "\u{2705} My Tasks"], async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
 
-  bot.hears("\u{1F4CC} My Tasks", async (ctx) => {
-    const text = await handleProjectMyTasks(project, env, ctx.from?.id || 0, ctx.from?.first_name || "Unknown");
-    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
-  });
-
-  bot.hears("\u{1F4CB} Board", async () => {
-    const text = await handleProjectBoard(project, projectId);
-    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
-  });
-
-  bot.hears("\u{1F500} PRs", async () => {
-    const text = await handleProjectPRs(project, projectId);
-    await sendTelegram(project.botToken, project.chatId, text, project.threadId);
-  });
-
-  bot.hears("\u{1F440} Review", async () => {
-    // Same logic as project_reviews callback
-    const githubToken = getGitHubToken(env, project);
-    if (!githubToken) { await sendTelegram(project.botToken, project.chatId, "\u{1F440} No GitHub token.", project.threadId); return; }
+    const firstName = ctx.from?.first_name || "User";
     try {
-      const res = await fetch(
-        `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=20`,
-        { headers: { "User-Agent": "CortexBot", Authorization: "token " + githubToken } }
-      );
-      if (!res.ok) throw new Error("API");
-      const prs = await res.json() as Array<{
-        number: number; title: string; html_url: string; user: { login: string };
-        requested_reviewers: Array<{ login: string }>; draft: boolean; created_at: string;
-      }>;
-      const needsReview = prs.filter(pr => !pr.draft && pr.requested_reviewers.length === 0);
-      const pendingReview = prs.filter(pr => !pr.draft && pr.requested_reviewers.length > 0);
-      const lines: string[] = ["\u{1F440} <b>Review Queue</b>", ""];
-      if (needsReview.length > 0) {
-        lines.push("\u{1F6A8} <b>No reviewer assigned:</b>");
-        for (const pr of needsReview) {
-          const age = Math.round((Date.now() - new Date(pr.created_at).getTime()) / 3600000);
-          lines.push(`\u{2022} #${pr.number} ${pr.title} (@${pr.user.login}, ${age}h)`);
-        }
-      }
-      if (pendingReview.length > 0) { lines.push(""); lines.push("\u{23F3} <b>Waiting for review:</b>");
-        for (const pr of pendingReview) { lines.push(`\u{2022} #${pr.number} ${pr.title} \u{2192} ${pr.requested_reviewers.map(r => r.login).join(", ")}`); }
-      }
-      if (needsReview.length === 0 && pendingReview.length === 0) lines.push("\u{2705} All PRs reviewed!");
-      const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
-      if (project.threadId) body.message_thread_id = project.threadId;
-      await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
-    } catch { await sendTelegram(project.botToken, project.chatId, "\u{1F440} Could not load review queue.", project.threadId); }
-  });
-
-  bot.hears("\u{1F525} Urgent", async () => {
-    // Same logic as project_urgent callback
-    const githubToken = getGitHubToken(env, project);
-    if (!githubToken) { await sendTelegram(project.botToken, project.chatId, "\u{1F525} No GitHub token.", project.threadId); return; }
-    try {
-      const res = await fetch(
-        `https://api.github.com/repos/${project.githubRepo}/issues?state=open&labels=urgent,blocked,critical&per_page=20`,
-        { headers: { "User-Agent": "CortexBot", Authorization: "token " + githubToken } }
-      );
-      if (!res.ok) throw new Error("API");
-      const issues = await res.json() as Array<{ number: number; title: string; html_url: string; labels: Array<{ name: string }>; assignee: { login: string } | null }>;
-      const lines: string[] = ["\u{1F525} <b>Urgent & Blocked</b>", ""];
-      if (issues.length === 0) { lines.push("\u{2705} No urgent or blocked issues!"); }
-      else { for (const issue of issues) { const labels = issue.labels.map(l => l.name).join(", "); const assignee = issue.assignee ? issue.assignee.login : "unassigned"; lines.push(`\u{2022} #${issue.number} ${issue.title} [${labels}] \u{2192} ${assignee}`); } }
-      const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
-      if (project.threadId) body.message_thread_id = project.threadId;
-      await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
-    } catch { await sendTelegram(project.botToken, project.chatId, "\u{1F525} Could not load urgent issues.", project.threadId); }
-  });
-
-  bot.hears("\u{1F4C8} Report", async () => {
-    // Same logic as project_weekly callback
-    const githubToken = getGitHubToken(env, project);
-    const lines: string[] = ["\u{1F4C8} <b>Weekly Report</b>", ""];
-    try {
-      const weekEvents = await env.DB.prepare(
-        "SELECT event_type, COUNT(*) as c FROM events WHERE repo = ? AND created_at > datetime('now', '-7 days') GROUP BY event_type"
-      ).bind(project.githubRepo).all<{ event_type: string; c: number }>();
-      if (weekEvents.results && weekEvents.results.length > 0) {
-        const stats: Record<string, number> = {};
-        for (const e of weekEvents.results) stats[e.event_type] = e.c;
-        lines.push(`\u{1F4DD} Issues: ${stats["issues.opened"] || 0} opened, ${stats["issues.closed"] || 0} closed`);
-        lines.push(`\u{1F500} PRs: ${stats["pr.merged"] || 0} merged, ${stats["pr.opened"] || 0} opened`);
-        lines.push("");
-      }
-    } catch {}
-    if (githubToken) {
-      try {
-        const res = await fetch(`https://api.github.com/repos/${project.githubRepo}/pulls?state=closed&sort=updated&direction=desc&per_page=10`,
-          { headers: { "User-Agent": "CortexBot", Authorization: "token " + githubToken } });
-        if (res.ok) {
-          const prs = await res.json() as Array<{ number: number; title: string; merged_at: string | null; user: { login: string } }>;
-          const merged = prs.filter(pr => pr.merged_at);
-          if (merged.length > 0) { lines.push("<b>Merged PRs:</b>"); for (const pr of merged.slice(0, 5)) lines.push(`\u{2022} #${pr.number} ${pr.title} (@${pr.user.login})`); }
-        }
-      } catch {}
+      const { text, keyboard } = await handleMeineAufgaben(env, telegramId, firstName);
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("Meine Aufgaben error:", err);
+      await ctx.reply("⚠️ Could not load your tasks. Please try again.", {
+        parse_mode: "HTML",
+      });
     }
+  });
+
+  bot.hears("\u{1F465} Team Board", async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
     try {
-      const hours = await getWorkHoursToday(env.DB);
-      if (hours.length > 0) { lines.push(""); lines.push("<b>Work Hours (today):</b>");
-        const members = await getTeamMembers(env.PROJECTS);
-        for (const w of hours) { const color = getUserColorByName(members, w.user_id); const h = Math.floor(w.total_minutes / 60); const m = w.total_minutes % 60; lines.push(`${color} ${w.user_id}: ${h}h ${m}m`); }
+      const { text, keyboard } = await renderTeamBoard(env, telegramId);
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch (err) {
+      console.error("Team Board error:", err);
+      await ctx.reply("⚠️ Could not load the Team Board. Please try again.", {
+        parse_mode: "HTML",
+      });
+    }
+  });
+
+  bot.hears(["\u{1F4A1} Neue Idee", "\u{1F4A1} New Idea"], async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+    // Start the guided issue creation wizard
+    await setNewIdeaState(env.PROJECTS, telegramId, { step: "awaiting_title" });
+    await ctx.reply(
+      t(lang, "idea.heading") + "\n\n" +
+        t(lang, "idea.title_prompt"),
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // "Neue Idee" wizard — skip description callback handler
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("newidea_desc_skip", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_description") return;
+
+    // Skip description and advance to category step
+    await advanceToCategoryStep(ctx, env, telegramId, state.title || "", "");
+  });
+
+  // -------------------------------------------------------------------
+  // "Neue Idee" wizard — category selection callback handlers
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^newidea_cat:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_category") return;
+
+    const category = ctx.match[1];
+    // Validate category is a real area: label (defense-in-depth)
+    if (!category.startsWith("area:")) return;
+    const displayName = category.replace("area:", "");
+
+    // Save category and advance to priority step
+    await setNewIdeaState(env.PROJECTS, telegramId, {
+      ...state,
+      step: "awaiting_priority",
+      category,
+    });
+
+    const priorityKb = buildIdeaPriorityKeyboard();
+    await ctx.editMessageText(
+      `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+        `\u{1F4DD} ${escapeHtml(state.title || "")}\n` +
+        `\u{1F4C2} ${escapeHtml(displayName)}\n\n` +
+        "W\u{00E4}hle die Priorit\u{00E4}t:",
+      { parse_mode: "HTML", reply_markup: priorityKb }
+    );
+  });
+
+  bot.callbackQuery("newidea_cat_skip", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_category") return;
+
+    // Skip category and advance to priority step
+    await setNewIdeaState(env.PROJECTS, telegramId, {
+      ...state,
+      step: "awaiting_priority",
+    });
+
+    const priorityKb = buildIdeaPriorityKeyboard();
+    await ctx.editMessageText(
+      `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+        `\u{1F4DD} ${escapeHtml(state.title || "")}\n` +
+        `\u{1F4C2} <i>no category</i>\n\n` +
+        "W\u{00E4}hle die Priorit\u{00E4}t:",
+      { parse_mode: "HTML", reply_markup: priorityKb }
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // "Neue Idee" wizard — priority selection callback handlers
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^newidea_pri:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_priority") return;
+
+    const priority = ctx.match[1];
+    // Validate priority against known values (defense-in-depth)
+    const VALID_PRIORITIES = ["priority:high", "priority:medium", "priority:low"];
+    if (!VALID_PRIORITIES.includes(priority)) return;
+    await finalizeNewIdea(ctx, env, telegramId, state, priority);
+  });
+
+  bot.callbackQuery("newidea_pri_skip", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const state = await getNewIdeaState(env.PROJECTS, telegramId);
+    if (!state || state.step !== "awaiting_priority") return;
+
+    // Default to medium priority
+    await finalizeNewIdea(ctx, env, telegramId, state, PRIORITY_DEFAULT);
+  });
+
+  bot.hears(["\u{2753} Hilfe", "\u{2753} Help"], async (ctx) => {
+    const telegramId = ctx.from?.id;
+    const lang = telegramId ? await getUserLanguage(env.PROJECTS, telegramId) : "en" as Locale;
+    const keyboard = new InlineKeyboard()
+      .text(t(lang, "help.btn_blocker"), "help_blocker")
+      .text(t(lang, "help.btn_priorities"), "help_priorities")
+      .row()
+      .text(t(lang, "help.btn_categories"), "help_categories")
+      .text(t(lang, "help.btn_preview"), "help_preview")
+      .row()
+      .text(t(lang, "help.btn_conflicts"), "help_conflicts");
+
+    await ctx.reply(HELP_TEXTS.overview, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.hears(["\u{1F504} Projekt wechseln", "\u{1F504} Switch Project"], async (ctx) => {
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const projects = await getProjectList(env);
+    if (projects.length <= 1) {
+      await ctx.reply("\u{1F4C2} Only one project registered \u{2014} no switching needed.");
+      return;
+    }
+
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+
+    // Build enriched project list: name + personal claim + open task count
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (const p of projects) {
+      const isCurrent = p.id === currentProjectId;
+
+      // Check if user has a category claim in this project
+      const claimsState = await getCategoryClaims(env.PROJECTS, p.id);
+      const userClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      // Count open issues for this project
+      const issueMap = await fetchOpenIssuesByCategory(p.config);
+      let totalOpen = 0;
+      for (const issues of issueMap.values()) {
+        totalOpen += issues.length;
       }
-    } catch {}
-    const body: Record<string, unknown> = { chat_id: project.chatId, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true };
-    if (project.threadId) body.message_thread_id = project.threadId;
-    await fetch(`https://api.telegram.org/bot${project.botToken}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+
+      // Build label: checkmark + name + personal info + open tasks
+      let label = isCurrent ? "\u{2705} " : "";
+      label += p.id;
+      if (userClaim) {
+        label += ` \u{1F4CC} ${userClaim.displayName}`;
+      }
+      label += ` (${totalOpen} open)`;
+
+      buttons.push([{
+        text: label,
+        callback_data: `switch_project:${p.id}`,
+      }]);
+    }
+
+    await ctx.reply("\u{1F4C2} <b>Switch Project:</b>", {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: buttons },
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Help sub-view callback handlers (Issue #52)
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("help_blocker", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.blocker, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_priorities", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.priorities, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_categories", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.categories, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_preview", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.preview, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_conflicts", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard().text("\u{2B05}\u{FE0F} Zur\u{00FC}ck", "help_back");
+    await ctx.editMessageText(HELP_TEXTS.conflicts, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  bot.callbackQuery("help_back", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired */ }
+    const keyboard = new InlineKeyboard()
+      .text("\u{1F6AB} Blocker", "help_blocker")
+      .text("\u{1F4CA} Priorit\u{00E4}ten", "help_priorities")
+      .row()
+      .text("\u{1F4C1} Kategorien", "help_categories")
+      .text("\u{1F441} Preview", "help_preview")
+      .row()
+      .text("\u{26A0}\u{FE0F} Konflikte", "help_conflicts");
+
+    await ctx.editMessageText(HELP_TEXTS.overview, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Home screen — project switch handlers
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("home_switch_project", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const projects = await getProjectList(env);
+    if (projects.length <= 1) {
+      await ctx.reply("\u{1F4C2} Only one project registered \u{2014} no switching needed.");
+      return;
+    }
+
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+
+    // Build enriched project list: name + personal claim + open task count
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (const p of projects) {
+      const isCurrent = p.id === currentProjectId;
+
+      // Check if user has a category claim in this project
+      const claimsState = await getCategoryClaims(env.PROJECTS, p.id);
+      const userClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      // Count open issues for this project
+      const issueMap = await fetchOpenIssuesByCategory(p.config);
+      let totalOpen = 0;
+      for (const issues of issueMap.values()) {
+        totalOpen += issues.length;
+      }
+
+      // Build label: checkmark + name + personal info + open tasks
+      let label = isCurrent ? "\u{2705} " : "";
+      label += p.id;
+      if (userClaim) {
+        label += ` \u{1F4CC} ${userClaim.displayName}`;
+      }
+      label += ` (${totalOpen} open)`;
+
+      buttons.push([{
+        text: label,
+        callback_data: `switch_project:${p.id}`,
+      }]);
+    }
+
+    await ctx.reply("\u{1F4C2} <b>Switch Project:</b>", {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: buttons },
+    });
+  });
+
+  // Switch to a new project — checks for active claims before allowing switch
+  bot.callbackQuery(/^switch_project:/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const newProjectId = (ctx.callbackQuery?.data || "").substring("switch_project:".length);
+    if (!newProjectId) return;
+
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+
+    // Already on this project — nothing to do
+    if (newProjectId === currentProjectId) {
+      await ctx.editMessageText(
+        `\u{1F4C2} <b>Project:</b> ${escapeHtml(newProjectId)}\n\u{2705} Already active!`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Check if user has an active category claim in the CURRENT project
+    if (currentProjectId) {
+      const claimsState = await getCategoryClaims(env.PROJECTS, currentProjectId);
+      const userClaim = claimsState.claims.find((c) => c.telegramId === telegramId);
+
+      if (userClaim) {
+        // User has open work — show warning dialog
+        const safeCategory = escapeHtml(userClaim.displayName);
+        const safeCurrentProject = escapeHtml(currentProjectId);
+
+        const text =
+          `\u{26A0}\u{FE0F} <b>Open tasks in ${safeCurrentProject}</b>\n\n` +
+          `You have <b>${safeCategory}</b> claimed with ` +
+          `${userClaim.assignedIssues.length} assigned issue(s).\n\n` +
+          `What would you like to do?`;
+
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: "\u{1F4CB} Finish tasks", callback_data: "switch_finish" },
+              { text: "\u{23F8} Pause & Switch", callback_data: `switch_pause_and_go:${newProjectId}` },
+            ],
+          ],
+        };
+
+        await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+        return;
+      }
+    }
+
+    // No active claim — switch immediately
+    await setActiveProject(env.PROJECTS, telegramId, newProjectId);
+    await ctx.editMessageText(
+      `\u{1F4C2} <b>Project:</b> ${escapeHtml(newProjectId)}\n\u{2705} Switched!`,
+      { parse_mode: "HTML" }
+    );
+
+    // Re-render the home screen with the new project context
+    await renderHomeScreen(ctx, env, telegramId);
+  });
+
+  // "Finish tasks" — user chose to stay and finish current work
+  bot.callbackQuery("switch_finish", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    await ctx.editMessageText(
+      "\u{1F4CB} OK \u{2014} finish your current tasks first, then switch!",
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // "Pause & Switch" — pause current category, then switch to new project
+  bot.callbackQuery(/^switch_pause_and_go:/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    const firstName = ctx.from?.first_name || "Unknown";
+    if (!telegramId) return;
+
+    const newProjectId = (ctx.callbackQuery?.data || "").substring("switch_pause_and_go:".length);
+    if (!newProjectId) return;
+
+    const currentProjectId = await getActiveProject(env.PROJECTS, telegramId);
+    if (!currentProjectId) return;
+
+    const currentConfig = await getProject(env.PROJECTS, currentProjectId, env);
+    if (!currentConfig) return;
+
+    // --- Execute pause logic (mirrors handlePauseConfirm) ---
+
+    const claimsState = await getCategoryClaims(env.PROJECTS, currentProjectId);
+    const claimIndex = claimsState.claims.findIndex((c) => c.telegramId === telegramId);
+
+    if (claimIndex < 0) {
+      // Claim was already released — just switch
+      await setActiveProject(env.PROJECTS, telegramId, newProjectId);
+      await ctx.editMessageText(
+        `\u{1F4C2} <b>Project:</b> ${escapeHtml(newProjectId)}\n\u{2705} Switched!`,
+        { parse_mode: "HTML" }
+      );
+      await renderHomeScreen(ctx, env, telegramId);
+      return;
+    }
+
+    const claim = claimsState.claims[claimIndex];
+    const safeDisplayName = escapeHtml(claim.displayName);
+    const safeFirstName = escapeHtml(firstName);
+
+    // Count completed tasks
+    let completedCount = 0;
+    const totalCount = claim.assignedIssues.length;
+
+    if (currentConfig.githubToken && claim.assignedIssues.length > 0) {
+      let openCount = 0;
+      for (const issueNum of claim.assignedIssues) {
+        try {
+          const res = await githubRequest(
+            "GET",
+            `/repos/${currentConfig.githubRepo}/issues/${issueNum}`,
+            currentConfig.githubToken
+          );
+          if (res.ok) {
+            const issue = (await res.json()) as { state: string };
+            if (issue.state === "open") openCount++;
+          } else {
+            openCount++;
+          }
+        } catch {
+          openCount++;
+        }
+      }
+      completedCount = totalCount - openCount;
+    }
+
+    // 1. Unassign all open issues on GitHub
+    await unassignIssuesFromUser(currentConfig, claim.assignedIssues, claim.githubUsername);
+
+    // 2. Remove claim from KV
+    claimsState.claims.splice(claimIndex, 1);
+    await saveCategoryClaims(env.PROJECTS, currentProjectId, claimsState);
+
+    // 3. Store paused marker
+    const pausedEntry: PausedCategory = {
+      category: claim.category,
+      displayName: claim.displayName,
+      pausedBy: firstName,
+      completedTasks: completedCount,
+      totalTasks: totalCount,
+      pausedAt: new Date().toISOString(),
+    };
+    await addPausedCategory(env.PROJECTS, currentProjectId, pausedEntry);
+
+    // 4. Clear active task
+    await clearActiveTask(env.PROJECTS, telegramId, currentProjectId);
+
+    // 5. Stop category timer and log time (Issue #60)
+    const timerState = await stopTimer(env.PROJECTS, telegramId, currentProjectId);
+    if (timerState) {
+      const endedAt = new Date().toISOString();
+      const durationMinutes = Math.round(
+        (new Date(endedAt).getTime() - new Date(timerState.startedAt).getTime()) / 60000
+      );
+      await logTimeEntry(env.DB, {
+        userId: telegramId,
+        project: currentProjectId,
+        category: timerState.category,
+        startedAt: timerState.startedAt,
+        endedAt,
+        durationMinutes,
+        tasksCompleted: completedCount,
+      });
+    }
+
+    // 6. Notify team in group chat
+    await sendTelegram(
+      currentConfig.botToken,
+      currentConfig.chatId,
+      `\u{23F8} ${safeDisplayName} paused by ${safeFirstName} (${completedCount}/${totalCount} done) \u{2014} switching to ${escapeHtml(newProjectId)}`,
+      currentConfig.threadId
+    );
+
+    // 7. Notify subscribers
+    await notifySubscribers(
+      env,
+      currentConfig.botToken,
+      "tasks",
+      () =>
+        `\u{1F4CB} <b>${safeDisplayName}</b> is available again!\n` +
+        `Paused by ${safeFirstName} (${completedCount}/${totalCount} done).\n` +
+        `Branch is preserved \u{2014} use \u{1F4CB} Aufgabe nehmen to continue.`,
+      telegramId
+    );
+
+    // --- Switch to new project ---
+    await setActiveProject(env.PROJECTS, telegramId, newProjectId);
+
+    await ctx.editMessageText(
+      `\u{23F8} <b>${safeDisplayName}</b> paused (${completedCount}/${totalCount} done).\n` +
+      `\u{1F4C2} Switched to <b>${escapeHtml(newProjectId)}</b>!`,
+      { parse_mode: "HTML" }
+    );
+
+    // Re-render home screen for the new project
+    await renderHomeScreen(ctx, env, telegramId);
+  });
+
+  // -------------------------------------------------------------------
+  // Team Messaging — Reply callback (Issue #59)
+  // When a recipient taps [Reply], set a temporary flag so their next
+  // text message is forwarded back to the original sender.
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery(/^msg_reply:(.+)$/, async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch { /* query expired — safe to ignore */ }
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const threadKey = ctx.match![1];
+    const thread = await getMessageThread(env.PROJECTS, threadKey);
+    if (!thread) {
+      await ctx.reply(
+        "This conversation has expired (24h limit). Please start a new message.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Set a 5-minute flag so the next text message is treated as a reply
+    await env.PROJECTS.put(`msg_replying:${telegramId}`, threadKey, {
+      expirationTtl: 300,
+    });
+
+    const safeSenderName = escapeHtml(thread.senderName);
+    await ctx.reply(
+      `Type your reply to <b>${safeSenderName}</b>:`,
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // Onboarding wizard — "Continue to Tutorial" callback
+  // -------------------------------------------------------------------
+
+  bot.callbackQuery("onboard_continue", async (ctx) => {
+    try { await ctx.answerCallbackQuery(); } catch {}
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+    await setOnboardingState(env.PROJECTS, telegramId, "tutorial");
+
+    // Send the concise Quick Start tutorial
+    await sendOnboardingTutorial(ctx, lang);
+
+    // Mark onboarding as permanently complete
+    await markOnboarded(env.PROJECTS, telegramId);
+    await clearOnboardingState(env.PROJECTS, telegramId);
+
+    // Show team status so new member has context
+    try {
+      const { text: boardText, keyboard: boardKb } = await renderTeamBoard(env, telegramId);
+      if (boardText) {
+        await ctx.reply(t(lang, "onboard.team_status") + "\n\n" + boardText, {
+          parse_mode: "HTML",
+          reply_markup: boardKb,
+        });
+      }
+    } catch {
+      // Non-critical — skip team board if it fails
+    }
+
+    // Project header with inline [Switch] button
+    if (telegramId) {
+      const active = await resolveActiveProject(env, telegramId);
+      if (active) {
+        const projectName = escapeHtml(active.projectId);
+        await ctx.reply(
+          `\u{1F4C2} <b>Project:</b> ${projectName}`,
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[{ text: "\u{1F504} Switch", callback_data: "home_switch_project" }]],
+            },
+          }
+        );
+      }
+    }
+
+    // Show the normal reply keyboard so the user can start working
+    const keyboard = buildReplyKeyboard(lang);
+    await ctx.reply(t(lang, "onboard.quick_actions"), {
+      reply_markup: keyboard,
+      parse_mode: "HTML",
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Onboarding wizard — GitHub username input handler
+  // Must be AFTER all bot.command() and bot.hears() handlers so it only
+  // catches free-text messages from users in a wizard (new idea or onboarding).
+  // -------------------------------------------------------------------
+
+  bot.on("message:text", async (ctx) => {
+    if (ctx.chat?.type !== "private") return;
+    const telegramId = ctx.from?.id;
+    if (!telegramId) return;
+
+    // -----------------------------------------------------------------
+    // Team Messaging — reply capture (Issue #59)
+    // If the user previously tapped [Reply], their next message is
+    // forwarded back to the original sender.
+    // -----------------------------------------------------------------
+    const replyingTo = await env.PROJECTS.get(`msg_replying:${telegramId}`);
+    if (replyingTo) {
+      // Clear the replying flag immediately so it doesn't trigger again
+      await env.PROJECTS.delete(`msg_replying:${telegramId}`);
+
+      const thread = await getMessageThread(env.PROJECTS, replyingTo);
+      if (!thread) {
+        await ctx.reply(
+          "This conversation has expired (24h limit). Please start a new message.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Resolve sender's project for the bot token
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.reply(
+          "No project configured. Use /start to set up first.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const replyText = ctx.message.text.trim();
+      const safeReplyText = escapeHtml(replyText);
+      const safeRecipientName = escapeHtml(thread.recipientName);
+      const safeSenderName = escapeHtml(thread.senderName);
+
+      // Build the reply message for the original sender
+      let replyMsg =
+        `<b>Reply from ${safeRecipientName}:</b>\n\n` +
+        `${safeReplyText}`;
+
+      if (thread.issueNumber) {
+        replyMsg += `\n\n<i>Re: #${thread.issueNumber}</i>`;
+      }
+
+      // Look up the original sender's DM chat_id
+      const senderPrefs = await getUserPreferences(env.PROJECTS, thread.senderTelegramId);
+      if (!senderPrefs.dm_chat_id) {
+        await ctx.reply(
+          `Could not deliver reply — ${safeSenderName} hasn't started a DM with the bot yet.`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const status = await sendDM(
+        active.projectConfig.botToken,
+        senderPrefs.dm_chat_id,
+        replyMsg
+      );
+
+      if (status === "sent") {
+        await ctx.reply(
+          `Reply sent to <b>${safeSenderName}</b>.`,
+          { parse_mode: "HTML" }
+        );
+      } else if (status === "blocked") {
+        senderPrefs.dm_chat_id = null;
+        await saveUserPreferences(env.PROJECTS, thread.senderTelegramId, senderPrefs);
+        await ctx.reply(
+          `Could not deliver reply — ${safeSenderName} has blocked the bot.`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.reply(
+          "Failed to send reply. Please try again later.",
+          { parse_mode: "HTML" }
+        );
+      }
+      return;
+    }
+
+    // -----------------------------------------------------------------
+    // Learning Bridge — @Claude detection (Issue #64)
+    // If the message starts with @Claude, extract the learning and save
+    // to D1 with inline scope buttons.
+    // -----------------------------------------------------------------
+    const claudePrefix = /^@claude\b/i;
+    if (claudePrefix.test(ctx.message.text)) {
+      const learningContent = ctx.message.text.replace(claudePrefix, "").trim();
+
+      if (learningContent.length > 500) {
+        await ctx.reply(
+          "\u{274C} Learning is too long (max 500 characters). Please shorten it.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      if (!learningContent) {
+        await ctx.reply(
+          "\u{1F4DD} <b>Learning Bridge</b>\n\n" +
+          "Send a message starting with <code>@Claude</code> followed by what you learned.\n\n" +
+          "Example: <code>@Claude Always validate user input on both client and server</code>",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Resolve active project for context
+      const active = await resolveActiveProject(env, telegramId);
+      const projectId = active ? active.projectId : "unknown";
+
+      // Save learning with default "private" scope — user picks via buttons
+      const learningId = await saveLearning(
+        env.DB,
+        String(telegramId),
+        projectId,
+        learningContent
+      );
+
+      const scopeKb = new InlineKeyboard()
+        .text("\u{1F465} For everyone", `learning_scope:${learningId}:team`)
+        .text("\u{1F512} Only for me", `learning_scope:${learningId}:private`);
+
+      await ctx.reply(
+        "\u{1F4DD} <b>Learning captured!</b>\n\n" +
+        `<i>${escapeHtml(learningContent)}</i>\n\n` +
+        "Who should see this learning?",
+        { parse_mode: "HTML", reply_markup: scopeKb }
+      );
+      return;
+    }
+
+    // -----------------------------------------------------------------
+    // Team Messaging — @Name mentions (Issue #59)
+    // Detect @Name in private messages and forward to the mentioned
+    // team member as a DM.
+    // -----------------------------------------------------------------
+    const messageText = ctx.message.text;
+    const mentions = parseAtMentions(messageText);
+    if (mentions.length > 0) {
+      const members = await getTeamMembers(env.PROJECTS);
+      const senderName = ctx.from?.first_name || "Unknown";
+
+      const uniqueMentions = [...new Set(mentions)];
+
+      // Resolve project once for bot token and GitHub access
+      const active = await resolveActiveProject(env, telegramId);
+      if (!active) {
+        await ctx.reply(
+          "No project configured. Use /start to set up first.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Check for issue references (#N) and fetch titles once
+      const issueRefs = parseIssueReferences(messageText);
+      let issueContext = "";
+      let firstIssueNumber: number | undefined;
+      if (issueRefs.length > 0 && active.projectConfig.githubToken) {
+        firstIssueNumber = issueRefs[0];
+        try {
+          const issueRes = await githubRequest(
+            "GET",
+            `/repos/${active.projectConfig.githubRepo}/issues/${firstIssueNumber}`,
+            active.projectConfig.githubToken
+          );
+          if (issueRes.ok) {
+            const issueData = (await issueRes.json()) as {
+              title: string;
+              html_url: string;
+            };
+            issueContext =
+              `\n\n<b>Issue #${firstIssueNumber}:</b> ` +
+              `<a href="${issueData.html_url}">${escapeHtml(issueData.title)}</a>`;
+          }
+        } catch {
+          // GitHub API error — send message without issue context
+        }
+      }
+
+      for (const mentionedName of uniqueMentions) {
+        // Case-insensitive match against the member's name field
+        const recipient = members.find(
+          (m) => m.name.toLowerCase() === mentionedName.toLowerCase()
+        );
+
+        if (!recipient) {
+          const memberNames = members.map((m) => m.name).join(", ");
+          await ctx.reply(
+            `User <b>@${escapeHtml(mentionedName)}</b> not found.\n\n` +
+            `Registered members: ${escapeHtml(memberNames || "none")}`,
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Don't allow messaging yourself
+        if (recipient.telegram_id === telegramId) {
+          await ctx.reply(
+            "You can't send a message to yourself.",
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Respect Do Not Disturb mode
+        const recipientDnd = await isUserDND(env.PROJECTS, recipient.telegram_id);
+        if (recipientDnd) {
+          await ctx.reply(
+            `<b>${escapeHtml(recipient.name)}</b> is in Do Not Disturb mode right now.`,
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Check if recipient has a DM chat_id
+        const recipientPrefs = await getUserPreferences(env.PROJECTS, recipient.telegram_id);
+        if (!recipientPrefs.dm_chat_id) {
+          await ctx.reply(
+            `<b>${escapeHtml(recipient.name)}</b> hasn't started a DM with the bot yet. ` +
+            `They need to message the bot first.`,
+            { parse_mode: "HTML" }
+          );
+          continue;
+        }
+
+        // Build the forwarded message
+        const safeMessage = escapeHtml(messageText);
+        const safeSender = escapeHtml(senderName);
+        const safeRecipient = escapeHtml(recipient.name);
+
+        // Create a unique thread key for this conversation
+        const threadKey = `thread:${telegramId}:${recipient.telegram_id}:${Date.now()}`;
+
+        // Store the thread in KV with 24h TTL
+        await setMessageThread(env.PROJECTS, threadKey, {
+          senderTelegramId: telegramId,
+          senderName: senderName,
+          recipientTelegramId: recipient.telegram_id,
+          recipientName: recipient.name,
+          originalMessage: messageText,
+          issueNumber: firstIssueNumber,
+          createdAt: new Date().toISOString(),
+        });
+
+        const forwardedMsg =
+          `<b>Message from ${safeSender}:</b>\n\n` +
+          `${safeMessage}` +
+          `${issueContext}`;
+
+        const replyMarkup = {
+          inline_keyboard: [
+            [{ text: "Reply", callback_data: `msg_reply:${threadKey}` }],
+          ],
+        };
+
+        const status = await sendDM(
+          active.projectConfig.botToken,
+          recipientPrefs.dm_chat_id,
+          forwardedMsg,
+          replyMarkup
+        );
+
+        if (status === "sent") {
+          await ctx.reply(
+            `Message sent to <b>${safeRecipient}</b>.`,
+            { parse_mode: "HTML" }
+          );
+        } else if (status === "blocked") {
+          recipientPrefs.dm_chat_id = null;
+          await saveUserPreferences(env.PROJECTS, recipient.telegram_id, recipientPrefs);
+          await ctx.reply(
+            `Could not deliver message — <b>${safeRecipient}</b> has blocked the bot.`,
+            { parse_mode: "HTML" }
+          );
+        } else {
+          await ctx.reply(
+            `Failed to send message to <b>${safeRecipient}</b>. Please try again later.`,
+            { parse_mode: "HTML" }
+          );
+        }
+      }
+      return;
+    }
+
+    // "Neue Idee" wizard — description input (checked BEFORE title & onboarding)
+    const ideaState = await getNewIdeaState(env.PROJECTS, telegramId);
+
+    if (ideaState?.step === "awaiting_description") {
+      const description = ctx.message.text.trim();
+
+      if (description.length > 2000) {
+        await ctx.reply(
+          "\u{274C} Die Beschreibung ist zu lang (max. 2000 Zeichen). Bitte k\u{00FC}rzen:",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Advance to category step with the description captured
+      await advanceToCategoryStep(ctx, env, telegramId, ideaState.title || "", description);
+      return;
+    }
+
+    if (ideaState?.step === "awaiting_title") {
+      const title = ctx.message.text.trim();
+
+      if (!title || title.length > 256) {
+        await ctx.reply(
+          "\u{274C} Bitte gib einen Titel ein (max. 256 Zeichen).",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // Advance to description step
+      await setNewIdeaState(env.PROJECTS, telegramId, {
+        step: "awaiting_description",
+        title,
+      });
+
+      const skipKb = new InlineKeyboard().text(
+        "\u{23ED}\u{FE0F} Skip",
+        "newidea_desc_skip"
+      );
+      await ctx.reply(
+        `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+          `\u{1F4DD} ${escapeHtml(title)}\n\n` +
+          "\u{1F4DD} Beschreibe kurz das Problem oder die Idee:\n\n" +
+          "<i>(Oder dr\u{00FC}cke Skip f\u{00FC}r ein Issue ohne Beschreibung)</i>",
+        { parse_mode: "HTML", reply_markup: skipKb }
+      );
+      return;
+    }
+
+    const state = await getOnboardingState(env.PROJECTS, telegramId);
+    if (state !== "awaiting_github") return;
+
+    const username = ctx.message.text.trim().replace(/^@/, "");
+
+    // Basic username validation before hitting the API
+    if (!username || username.includes(" ") || username.length > 39) {
+      await ctx.reply(
+        "\u{274C} That doesn\u2019t look like a valid GitHub username. " +
+          "Please send just your username (e.g., <code>octocat</code>).",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Verify the GitHub username exists via the public API
+    const token = project.githubToken || env.GITHUB_API_TOKEN || "";
+    const ghRes = await githubRequest(
+      "GET",
+      `/users/${encodeURIComponent(username)}`,
+      token
+    );
+
+    if (!ghRes.ok) {
+      await ctx.reply(
+        `\u{274C} GitHub user <code>${escapeHtml(username)}</code> not found.\n\n` +
+          "Please check the spelling and try again:",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Register the user in the central team registry
+    const telegramUsername = ctx.from?.username || "";
+    const firstName = ctx.from?.first_name || "Unknown";
+
+    // Auto-promote first team member to admin
+    const existingMembers = await getTeamMembers(env.PROJECTS);
+    const isFirstMember = existingMembers.length === 0;
+
+    await upsertTeamMember(env.PROJECTS, {
+      telegram_id: telegramId,
+      telegram_username: telegramUsername || firstName,
+      github: username,
+      name: firstName,
+    });
+
+    if (isFirstMember) {
+      await setUserRole(env.PROJECTS, telegramId, "admin");
+    }
+
+    const members = await getTeamMembers(env.PROJECTS);
+    const color = getUserColor(members, telegramId);
+    const lang = await getUserLanguage(env.PROJECTS, telegramId);
+
+    const linkedParts = [
+      `${color} ` + t(lang, "onboard.github_linked", { username: escapeHtml(username), firstName: escapeHtml(firstName) }),
+    ];
+    if (isFirstMember) {
+      linkedParts.push("", t(lang, "roles.first_admin"));
+    }
+    linkedParts.push("", t(lang, "onboard.step2_heading"));
+    const linkedText = linkedParts.join("\n");
+    await ctx.reply(linkedText, { parse_mode: "HTML" });
+
+    // Advance to settings step and show the settings panel
+    await setOnboardingState(env.PROJECTS, telegramId, "settings");
+    const prefs = await getUserPreferences(env.PROJECTS, telegramId);
+    const { text, keyboard } = buildSettingsMessage(prefs);
+
+    // Append a "Continue" button below the existing settings keyboard
+    const settingsKb = {
+      inline_keyboard: [
+        ...keyboard.inline_keyboard,
+        [{ text: t(lang, "onboard.continue_tutorial"), callback_data: "onboard_continue" }],
+      ],
+    };
+
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: settingsKb });
   });
 
   return bot;
@@ -2508,6 +8552,209 @@ async function handleWerCommand(
     `Aktive Sessions:\n\n${lines.join("\n")}`,
     project.threadId
   );
+}
+
+/**
+ * Create a GitHub issue from the "Neue Idee" guided wizard.
+ * Returns the created issue's number and URL, or null on failure.
+ */
+async function createIdeaIssue(
+  project: ProjectConfig,
+  title: string,
+  description: string,
+  category: string | null,
+  priority: string
+): Promise<{ number: number; html_url: string } | null> {
+  if (!project.githubToken) return null;
+
+  const labels: string[] = [priority];
+  if (category) labels.push(category);
+
+  const response = await githubRequest(
+    "POST",
+    `/repos/${project.githubRepo}/issues`,
+    project.githubToken,
+    { title, body: description || undefined, labels }
+  );
+
+  if (!response.ok) return null;
+
+  const issue = (await response.json()) as {
+    number: number;
+    html_url: string;
+  };
+
+  return { number: issue.number, html_url: issue.html_url };
+}
+
+/**
+ * Advance the "Neue Idee" wizard from description to category step.
+ * Shared by both the text handler and the "skip description" callback.
+ */
+async function advanceToCategoryStep(
+  ctx: Context,
+  env: Env,
+  telegramId: number,
+  title: string,
+  description: string
+): Promise<void> {
+  // Resolve project to fetch area labels
+  const active = await resolveActiveProject(env, telegramId);
+  if (!active) {
+    await ctx.reply(
+      "\u{26A0}\u{FE0F} No project configured. Use /start to set up first.",
+      { parse_mode: "HTML" }
+    );
+    await clearNewIdeaState(env.PROJECTS, telegramId);
+    return;
+  }
+
+  const { projectConfig: activeProject } = active;
+
+  // Fetch available area: labels from the GitHub repo
+  const areaLabels = await fetchAreaLabels(activeProject);
+
+  if (areaLabels.length === 0) {
+    // No categories available — skip directly to priority selection
+    await setNewIdeaState(env.PROJECTS, telegramId, {
+      step: "awaiting_priority",
+      title,
+      description,
+    });
+
+    const priorityKb = buildIdeaPriorityKeyboard();
+    await ctx.reply(
+      `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+        `\u{1F4DD} ${escapeHtml(title)}\n` +
+        `\u{1F4C2} <i>no categories available</i>\n\n` +
+        "W\u{00E4}hle die Priorit\u{00E4}t:",
+      { parse_mode: "HTML", reply_markup: priorityKb }
+    );
+    return;
+  }
+
+  // Save title + description and advance to category step
+  await setNewIdeaState(env.PROJECTS, telegramId, {
+    step: "awaiting_category",
+    title,
+    description,
+  });
+
+  const categoryKb = buildIdeaCategoryKeyboard(areaLabels);
+  await ctx.reply(
+    `\u{1F4A1} <b>Neue Idee</b>\n\n` +
+      `\u{1F4DD} ${escapeHtml(title)}\n\n` +
+      "W\u{00E4}hle eine Kategorie:",
+    { parse_mode: "HTML", reply_markup: categoryKb }
+  );
+}
+
+/**
+ * Build the category selection inline keyboard for the "Neue Idee" wizard.
+ */
+function buildIdeaCategoryKeyboard(areaLabels: string[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  for (const label of areaLabels) {
+    const displayName = label.replace("area:", "");
+    kb.text(`\u{1F4C2} ${displayName}`, `newidea_cat:${label}`).row();
+  }
+
+  kb.text("\u{23ED}\u{FE0F} Skip (no category)", "newidea_cat_skip");
+  return kb;
+}
+
+/**
+ * Build the priority selection inline keyboard for the "Neue Idee" wizard.
+ */
+function buildIdeaPriorityKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  kb.text(`${PRIORITY_EMOJIS["priority:high"]} High`, "newidea_pri:priority:high");
+  kb.text(`${PRIORITY_EMOJIS["priority:medium"]} Medium`, "newidea_pri:priority:medium");
+  kb.text(`${PRIORITY_EMOJIS["priority:low"]} Low`, "newidea_pri:priority:low").row();
+  kb.text("\u{23ED}\u{FE0F} Skip (defaults to Medium)", "newidea_pri_skip");
+
+  return kb;
+}
+
+/**
+ * Final step of the "Neue Idee" wizard — create the issue and send confirmation.
+ */
+async function finalizeNewIdea(
+  ctx: Context,
+  env: Env,
+  telegramId: number,
+  state: NewIdeaState,
+  priority: string
+): Promise<void> {
+  const active = await resolveActiveProject(env, telegramId);
+  if (!active) {
+    await ctx.reply(
+      "\u{26A0}\u{FE0F} No project configured. Use /start to set up first.",
+      { parse_mode: "HTML" }
+    );
+    await clearNewIdeaState(env.PROJECTS, telegramId);
+    return;
+  }
+
+  const { projectConfig: project } = active;
+
+  if (!project.githubToken) {
+    await ctx.reply(
+      "\u{26A0}\u{FE0F} No GitHub token configured \u{2014} cannot create issues.",
+      { parse_mode: "HTML" }
+    );
+    await clearNewIdeaState(env.PROJECTS, telegramId);
+    return;
+  }
+
+  const title = state.title || "Untitled idea";
+  const description = state.description || "";
+  const category = state.category || null;
+
+  const issue = await createIdeaIssue(project, title, description, category, priority);
+
+  await clearNewIdeaState(env.PROJECTS, telegramId);
+
+  if (!issue) {
+    await ctx.reply(
+      "\u{274C} <b>Failed to create issue.</b>\n\nGitHub API returned an error. Please try again later.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // Build the confirmation message
+  const priorityEmoji = PRIORITY_EMOJIS[priority] || "\u{1F7E1}";
+  const priorityName = priority.replace("priority:", "");
+  const categoryDisplay = category
+    ? `\u{1F4C2} ${escapeHtml(category.replace("area:", ""))}`
+    : "\u{2014} <i>none</i>";
+
+  // Show a preview of the description (first 100 chars) if one was provided
+  const descriptionPreview = description
+    ? `\u{1F4C4} ${escapeHtml(description.length > 100 ? description.slice(0, 100) + "\u{2026}" : description)}\n`
+    : "";
+
+  let confirmationText =
+    `\u{2705} <b>Issue #${issue.number} created!</b>\n\n` +
+    `\u{1F4DD} <b>${escapeHtml(title)}</b>\n` +
+    descriptionPreview +
+    `${priorityEmoji} Priority: ${escapeHtml(priorityName)}\n` +
+    `Category: ${categoryDisplay}\n\n` +
+    `\u{1F517} <a href="${escapeHtml(issue.html_url)}">${escapeHtml(issue.html_url)}</a>`;
+
+  // Contextual tip if no category was chosen
+  if (!category) {
+    confirmationText +=
+      "\n\n\u{1F4A1} <i>Tip: Issues without a category may be overlooked in the category picker.</i>";
+  }
+
+  await ctx.reply(confirmationText, {
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
+  });
 }
 
 /**
@@ -2760,7 +9007,15 @@ async function handleRegisterMember(
     name: payload.name || payload.telegram_username || "unknown",
   };
 
+  // Auto-promote first team member to admin
+  const existingMembers = await getTeamMembers(env.PROJECTS);
+  const isFirstMember = existingMembers.length === 0;
+
   await upsertTeamMember(env.PROJECTS, member);
+
+  if (isFirstMember) {
+    await setUserRole(env.PROJECTS, member.telegram_id, "admin");
+  }
 
   return new Response(
     JSON.stringify({ ok: true, member }),
@@ -2814,31 +9069,63 @@ async function handleGitHubIssues(
       eventType = "issues.opened";
       break;
 
-    case "closed":
+    case "closed": {
       message = `\u{2705} Issue #${issue.number} closed by @${sender.login}`;
       eventType = "issues.closed";
+
+      // If a blocker issue was closed, notify all team members that work can resume
+      const closedIssueLabels = (issue.labels || []).map((l) => l.name);
+      if (closedIssueLabels.includes("priority:blocker")) {
+        const blockerMembers = await getTeamMembers(env.PROJECTS);
+        for (const bMember of blockerMembers) {
+          // Skip the person who closed the blocker
+          if (bMember.github === sender.login) continue;
+          const bPrefs = await getUserPreferences(env.PROJECTS, bMember.telegram_id);
+          if (!bPrefs.dm_chat_id) continue;
+          const bDnd = await isUserDND(env.PROJECTS, bMember.telegram_id);
+          if (bDnd) continue;
+
+          const dmStatus = await sendDM(
+            project.botToken,
+            bPrefs.dm_chat_id,
+            `\u{1F7E2} <b>Blocker resolved!</b>\n\n` +
+              `Issue #${issue.number}: "${escapeHtml(issue.title)}" was closed by @${escapeHtml(sender.login)}.\n\n` +
+              "Category claims are available again. Use /start to pick a task!"
+          );
+          if (dmStatus === "blocked") {
+            bPrefs.dm_chat_id = null;
+            await saveUserPreferences(env.PROJECTS, bMember.telegram_id, bPrefs);
+          }
+        }
+      }
       break;
+    }
 
     case "assigned": {
-      // Batching: bulk assigning many issues at once gets collapsed into one message
+      // Send assignment DM directly to the assignee (tasks = always on)
       if (issue.assignee) {
-        const detail = `#${issue.number} "${issue.title}" \u{2192} @${issue.assignee.login}`;
-        const batch = await checkAndBatch(
-          env.PROJECTS,
-          projectId,
-          "assigned",
-          sender.login,
-          detail
-        );
+        const assignMembers = await getTeamMembers(env.PROJECTS);
+        const assignee = assignMembers.find((m) => m.github === issue.assignee!.login);
 
-        if (batch.shouldSend && batch.batchMessage) {
-          // Buffer flushed — send the batch summary
-          message = `\u{1F464} ${batch.batchMessage}`;
-        } else if (batch.shouldSend) {
-          // First event — send normally (no batch yet)
-          message = `\u{1F464} Issue #${issue.number} assigned to @${issue.assignee.login}`;
+        if (assignee) {
+          const assigneeDnd = await isUserDND(env.PROJECTS, assignee.telegram_id);
+          if (!assigneeDnd) {
+            const assigneePrefs = await getUserPreferences(env.PROJECTS, assignee.telegram_id);
+            if (assigneePrefs.dm_chat_id) {
+              const dmStatus = await sendDM(
+                project.botToken,
+                assigneePrefs.dm_chat_id,
+                `\u{1F4CC} Issue #${issue.number} assigned to you: "${escapeHtml(issue.title)}"\n\u{1F517} ${issue.html_url}`
+              );
+              if (dmStatus === "blocked") {
+                assigneePrefs.dm_chat_id = null;
+                await saveUserPreferences(env.PROJECTS, assignee.telegram_id, assigneePrefs);
+              }
+            }
+          }
         }
-        // else: shouldSend is false — event is buffered, don't send
+
+        // No group message for assignments
         eventType = "issues.assigned";
       }
       break;
@@ -2948,8 +9235,8 @@ async function handleGitHubPR(
         break;
       }
       message =
-        `\u{1F500} New PR #${pr.number}: "${pr.title}" by @${sender.login}\n` +
-        `\u{1F4CA} ${pr.changed_files} files | +${pr.additions}/-${pr.deletions} | ${pr.head.ref} \u{2192} ${pr.base.ref}\n` +
+        `\u{1F500} New PR #${pr.number}: "${escapeHtml(pr.title)}" by @${escapeHtml(sender.login)}\n` +
+        `\u{1F4CA} ${pr.changed_files} files | +${pr.additions}/-${pr.deletions} | ${escapeHtml(pr.head.ref)} \u{2192} ${escapeHtml(pr.base.ref)}\n` +
         `\u{1F517} ${pr.html_url}`;
       eventType = "pr.opened";
       break;
@@ -2964,7 +9251,7 @@ async function handleGitHubPR(
     case "closed":
       if (pr.merged) {
         message =
-          `\u{1F389} PR #${pr.number} merged! "${pr.title}" \u{2192} ${pr.base.ref}\n` +
+          `\u{1F389} PR #${pr.number} merged! "${escapeHtml(pr.title)}" \u{2192} ${escapeHtml(pr.base.ref)}\n` +
           `\u{1F517} ${pr.html_url}`;
         eventType = "pr.merged";
       } else {
@@ -2989,33 +9276,32 @@ async function handleGitHubPR(
       return new Response("OK");
     }
 
-    // Contextual buttons for PR events
-    const needsReview = action === "opened" || action === "ready_for_review";
-    const prButtons: Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined =
-      needsReview
-        ? [[
-            { text: "\u{1F44B} I'll review this", callback_data: `claim_review:${pr.number}` },
-            { text: "\u{1F517} Open on GitHub", url: pr.html_url },
-          ]]
-        : action === "closed"
-          ? [[{ text: "\u{1F517} View on GitHub", url: pr.html_url }]]
-          : undefined;
+    // Send PR notifications via DM to subscribers (not to group)
+    // Look up the sender's telegram_id to exclude them
+    const prMembers = await getTeamMembers(env.PROJECTS);
+    const senderMember = prMembers.find((m) => m.github === sender.login);
+    const finalMessage = message; // capture for closure
 
-    const isThreadStarter = needsReview;
-    const existingThread = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
+    await notifySubscribers(
+      env,
+      project.botToken,
+      "pr_reviews",
+      () => finalMessage,
+      senderMember?.telegram_id
+    );
+  }
 
-    if (isThreadStarter && !existingThread) {
-      const sentId = await sendTelegramThreaded(
-        project.botToken, project.chatId, message, project.threadId, null, prButtons
-      );
-      if (sentId) {
-        await saveThreadMessageId(env.PROJECTS, projectId, "pr", pr.number, sentId);
-      }
-    } else {
-      await sendTelegramThreaded(
-        project.botToken, project.chatId, message, project.threadId, existingThread
-      );
-    }
+  // Always-on pull reminder when a PR is merged — not preference-gated
+  // because stale local branches cause real merge conflicts
+  if (pr.merged && action === "closed") {
+    await sendPullReminder(
+      env,
+      project.botToken,
+      sender.login,
+      pr.title,
+      pr.number,
+      pr.commits
+    );
   }
 
   // Log ALL events to D1 for reports (even filtered/draft ones)
@@ -3028,7 +9314,7 @@ async function handleGitHubPR(
 
 /**
  * Handle GitHub "pull_request_review" events.
- * Sends Telegram notifications for approved and changes_requested reviews.
+ * Sends DM to PR author for approved/changes_requested reviews.
  * Plain "commented" reviews are ignored to reduce noise.
  */
 async function handleGitHubReview(
@@ -3051,12 +9337,12 @@ async function handleGitHubReview(
   if (action === "submitted") {
     switch (review.state) {
       case "approved":
-        message = `\u{2705} @${review.user.login} approved PR #${pr.number}`;
+        message = `\u{2705} @${escapeHtml(review.user.login)} approved PR #${pr.number}`;
         eventType = "review.approved";
         break;
 
       case "changes_requested":
-        message = `\u{274C} @${review.user.login} requested changes on PR #${pr.number}`;
+        message = `\u{274C} @${escapeHtml(review.user.login)} requested changes on PR #${pr.number}`;
         eventType = "review.changes_requested";
         break;
 
@@ -3072,15 +9358,23 @@ async function handleGitHubReview(
   }
 
   if (message) {
-    // Reviews belong to PRs — reply to the PR's existing thread
-    const replyTo = await getThreadMessageId(env.PROJECTS, projectId, "pr", pr.number);
-    await sendTelegramThreaded(
-      project.botToken,
-      project.chatId,
-      message,
-      project.threadId,
-      replyTo
-    );
+    // Send review notification as DM to the PR author (always on — task-relevant)
+    const reviewMembers = await getTeamMembers(env.PROJECTS);
+    const prAuthor = reviewMembers.find((m) => m.github === pr.user.login);
+
+    if (prAuthor) {
+      const dnd = await isUserDND(env.PROJECTS, prAuthor.telegram_id);
+      if (!dnd) {
+        const authorPrefs = await getUserPreferences(env.PROJECTS, prAuthor.telegram_id);
+        if (authorPrefs.dm_chat_id) {
+          const dmStatus = await sendDM(project.botToken, authorPrefs.dm_chat_id, message);
+          if (dmStatus === "blocked") {
+            authorPrefs.dm_chat_id = null;
+            await saveUserPreferences(env.PROJECTS, prAuthor.telegram_id, authorPrefs);
+          }
+        }
+      }
+    }
   }
 
   // Log ALL review events to D1 for reports
@@ -3117,9 +9411,13 @@ async function handleGitHubPush(
   const eventType = isMainBranch ? "push.main" : "push.branch";
 
   if (isMainBranch && commits.length > 0) {
-    const message =
-      `\u{1F680} ${commits.length} new commit${commits.length === 1 ? "" : "s"} on ${branch} by @${pusher.name}`;
-    await sendTelegram(project.botToken, project.chatId, message, project.threadId);
+    // Send commit notifications via DM to subscribers (not to group)
+    await notifySubscribers(
+      env,
+      project.botToken,
+      "commits",
+      () => `\u{1F680} ${commits.length} new commit${commits.length === 1 ? "" : "s"} on ${escapeHtml(branch)} by @${escapeHtml(pusher.name)}`
+    );
   }
 
   // Log ALL push events to D1 (even non-main branches) for reports
@@ -3164,13 +9462,15 @@ async function handleGitHubPush(
 
 /**
  * Handle GitHub "workflow_run" events.
- * Only notifies on failures — successful CI runs are silent to reduce noise.
+ * Stores CI status in KV so "Meine Aufgaben" can show a CI badge,
+ * notifies the group chat on failures, and DMs the branch owner
+ * with a re-run button when CI fails.
  */
 async function handleGitHubWorkflow(
   rawBody: string,
   project: ProjectConfig,
   env: Env,
-  _projectId: string
+  projectId: string
 ): Promise<Response> {
   let payload: GitHubWorkflowPayload;
   try {
@@ -3184,14 +9484,35 @@ async function handleGitHubWorkflow(
   let eventType: string | null = null;
 
   if (action === "completed") {
-    if (run.conclusion === "failure") {
+    const conclusion = run.conclusion as CIStatus["conclusion"];
+
+    // Store CI status in KV for every associated PR
+    const prNumbers = run.pull_requests?.map((pr) => pr.number) || [];
+    const ciStatus: CIStatus = {
+      conclusion,
+      workflow: run.name,
+      updatedAt: new Date().toISOString(),
+      runId: run.id,
+    };
+    for (const prNum of prNumbers) {
+      await setCIStatus(env.PROJECTS, projectId, prNum, ciStatus);
+    }
+
+    if (conclusion === "failure") {
       message =
         `\u{274C} CI failed: ${run.name} on ${run.head_branch}\n` +
         `\u{1F517} ${run.html_url}`;
       eventType = "ci.failure";
+
+      // DM the branch owner with failure details and a re-run button
+      try {
+        await notifyCIFailure(env, project, projectId, run);
+      } catch {
+        // Best-effort — don't break the webhook response
+      }
     } else {
-      // Success, cancelled, skipped, etc. — log but don't notify
-      eventType = `ci.${run.conclusion}`;
+      // Success, cancelled, skipped, etc. — log but don't notify group
+      eventType = `ci.${conclusion}`;
     }
   }
 
@@ -3208,6 +9529,62 @@ async function handleGitHubWorkflow(
   }
 
   return new Response("OK");
+}
+
+/**
+ * Send a DM to the branch owner when CI fails.
+ * Matches the branch name to a category claim to find the responsible
+ * team member. Includes a "Re-run" button and a link to GitHub.
+ */
+async function notifyCIFailure(
+  env: Env,
+  project: ProjectConfig,
+  projectId: string,
+  run: GitHubWorkflowPayload["workflow_run"]
+): Promise<void> {
+  const branch = run.head_branch;
+  const members = await getTeamMembers(env.PROJECTS);
+  const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+
+  // Match branch name to a category claim (e.g. feature/auth → area:auth)
+  const claim = claimsState.claims.find((c) => {
+    const slug = c.category.replace("area:", "").toLowerCase().replace(/\s+/g, "-");
+    return branch === `feature/${slug}`;
+  });
+
+  if (!claim) return;
+
+  const member = members.find((m) => m.telegram_id === claim.telegramId);
+  if (!member) return;
+
+  const prefs = await getUserPreferences(env.PROJECTS, claim.telegramId);
+  if (!prefs.dm_chat_id) return;
+
+  // Respect DND setting
+  if (await isUserDND(env.PROJECTS, claim.telegramId)) return;
+
+  const lang = await getUserLanguage(env.PROJECTS, claim.telegramId);
+
+  const rerunKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+    inline_keyboard: [
+      [
+        { text: t(lang, "ci.rerun"), callback_data: `ci_rerun:${projectId}:${run.id}` },
+        { text: "\u{1F517} GitHub", url: run.html_url },
+      ],
+    ],
+  };
+
+  const dmText = t(lang, "ci.failure_dm", {
+    workflow: run.name,
+    branch,
+    url: run.html_url,
+  });
+
+  const status = await sendDM(project.botToken, prefs.dm_chat_id, dmText, rerunKb);
+  if (status === "blocked") {
+    prefs.dm_chat_id = null;
+    await saveUserPreferences(env.PROJECTS, claim.telegramId, prefs);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3305,6 +9682,7 @@ async function handleSession(
   if (update.type === "start") {
     // Preserve original "since" time if user is already active (context compression re-fires start)
     const existingStart = sessions.find((s) => s.user === update.user)?.since;
+    const isNewSession = !existingStart;
     const filtered = sessions.filter((s) => s.user !== update.user);
     filtered.push({
       user: update.user,
@@ -3314,6 +9692,38 @@ async function handleSession(
     await setActiveSessions(env.PROJECTS, projectId, filtered);
     // Log session start to D1 for work hours tracking
     await logSessionStart(env.DB, update.user, projectId);
+
+    // Notify session subscribers via DM (only for genuinely new sessions)
+    if (isNewSession) {
+      await notifySubscribers(
+        env,
+        project.botToken,
+        "sessions",
+        () => `\u{1F7E2} ${escapeHtml(update.user)} is now online (${escapeHtml(projectId)})`
+      );
+
+      // Send private morning DM on session start (deduped — only once per 12h)
+      try {
+        const allMembers = await getTeamMembers(env.PROJECTS);
+        const member = allMembers.find(
+          (m) => m.github === update.user || m.name === update.user
+        );
+        if (member) {
+          const dedupKey = `morning_dm:${member.telegram_id}`;
+          const alreadySent = await env.PROJECTS.get(dedupKey);
+          if (!alreadySent) {
+            const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+            if (prefs.dm_chat_id) {
+              const projects = await getProjectList(env);
+              await sendPrivateMorningDM(env, member, projects, allMembers);
+              await env.PROJECTS.put(dedupKey, "1", { expirationTtl: 43200 }); // 12h TTL
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[Session] Morning DM on session start failed:", e);
+      }
+    }
   } else if (update.type === "heartbeat") {
     // Refresh session TTL (keeps user "online") but preserve original "since" time
     const existingSince = sessions.find((s) => s.user === update.user)?.since;
@@ -3333,6 +9743,27 @@ async function handleSession(
         lastCommit: update.lastCommit || "",
       });
     }
+
+    // File-level conflict detection — warn users editing the same files
+    const heartbeatFiles = update.lastFiles || [];
+    if (heartbeatFiles.length > 0) {
+      // Resolve current user's telegram_id from team member registry
+      const allMembers = await getTeamMembers(env.PROJECTS);
+      const currentMember = allMembers.find(
+        (m) => m.github === update.user || m.name === update.user
+      );
+      if (currentMember) {
+        await saveChangedFiles(env.PROJECTS, projectId, currentMember.telegram_id, heartbeatFiles);
+        await detectFileConflicts(
+          env,
+          projectId,
+          update.user,
+          currentMember.telegram_id,
+          heartbeatFiles,
+          project.botToken
+        );
+      }
+    }
   } else if (update.type === "end") {
     // Don't remove from KV — auto-expires via TTL (prevents false offline from context compression)
     // But DO log the end to D1 for work hours tracking
@@ -3343,6 +9774,28 @@ async function handleSession(
       (s) => s.user !== update.user
     );
     await saveDashboardState(env.PROJECTS, projectId, dashState);
+
+    // Notify session subscribers via DM
+    await notifySubscribers(
+      env,
+      project.botToken,
+      "sessions",
+      () => `\u{1F534} ${escapeHtml(update.user)} went offline (${escapeHtml(projectId)})`
+    );
+
+    // Send private evening DM on session end (deduped — only once per 24h)
+    try {
+      const allMembers = await getTeamMembers(env.PROJECTS);
+      const member = allMembers.find(
+        (m) => m.github === update.user || m.name === update.user
+      );
+      if (member) {
+        const projects = await getProjectList(env);
+        await sendPrivateEveningDM(env, member, projects, allMembers);
+      }
+    } catch (e) {
+      console.error("[Session] Evening DM on session end failed:", e);
+    }
   } else {
     return new Response("Invalid session type", { status: 400 });
   }
@@ -3448,8 +9901,181 @@ function matchRoute(
     return { handler: "telegram", projectId: telegramMatch[1] };
   }
 
+  // Coolify deployment webhook: POST /coolify/:projectId
+  const coolifyMatch = pathname.match(
+    /^\/coolify\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (coolifyMatch && method === "POST") {
+    return { handler: "coolify", projectId: coolifyMatch[1] };
+  }
+
+  // Vercel deployment webhook: POST /vercel/:projectId
+  const vercelMatch = pathname.match(
+    /^\/vercel\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (vercelMatch && method === "POST") {
+    return { handler: "vercel", projectId: vercelMatch[1] };
+  }
+
+  // Netlify deployment webhook: POST /netlify/:projectId
+  const netlifyMatch = pathname.match(
+    /^\/netlify\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (netlifyMatch && method === "POST") {
+    return { handler: "netlify", projectId: netlifyMatch[1] };
+  }
+
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Test-only exports — onboarding helpers & supporting functions
+// ---------------------------------------------------------------------------
+
+export {
+  getOnboardingState,
+  setOnboardingState,
+  clearOnboardingState,
+  isOnboarded,
+  markOnboarded,
+  sendOnboardingTutorial,
+  getTeamMembers,
+  upsertTeamMember,
+  getUserPreferences,
+  saveUserPreferences,
+  buildSettingsMessage,
+  escapeHtml,
+  githubRequest,
+  getActiveProject,
+  setActiveProject,
+  resolveActiveProject,
+  getProjectList,
+  // Priority system helpers
+  getIssuePriority,
+  getPrioritySortWeight,
+  sortByPriority,
+  isBlockerActive,
+  formatPriority,
+  PRIORITY_LEVELS,
+  PRIORITY_EMOJIS,
+  PRIORITY_DEFAULT,
+  // Help system texts (Issue #52, foundation for #65)
+  HELP_TEXTS,
+  // Contextual tips engine (Issue #65)
+  CONTEXTUAL_TIPS,
+  getTipShown,
+  setTipShown,
+  getTip,
+  // Meine Aufgaben helpers
+  getActiveTask,
+  setActiveTask,
+  clearActiveTask,
+  getTodayDoneCount,
+  incrementTodayDoneCount,
+  handleMeineAufgaben,
+  // Category assignment helpers (Issue #48)
+  getCategoryClaims,
+  saveCategoryClaims,
+  fetchOpenIssuesByCategory,
+  fetchClosedIssuesByCategory,
+  getCompletedCategories,
+  buildCategoryPicker,
+  assignIssuesToUser,
+  unassignIssuesFromUser,
+  getUserColor,
+  getUserColorByName,
+  handleAufgabeNehmen,
+  handleCategoryPick,
+  handleCategoryConfirm,
+  handleCategoryAssign,
+  // Pause flow helpers (Issue #50)
+  getPausedCategories,
+  savePausedCategories,
+  addPausedCategory,
+  removePausedCategory,
+  handlePause,
+  handlePauseConfirm,
+  // Neue Idee helpers (Issue #51)
+  getNewIdeaState,
+  setNewIdeaState,
+  clearNewIdeaState,
+  fetchAreaLabels,
+  createIdeaIssue,
+  buildIdeaCategoryKeyboard,
+  buildIdeaPriorityKeyboard,
+  finalizeNewIdea,
+  // Project switcher helper (Issue #53)
+  renderHomeScreen,
+  // Team Board (Issue #54)
+  renderTeamBoard,
+  // Prompt generator (Issue #54 — Claude Code prompts from issues)
+  parseIssueBody,
+  findRelevantFiles,
+  generateClaudePrompt,
+  // Preview & Merge helpers (Issue #56)
+  getPreviewUrl,
+  setPreviewUrl,
+  createPreviewPR,
+  submitPRReview,
+  sendPullReminder,
+  sendPreviewNotifications,
+  // Deploy webhook helpers (Vercel, Netlify)
+  resolveVercelBranch,
+  notifyBranchOwner,
+  // Conflict detector helpers (Issue #58)
+  saveChangedFiles,
+  getChangedFiles,
+  hasConflictWarning,
+  setConflictWarning,
+  detectFileConflicts,
+  isUserDND,
+  sendDM,
+  // CI status helpers (GitHub Actions integration)
+  getCIStatus,
+  setCIStatus,
+  // Team messaging helpers (Issue #59)
+  parseAtMentions,
+  parseIssueReferences,
+  getMessageThread,
+  setMessageThread,
+  // Time tracker helpers (Issue #60)
+  getTimer,
+  startTimer,
+  stopTimer,
+  logTimeEntry,
+  getDailyHours,
+  getWeeklyHours,
+  formatDuration,
+  // Velocity report helpers (Issue #61)
+  saveVelocitySnapshot,
+  getVelocityData,
+  getLastTwoWeeksVelocity,
+  calculateVelocitySnapshot,
+  getWeekStartDate,
+  formatDelta,
+  renderVelocityView,
+  // Morning message helpers (Issue #62)
+  sendPrivateMorningDM,
+  sendGroupMorningMessage,
+  sendMorningDigest,
+  getYesterdayStats,
+  getYesterdayWorkHours,
+  // Evening message helpers (Issue #63)
+  sendPrivateEveningDM,
+  sendGroupEveningMessage,
+  sendEveningDigest,
+  // Learning bridge helpers (Issue #64)
+  saveLearning,
+  updateLearningScope,
+  getTodayTeamLearnings,
+  getTodayUserLearnings,
+  // Role system helpers (Admin/Member)
+  getUserRole,
+  isAdmin,
+  setUserRole,
+  countAdmins,
+};
+export type { OnboardingStep, TeamMember, UserPreferences, Env, ProjectConfig, CategoryClaim, CategoryClaimsState, PausedCategory, NewIdeaState, MessageThread, TimerState, VelocitySnapshot, UserRole, CIStatus };
 
 // ---------------------------------------------------------------------------
 // Worker entry point
@@ -3531,6 +10157,394 @@ export default {
         return Response.json({ sessions });
       }
 
+      case "coolify": {
+        // Coolify sends deployment_status webhooks when a preview builds.
+        // We extract the preview URL and store it in KV, then DM the team.
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
+        try {
+          const coolifyBody = (await request.json()) as {
+            status?: string;
+            preview_url?: string;
+            url?: string;
+            deployment_url?: string;
+            pull_request_number?: number;
+            pr_number?: number;
+            branch?: string;
+          };
+
+          // Coolify webhooks can come in various shapes depending on version.
+          // We accept the URL from whichever field is present.
+          const rawDeployUrl =
+            coolifyBody.preview_url ||
+            coolifyBody.deployment_url ||
+            coolifyBody.url;
+          const prNum =
+            coolifyBody.pull_request_number ||
+            coolifyBody.pr_number;
+
+          if (!rawDeployUrl || !prNum) {
+            return new Response("Missing preview_url or pr_number", { status: 400 });
+          }
+
+          // Validate URL scheme to prevent javascript: / data: injection
+          const deployUrl = sanitizeUrl(rawDeployUrl);
+          if (!deployUrl) {
+            return new Response("Invalid preview URL scheme", { status: 400 });
+          }
+
+          const coolifyProjectId = route.projectId!;
+
+          // Store the preview URL in KV (7-day TTL)
+          await setPreviewUrl(env.PROJECTS, coolifyProjectId, prNum, deployUrl);
+
+          // Resolve the project to get bot token and notify team
+          const coolifyProject = await getProject(env.PROJECTS, coolifyProjectId, env);
+          if (coolifyProject) {
+            // Look up PR title for a nicer notification
+            let prTitle = `PR #${prNum}`;
+            let prUrl = "";
+            if (coolifyProject.githubToken) {
+              try {
+                const prRes = await githubRequest(
+                  "GET",
+                  `/repos/${coolifyProject.githubRepo}/pulls/${prNum}`,
+                  coolifyProject.githubToken
+                );
+                if (prRes.ok) {
+                  const prData = (await prRes.json()) as { title: string; html_url: string };
+                  prTitle = prData.title;
+                  prUrl = prData.html_url;
+                }
+              } catch {
+                // Best-effort title lookup
+              }
+            }
+
+            // DM all team members with preview link and review buttons
+            const members = await getTeamMembers(env.PROJECTS);
+            for (const member of members) {
+              const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+              if (dnd) continue;
+
+              const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+              if (!prefs.dm_chat_id) continue;
+              if (!prefs.previews && !prefs.pr_reviews) continue;
+
+              const prUrlLine = prUrl
+                ? `\n\u{1F517} <a href="${prUrl}">View PR</a>`
+                : "";
+
+              const text =
+                `\u{1F310} <b>Preview Ready!</b>\n${"━".repeat(16)}\n\n` +
+                `PR #${prNum}: "${escapeHtml(prTitle)}"\n` +
+                `\u{1F680} <a href="${deployUrl}">Open Preview</a>${prUrlLine}\n\n` +
+                `Please review:`;
+
+              const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+                inline_keyboard: [
+                  [
+                    { text: "\u{2705} Approve", callback_data: `review_approve:${prNum}` },
+                    { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNum}` },
+                  ],
+                  [
+                    { text: "\u{1F310} Preview", url: deployUrl },
+                  ],
+                ],
+              };
+
+              const status = await sendDM(coolifyProject.botToken, prefs.dm_chat_id, text, reviewKb);
+              if (status === "blocked") {
+                prefs.dm_chat_id = null;
+                await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+              }
+            }
+
+            // Log the deployment event
+            await logEvent(
+              env.DB,
+              coolifyProject.githubRepo,
+              "preview.deployed",
+              "coolify",
+              String(prNum),
+              { url: deployUrl }
+            );
+          }
+
+          return Response.json({ ok: true, stored: `preview:${coolifyProjectId}:${prNum}` });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Coolify handler error:", msg);
+          return new Response(`Coolify handler error: ${msg}`, { status: 500 });
+        }
+      }
+
+      case "vercel": {
+        // Vercel sends deployment webhooks when a preview builds/deploys/fails.
+        // We extract the preview URL and status, store in KV, then DM the team.
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
+        try {
+          const vercelBody = (await request.json()) as {
+            type?: string;
+            payload?: {
+              deployment?: {
+                url?: string;
+                meta?: { githubPrId?: string };
+              };
+              name?: string;
+            };
+          };
+
+          const deploymentType = vercelBody.type;
+          const rawDeployUrl = vercelBody.payload?.deployment?.url;
+          const prIdStr = vercelBody.payload?.deployment?.meta?.githubPrId;
+          const vercelProjectId = route.projectId!;
+
+          // Resolve the project for bot token and GitHub access
+          const vercelProject = await getProject(env.PROJECTS, vercelProjectId, env);
+
+          if (deploymentType === "deployment.created") {
+            // Optional: notify branch owner that the build started
+            if (vercelProject && prIdStr) {
+              const branch = await resolveVercelBranch(vercelProject, Number(prIdStr));
+              if (branch) {
+                await notifyBranchOwner(env, vercelProject, branch, "building", "Vercel");
+              }
+            }
+            return Response.json({ ok: true, status: "building" });
+          }
+
+          if (deploymentType === "deployment.error") {
+            // Notify the branch owner about the failure
+            if (vercelProject && prIdStr) {
+              const branch = await resolveVercelBranch(vercelProject, Number(prIdStr));
+              if (branch) {
+                await notifyBranchOwner(env, vercelProject, branch, "failed", "Vercel");
+              }
+            }
+            await logEvent(env.DB, vercelProject?.githubRepo ?? vercelProjectId, "preview.failed", "vercel", prIdStr ?? "unknown");
+            return Response.json({ ok: true, status: "error" });
+          }
+
+          if (deploymentType === "deployment.ready") {
+            if (!rawDeployUrl || !prIdStr) {
+              return new Response("Missing deployment url or githubPrId in payload", { status: 400 });
+            }
+
+            // Vercel URLs may not include the protocol
+            const fullUrl = rawDeployUrl.startsWith("http") ? rawDeployUrl : `https://${rawDeployUrl}`;
+            const deployUrl = sanitizeUrl(fullUrl);
+            if (!deployUrl) {
+              return new Response("Invalid preview URL scheme", { status: 400 });
+            }
+
+            const prNum = Number(prIdStr);
+            if (Number.isNaN(prNum) || prNum <= 0) {
+              return new Response("Invalid PR number", { status: 400 });
+            }
+
+            // Store the preview URL in KV (7-day TTL)
+            await setPreviewUrl(env.PROJECTS, vercelProjectId, prNum, deployUrl);
+
+            if (vercelProject) {
+              // Look up PR title for a nicer notification
+              let prTitle = `PR #${prNum}`;
+              let prUrl = "";
+              if (vercelProject.githubToken) {
+                try {
+                  const prRes = await githubRequest(
+                    "GET",
+                    `/repos/${vercelProject.githubRepo}/pulls/${prNum}`,
+                    vercelProject.githubToken
+                  );
+                  if (prRes.ok) {
+                    const prData = (await prRes.json()) as { title: string; html_url: string };
+                    prTitle = prData.title;
+                    prUrl = prData.html_url;
+                  }
+                } catch {
+                  // Best-effort title lookup
+                }
+              }
+
+              // DM all team members with preview link and review buttons
+              const members = await getTeamMembers(env.PROJECTS);
+              for (const member of members) {
+                const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+                if (dnd) continue;
+
+                const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+                if (!prefs.dm_chat_id) continue;
+                if (!prefs.previews && !prefs.pr_reviews) continue;
+
+                const prUrlLine = prUrl
+                  ? `\n\u{1F517} <a href="${prUrl}">View PR</a>`
+                  : "";
+
+                const lang = await getUserLanguage(env.PROJECTS, member.telegram_id);
+                const text =
+                  t(lang, "deploy.ready", { platform: "Vercel", url: deployUrl, branch: prTitle }) +
+                  prUrlLine + "\n\nPlease review:";
+
+                const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+                  inline_keyboard: [
+                    [
+                      { text: "\u{2705} Approve", callback_data: `review_approve:${prNum}` },
+                      { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNum}` },
+                    ],
+                    [
+                      { text: "\u{1F310} Preview", url: deployUrl },
+                    ],
+                  ],
+                };
+
+                const status = await sendDM(vercelProject.botToken, prefs.dm_chat_id, text, reviewKb);
+                if (status === "blocked") {
+                  prefs.dm_chat_id = null;
+                  await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+                }
+              }
+
+              await logEvent(env.DB, vercelProject.githubRepo, "preview.deployed", "vercel", String(prNum), { url: deployUrl });
+            }
+
+            return Response.json({ ok: true, stored: `preview:${vercelProjectId}:${prNum}` });
+          }
+
+          // Unknown deployment type — acknowledge without error
+          return Response.json({ ok: true, status: "ignored", type: deploymentType });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Vercel handler error:", msg);
+          return new Response(`Vercel handler error: ${msg}`, { status: 500 });
+        }
+      }
+
+      case "netlify": {
+        // Netlify sends deploy notification webhooks with state changes.
+        // We extract the preview URL and status, store in KV, then DM the team.
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
+        try {
+          const netlifyBody = (await request.json()) as {
+            state?: string;
+            deploy_ssl_url?: string;
+            context?: string;
+            review_id?: number;
+            branch?: string;
+            name?: string;
+          };
+
+          const state = netlifyBody.state;
+          const netlifyProjectId = route.projectId!;
+          const netlifyProject = await getProject(env.PROJECTS, netlifyProjectId, env);
+
+          if (state === "building") {
+            // Optional: notify branch owner that the build started
+            const branch = netlifyBody.branch ?? "unknown";
+            if (netlifyProject) {
+              await notifyBranchOwner(env, netlifyProject, branch, "building", "Netlify");
+            }
+            return Response.json({ ok: true, status: "building" });
+          }
+
+          if (state === "error") {
+            const branch = netlifyBody.branch ?? "unknown";
+            if (netlifyProject) {
+              await notifyBranchOwner(env, netlifyProject, branch, "failed", "Netlify");
+            }
+            await logEvent(env.DB, netlifyProject?.githubRepo ?? netlifyProjectId, "preview.failed", "netlify", netlifyBody.review_id ? String(netlifyBody.review_id) : "unknown");
+            return Response.json({ ok: true, status: "error" });
+          }
+
+          if (state === "ready") {
+            const rawDeployUrl = netlifyBody.deploy_ssl_url;
+            const prNum = netlifyBody.review_id;
+
+            if (!rawDeployUrl || !prNum) {
+              return new Response("Missing deploy_ssl_url or review_id", { status: 400 });
+            }
+
+            const deployUrl = sanitizeUrl(rawDeployUrl);
+            if (!deployUrl) {
+              return new Response("Invalid preview URL scheme", { status: 400 });
+            }
+
+            // Store the preview URL in KV (7-day TTL)
+            await setPreviewUrl(env.PROJECTS, netlifyProjectId, prNum, deployUrl);
+
+            if (netlifyProject) {
+              // Look up PR title for a nicer notification
+              let prTitle = `PR #${prNum}`;
+              let prUrl = "";
+              if (netlifyProject.githubToken) {
+                try {
+                  const prRes = await githubRequest(
+                    "GET",
+                    `/repos/${netlifyProject.githubRepo}/pulls/${prNum}`,
+                    netlifyProject.githubToken
+                  );
+                  if (prRes.ok) {
+                    const prData = (await prRes.json()) as { title: string; html_url: string };
+                    prTitle = prData.title;
+                    prUrl = prData.html_url;
+                  }
+                } catch {
+                  // Best-effort title lookup
+                }
+              }
+
+              // DM all team members with preview link and review buttons
+              const members = await getTeamMembers(env.PROJECTS);
+              for (const member of members) {
+                const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+                if (dnd) continue;
+
+                const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+                if (!prefs.dm_chat_id) continue;
+                if (!prefs.previews && !prefs.pr_reviews) continue;
+
+                const prUrlLine = prUrl
+                  ? `\n\u{1F517} <a href="${prUrl}">View PR</a>`
+                  : "";
+
+                const lang = await getUserLanguage(env.PROJECTS, member.telegram_id);
+                const text =
+                  t(lang, "deploy.ready", { platform: "Netlify", url: deployUrl, branch: prTitle }) +
+                  prUrlLine + "\n\nPlease review:";
+
+                const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+                  inline_keyboard: [
+                    [
+                      { text: "\u{2705} Approve", callback_data: `review_approve:${prNum}` },
+                      { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNum}` },
+                    ],
+                    [
+                      { text: "\u{1F310} Preview", url: deployUrl },
+                    ],
+                  ],
+                };
+
+                const status = await sendDM(netlifyProject.botToken, prefs.dm_chat_id, text, reviewKb);
+                if (status === "blocked") {
+                  prefs.dm_chat_id = null;
+                  await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+                }
+              }
+
+              await logEvent(env.DB, netlifyProject.githubRepo, "preview.deployed", "netlify", String(prNum), { url: deployUrl });
+            }
+
+            return Response.json({ ok: true, stored: `preview:${netlifyProjectId}:${prNum}` });
+          }
+
+          // Unknown state — acknowledge without error
+          return Response.json({ ok: true, status: "ignored", state });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Netlify handler error:", msg);
+          return new Response(`Netlify handler error: ${msg}`, { status: 500 });
+        }
+      }
+
       default:
         return new Response("Not Found", { status: 404 });
     }
@@ -3549,9 +10563,9 @@ export default {
       await sendMorningDigest(env);
     }
 
-    // Mon-Fri 16:00 UTC (18:00 CEST): evening summary
+    // Mon-Fri 16:00 UTC (18:00 CEST): evening digest (group + private DMs)
     if (hour === 16 && minute === 0 && dayOfWeek >= 1 && dayOfWeek <= 5) {
-      await sendEveningSummary(env);
+      await sendEveningDigest(env);
     }
 
     // Friday 15:00 UTC (17:00 CEST): weekly report
@@ -3564,17 +10578,6 @@ export default {
 // ---------------------------------------------------------------------------
 // Cron handlers — stale PRs, digests, reports
 // ---------------------------------------------------------------------------
-
-async function getProjectList(env: Env): Promise<Array<{ id: string; config: ProjectConfig }>> {
-  const keys = await env.PROJECTS.list();
-  const projects: Array<{ id: string; config: ProjectConfig }> = [];
-  for (const key of keys.keys) {
-    if (key.name.includes(":") || key.name === "team-members") continue;
-    const config = await getProject(env.PROJECTS, key.name, env);
-    if (config) projects.push({ id: key.name, config });
-  }
-  return projects;
-}
 
 async function sendToLoginChannel(env: Env, text: string): Promise<void> {
   const projects = await getProjectList(env);
@@ -3646,87 +10649,401 @@ async function checkStalePRs(env: Env): Promise<void> {
   }
 }
 
-async function sendMorningDigest(env: Env): Promise<void> {
-  const projects = await getProjectList(env);
-  const members = await getTeamMembers(env.PROJECTS);
-  const lines: string[] = ["\u{2600}\u{FE0F} <b>Morning Digest</b>", "\u{2500}".repeat(25), ""];
+// ---------------------------------------------------------------------------
+// Morning messages — private DM per user + group overview (Issue #62)
+// ---------------------------------------------------------------------------
 
-  // Who is online
-  let anyOnline = false;
-  for (const { id, config: _ } of projects) {
-    const sessions = await getActiveSessions(env.PROJECTS, id);
-    for (const s of sessions) {
-      anyOnline = true;
-      const color = getUserColorByName(members, s.user);
-      lines.push(`${color} ${s.user} \u{2014} ${id} (since ${s.since})`);
+/**
+ * Send a private morning DM to a single team member.
+ * Shows: yesterday's completed tasks with time, open branches with preview links,
+ * today's pending tasks across all projects, and contextual tips.
+ */
+async function sendPrivateMorningDM(
+  env: Env,
+  member: TeamMember,
+  projects: Array<{ id: string; config: ProjectConfig }>,
+  allMembers: TeamMember[]
+): Promise<void> {
+  const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+  if (!prefs.dm_chat_id) return;
+
+  const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+  if (dnd) return;
+
+  const color = getUserColorByName(allMembers, member.name);
+  const lines: string[] = [
+    `${color} <b>Good morning, ${escapeHtml(member.name)}!</b>`,
+    "\u{2500}".repeat(25),
+    "",
+  ];
+
+  const yesterday = new Date();
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+  const tips: string[] = [];
+  let totalYesterdayMinutes = 0;
+
+  for (const { id: projectId, config: project } of projects) {
+    const token = getGitHubToken(env, project);
+
+    // --- Yesterday's completed tasks (closed issues by this user) ---
+    try {
+      const closedEvents = await env.DB.prepare(
+        `SELECT target, metadata FROM events
+         WHERE repo = ? AND actor = ? AND event_type = 'issues.closed'
+         AND date(created_at) = ?
+         ORDER BY created_at DESC LIMIT 20`
+      ).bind(project.githubRepo, member.github, yesterdayStr)
+        .all<{ target: string; metadata: string | null }>();
+
+      if (closedEvents.results && closedEvents.results.length > 0) {
+        lines.push(`\u{2705} <b>Completed yesterday</b> (${escapeHtml(projectId)}):`);
+        for (const ev of closedEvents.results) {
+          const issueNum = ev.target ? `#${escapeHtml(ev.target)}` : "";
+          let title = "";
+          if (ev.metadata) {
+            try {
+              const meta = JSON.parse(ev.metadata);
+              if (meta.title) title = ` ${escapeHtml(String(meta.title))}`;
+            } catch { /* best-effort */ }
+          }
+          lines.push(`  \u{2022} ${issueNum}${title}`);
+        }
+        lines.push("");
+      }
+    } catch (e) {
+      console.error(`[MorningDM] Events query failed for ${projectId}:`, e);
+    }
+
+    // --- Yesterday's tracked time ---
+    try {
+      const dailyMins = await getDailyHours(env.DB, member.telegram_id, yesterdayStr);
+      if (dailyMins > 0) {
+        totalYesterdayMinutes += dailyMins;
+      }
+    } catch { /* best-effort */ }
+
+    // --- Open branches with preview links ---
+    if (token) {
+      try {
+        const branchRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (branchRes.ok) {
+          const prs = await branchRes.json() as Array<{
+            number: number; title: string; user: { login: string };
+            head: { ref: string }; requested_reviewers: Array<{ login: string }>;
+          }>;
+
+          // PRs created by this user
+          const myPRs = prs.filter((pr) => pr.user.login === member.github);
+          if (myPRs.length > 0) {
+            lines.push(`\u{1F500} <b>Your open branches</b> (${escapeHtml(projectId)}):`);
+            for (const pr of myPRs) {
+              const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, pr.number);
+              const previewStr = previewUrl ? ` \u{2014} <a href="${escapeHtml(previewUrl)}">Preview</a>` : "";
+              lines.push(`  \u{2022} #${pr.number} ${escapeHtml(pr.title)}${previewStr}`);
+              tips.push(`You have an open PR #${pr.number} in ${projectId} — consider merging or requesting review.`);
+            }
+            lines.push("");
+          }
+
+          // PRs where this user is requested as reviewer
+          const reviewPRs = prs.filter((pr) =>
+            pr.requested_reviewers.some((r) => r.login === member.github)
+          );
+          if (reviewPRs.length > 0) {
+            lines.push(`\u{1F440} <b>Waiting for your review</b> (${escapeHtml(projectId)}):`);
+            for (const pr of reviewPRs) {
+              lines.push(`  \u{2022} #${pr.number} ${escapeHtml(pr.title)} (@${escapeHtml(pr.user.login)})`);
+            }
+            lines.push("");
+          }
+        }
+      } catch (e) {
+        console.error(`[MorningDM] GitHub PR fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    // --- Today's pending tasks (open issues assigned to this user) ---
+    if (token) {
+      try {
+        const issuesRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/issues?state=open&assignee=${member.github}&per_page=20`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (issuesRes.ok) {
+          const issues = await issuesRes.json() as Array<{
+            number: number; title: string; pull_request?: unknown;
+          }>;
+          // Filter out PRs (GitHub returns PRs in the issues endpoint)
+          const realIssues = issues.filter((i) => !i.pull_request);
+          if (realIssues.length > 0) {
+            lines.push(`\u{1F4CB} <b>Today's tasks</b> (${escapeHtml(projectId)}):`);
+            for (const issue of realIssues.slice(0, 10)) {
+              lines.push(`  \u{2022} #${issue.number} ${escapeHtml(issue.title)}`);
+            }
+            if (realIssues.length > 10) {
+              lines.push(`  <i>...and ${realIssues.length - 10} more</i>`);
+            }
+            lines.push("");
+          }
+        }
+      } catch (e) {
+        console.error(`[MorningDM] GitHub issues fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    // --- Check if main has new commits the user should pull ---
+    if (token) {
+      try {
+        const activity = await getActivityData(env.PROJECTS, projectId, member.name);
+        if (activity && activity.branch && activity.branch !== "main" && activity.branch !== "master") {
+          const compareRes = await fetch(
+            `https://api.github.com/repos/${project.githubRepo}/compare/${activity.branch}...main`,
+            { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+          );
+          if (compareRes.ok) {
+            const compare = await compareRes.json() as { ahead_by: number };
+            if (compare.ahead_by > 5) {
+              tips.push(`main is ${compare.ahead_by} commits ahead of your branch '${activity.branch}' in ${projectId} — consider pulling.`);
+            }
+          }
+        }
+      } catch { /* best-effort tip */ }
     }
   }
-  if (!anyOnline) lines.push("Nobody online yet.");
 
-  // Open tasks per project
-  lines.push("");
-  lines.push("<b>Open Tasks:</b>");
-  for (const { id, config: project } of projects) {
-    if (!project.githubToken) continue;
-    try {
-      const res = await fetch(
-        `https://api.github.com/repos/${project.githubRepo}/issues?state=open&per_page=100`,
-        { headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken } }
-      );
-      if (res.ok) {
-        const issues = await res.json() as Array<{ number: number }>;
-        lines.push(`\u{2022} ${id}: ${issues.length} open`);
-      }
-    } catch {}
+  // Yesterday's total tracked time (across all projects)
+  if (totalYesterdayMinutes > 0) {
+    lines.push(`\u{23F1}\u{FE0F} Yesterday's tracked time: <b>${formatDuration(totalYesterdayMinutes)}</b>`);
+    lines.push("");
   }
 
-  // Open PRs
-  lines.push("");
-  lines.push("<b>Open PRs:</b>");
-  let anyPR = false;
-  for (const { id, config: project } of projects) {
-    if (!project.githubToken) continue;
+  // Contextual tips
+  if (tips.length > 0) {
+    lines.push("\u{1F4A1} <b>Tips:</b>");
+    for (const tip of tips.slice(0, 3)) {
+      lines.push(`  \u{2022} ${escapeHtml(tip)}`);
+    }
+    lines.push("");
+  }
+
+  // If the DM is empty (only header), add an encouraging fallback
+  if (lines.length <= 4) {
+    lines.push("No pending tasks or branches — clean slate today! \u{1F389}");
+  }
+
+  // Determine which bot token to use (first project's token)
+  const botToken = projects.length > 0 ? projects[0].config.botToken : "";
+  if (!botToken) return;
+
+  await sendDM(botToken, prefs.dm_chat_id, lines.join("\n"));
+}
+
+/**
+ * Send the group morning message to the login channel.
+ * Shows: all projects with category owners, open PRs with preview links,
+ * yesterday's team performance summary.
+ */
+async function sendGroupMorningMessage(env: Env): Promise<void> {
+  const projects = await getProjectList(env);
+  const members = await getTeamMembers(env.PROJECTS);
+  const lines: string[] = [
+    "\u{2600}\u{FE0F} <b>Good Morning, Team!</b>",
+    "\u{2500}".repeat(25),
+    "",
+  ];
+
+  const yesterday = new Date();
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+  // --- Projects with category owners ---
+  for (const { id: projectId, config: project } of projects) {
+    lines.push(`\u{1F4C1} <b>${escapeHtml(projectId)}</b>`);
+
+    // Category claims
     try {
-      const res = await fetch(
-        `https://api.github.com/repos/${project.githubRepo}/pulls?state=open`,
-        { headers: { "User-Agent": "CortexBot", Authorization: "token " + project.githubToken } }
-      );
-      if (res.ok) {
-        const prs = await res.json() as Array<{ number: number; title: string; user: { login: string } }>;
-        for (const pr of prs) {
-          anyPR = true;
-          lines.push(`\u{2022} ${id} #${pr.number}: ${pr.title} (@${pr.user.login})`);
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      if (claimsState.claims.length > 0) {
+        for (const claim of claimsState.claims) {
+          const color = getUserColorByName(members, claim.telegramName);
+          const issueCount = claim.assignedIssues.length;
+          lines.push(`  ${color} ${escapeHtml(claim.displayName)} \u{2014} ${escapeHtml(claim.telegramName)} (${issueCount} tasks)`);
+        }
+      } else {
+        lines.push("  <i>No categories claimed</i>");
+      }
+    } catch {
+      lines.push("  <i>Could not load categories</i>");
+    }
+
+    // Paused categories
+    try {
+      const paused = await getPausedCategories(env.PROJECTS, projectId);
+      if (paused.length > 0) {
+        for (const p of paused) {
+          lines.push(`  \u{23F8}\u{FE0F} ${escapeHtml(p.displayName)} \u{2014} paused by ${escapeHtml(p.pausedBy)} (${p.completedTasks}/${p.totalTasks})`);
         }
       }
-    } catch {}
+    } catch { /* best-effort */ }
+
+    // Open PRs with preview links
+    const token = getGitHubToken(env, project);
+    if (token) {
+      try {
+        const prRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (prRes.ok) {
+          const prs = await prRes.json() as Array<{
+            number: number; title: string; user: { login: string };
+            requested_reviewers: Array<{ login: string }>;
+          }>;
+          const needsReview = prs.filter((pr) => pr.requested_reviewers.length > 0);
+          if (needsReview.length > 0) {
+            lines.push("");
+            lines.push(`  \u{1F50D} <b>Waiting for review:</b>`);
+            for (const pr of needsReview) {
+              const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, pr.number);
+              const previewStr = previewUrl ? ` \u{2014} <a href="${escapeHtml(previewUrl)}">Preview</a>` : "";
+              const reviewers = pr.requested_reviewers.map((r) => `@${escapeHtml(r.login)}`).join(", ");
+              lines.push(`    \u{2022} #${pr.number} ${escapeHtml(pr.title)} \u{2192} ${reviewers}${previewStr}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[MorningGroup] GitHub PR fetch failed for ${projectId}:`, e);
+      }
+    }
+    lines.push("");
   }
-  if (!anyPR) lines.push("No open PRs.");
+
+  // --- Yesterday's team performance ---
+  try {
+    const stats = await getYesterdayStats(env.DB, yesterdayStr);
+    const workHours = await getYesterdayWorkHours(env.DB, yesterdayStr);
+
+    lines.push("\u{1F4CA} <b>Yesterday's Team Performance:</b>");
+    lines.push(`  \u{1F4DD} Issues: ${stats.issues_opened} opened, ${stats.issues_closed} closed`);
+    lines.push(`  \u{1F500} PRs: ${stats.prs_merged} merged, ${stats.prs_opened} opened`);
+    lines.push(`  \u{1F4C8} Total events: ${stats.total_events}`);
+
+    if (workHours.length > 0) {
+      lines.push("");
+      lines.push("  <b>Work Hours:</b>");
+      for (const w of workHours) {
+        const color = getUserColorByName(members, w.user_id);
+        lines.push(`  ${color} ${escapeHtml(w.user_id)}: ${formatDuration(w.total_minutes)}`);
+      }
+    }
+  } catch (e) {
+    console.error("[MorningGroup] Yesterday stats failed:", e);
+  }
 
   await sendToLoginChannel(env, lines.join("\n"));
 }
 
-async function sendEveningSummary(env: Env): Promise<void> {
-  const stats = await getTodayStats(env.DB);
-  const workHours = await getWorkHoursToday(env.DB);
-  const members = await getTeamMembers(env.PROJECTS);
+/**
+ * Query yesterday's event stats from D1.
+ * Similar to getTodayStats but for a specific date.
+ */
+async function getYesterdayStats(
+  db: D1Database,
+  dateStr: string
+): Promise<{ issues_opened: number; issues_closed: number; prs_merged: number; prs_opened: number; total_events: number }> {
+  try {
+    const opened = await db.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.opened' AND date(created_at) = ?"
+    ).bind(dateStr).first<{ c: number }>();
 
-  const lines: string[] = ["\u{1F319} <b>Evening Summary</b>", "\u{2500}".repeat(25), ""];
-  lines.push(`\u{1F4DD} Issues: ${stats.issues_opened} opened, ${stats.issues_closed} closed`);
-  lines.push(`\u{1F500} PRs: ${stats.prs_merged} merged, ${stats.prs_open} opened`);
-  lines.push(`\u{1F4CA} Total events: ${stats.total_events}`);
+    const closed = await db.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'issues.closed' AND date(created_at) = ?"
+    ).bind(dateStr).first<{ c: number }>();
 
-  if (workHours.length > 0) {
-    lines.push("");
-    lines.push("<b>Work Hours:</b>");
-    for (const w of workHours) {
-      const color = getUserColorByName(members, w.user_id);
-      const hours = Math.floor(w.total_minutes / 60);
-      const mins = w.total_minutes % 60;
-      lines.push(`${color} ${w.user_id}: ${hours}h ${mins}m`);
-    }
+    const merged = await db.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'pr.merged' AND date(created_at) = ?"
+    ).bind(dateStr).first<{ c: number }>();
+
+    const prsOpened = await db.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE event_type = 'pr.opened' AND date(created_at) = ?"
+    ).bind(dateStr).first<{ c: number }>();
+
+    const total = await db.prepare(
+      "SELECT COUNT(*) as c FROM events WHERE date(created_at) = ?"
+    ).bind(dateStr).first<{ c: number }>();
+
+    return {
+      issues_opened: opened?.c || 0,
+      issues_closed: closed?.c || 0,
+      prs_merged: merged?.c || 0,
+      prs_opened: prsOpened?.c || 0,
+      total_events: total?.c || 0,
+    };
+  } catch {
+    return { issues_opened: 0, issues_closed: 0, prs_merged: 0, prs_opened: 0, total_events: 0 };
+  }
+}
+
+/**
+ * Query yesterday's work hours per user from D1 sessions table.
+ */
+async function getYesterdayWorkHours(
+  db: D1Database,
+  dateStr: string
+): Promise<Array<{ user_id: string; total_minutes: number }>> {
+  try {
+    const result = await db.prepare(
+      `SELECT user_id, SUM(duration_minutes) as total_minutes
+       FROM sessions
+       WHERE date(started_at) = ?
+       GROUP BY user_id ORDER BY total_minutes DESC`
+    ).bind(dateStr).all<{ user_id: string; total_minutes: number }>();
+    return result.results || [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Morning digest — orchestrator (calls group + private DMs)
+// ---------------------------------------------------------------------------
+
+async function sendMorningDigest(env: Env): Promise<void> {
+  // 1. Send the group morning message
+  try {
+    await sendGroupMorningMessage(env);
+  } catch (e) {
+    console.error("[MorningDigest] Group message failed:", e);
   }
 
-  await sendToLoginChannel(env, lines.join("\n"));
+  // 2. Send private morning DMs to all registered members (with dedup)
+  try {
+    const projects = await getProjectList(env);
+    const members = await getTeamMembers(env.PROJECTS);
+
+    for (const member of members) {
+      try {
+        const dedupKey = `morning_dm:${member.telegram_id}`;
+        const alreadySent = await env.PROJECTS.get(dedupKey);
+        if (alreadySent) continue; // Already received via session start
+
+        const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+        if (!prefs.dm_chat_id) continue;
+
+        await sendPrivateMorningDM(env, member, projects, members);
+        await env.PROJECTS.put(dedupKey, "1", { expirationTtl: 43200 }); // 12h TTL
+      } catch (e) {
+        console.error(`[MorningDigest] DM failed for ${member.name}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error("[MorningDigest] Private DMs failed:", e);
+  }
 }
 
 async function sendWeeklyReport(env: Env): Promise<void> {
@@ -3788,5 +11105,434 @@ async function sendWeeklyReport(env: Env): Promise<void> {
     }
   }
 
+  // --- Velocity snapshot: calculate, save, and append comparison (Issue #61) ---
+  const projects = await getProjectList(env);
+  for (const { id: projectId } of projects) {
+    try {
+      const snapshot = await calculateVelocitySnapshot(env.DB, projectId, members);
+      await saveVelocitySnapshot(env.DB, snapshot);
+
+      // Try to find last week's data for a comparison line
+      const lastWeekStart = getWeekStartDate(
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      );
+      const lastWeek = await getVelocityData(env.DB, projectId, lastWeekStart);
+
+      lines.push("");
+      lines.push(`\u{1F4CA} <b>Velocity — ${escapeHtml(projectId)}</b>`);
+      lines.push(
+        `   Tasks: ${snapshot.tasksCompleted} closed, ${snapshot.tasksOpened} opened`
+      );
+      lines.push(`   Team hours: ${formatDuration(snapshot.teamHours)}`);
+
+      if (lastWeek) {
+        lines.push(
+          `   vs last week: tasks ${formatDelta(snapshot.tasksCompleted, lastWeek.tasksCompleted)}, hours ${formatDelta(snapshot.teamHours, lastWeek.teamHours)}`
+        );
+      }
+    } catch {
+      // Best-effort — don't break the weekly report
+    }
+  }
+
   await sendToLoginChannel(env, lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Evening messages — private DM per user + group overview (Issue #63)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a private evening DM to a single team member when they wrap up.
+ * Shows: today's completed tasks with time, branch status, category claim check,
+ * learnings placeholder (for future Issue #64 integration), and encouragement.
+ *
+ * Dedup: KV key `evening_dm:{telegramId}` with 24h TTL prevents duplicates.
+ *
+ * @param learnings - Optional array of learning descriptions forwarded from the
+ *   session hook. Future Issue #64 will pull these from a D1 table instead.
+ */
+async function sendPrivateEveningDM(
+  env: Env,
+  member: TeamMember,
+  projects: Array<{ id: string; config: ProjectConfig }>,
+  allMembers: TeamMember[],
+  learnings?: string[]
+): Promise<void> {
+  const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+  if (!prefs.dm_chat_id) return;
+
+  const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+  if (dnd) return;
+
+  // Dedup — only one evening DM per user per day (24h TTL)
+  const dedupKey = `evening_dm:${member.telegram_id}`;
+  const alreadySent = await env.PROJECTS.get(dedupKey);
+  if (alreadySent) return;
+
+  const color = getUserColorByName(allMembers, member.name);
+  const lines: string[] = [
+    `${color} <b>Good evening, ${escapeHtml(member.name)}!</b> \u{1F319}`,
+    "\u{2500}".repeat(25),
+    "",
+  ];
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  let totalTodayMinutes = 0;
+  let hasActiveClaim = false;
+
+  for (const { id: projectId, config: project } of projects) {
+    const token = getGitHubToken(env, project);
+
+    // --- Today's completed tasks (closed issues by this user) ---
+    try {
+      const closedEvents = await env.DB.prepare(
+        `SELECT target, metadata FROM events
+         WHERE repo = ? AND actor = ? AND event_type = 'issues.closed'
+         AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 20`
+      ).bind(project.githubRepo, member.github)
+        .all<{ target: string; metadata: string | null }>();
+
+      if (closedEvents.results && closedEvents.results.length > 0) {
+        lines.push(`\u{2705} <b>Completed today</b> (${escapeHtml(projectId)}):`);
+        for (const ev of closedEvents.results) {
+          const issueNum = ev.target ? `#${escapeHtml(ev.target)}` : "";
+          let title = "";
+          if (ev.metadata) {
+            try {
+              const meta = JSON.parse(ev.metadata);
+              if (meta.title) title = ` ${escapeHtml(String(meta.title))}`;
+            } catch { /* best-effort */ }
+          }
+          lines.push(`  \u{2022} ${issueNum}${title}`);
+        }
+        lines.push("");
+      }
+    } catch (e) {
+      console.error(`[EveningDM] Events query failed for ${projectId}:`, e);
+    }
+
+    // --- Today's tracked time ---
+    try {
+      const dailyMins = await getDailyHours(env.DB, member.telegram_id, todayStr);
+      if (dailyMins > 0) {
+        totalTodayMinutes += dailyMins;
+      }
+    } catch { /* best-effort */ }
+
+    // --- Branch status (open PRs by this user) ---
+    if (token) {
+      try {
+        const branchRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (branchRes.ok) {
+          const prs = await branchRes.json() as Array<{
+            number: number; title: string; user: { login: string };
+            head: { ref: string }; requested_reviewers: Array<{ login: string }>;
+          }>;
+
+          const myPRs = prs.filter((pr) => pr.user.login === member.github);
+          if (myPRs.length > 0) {
+            lines.push(`\u{1F500} <b>Your open branches</b> (${escapeHtml(projectId)}):`);
+            for (const pr of myPRs) {
+              const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, pr.number);
+              const previewStr = previewUrl ? ` \u{2014} <a href="${escapeHtml(previewUrl)}">Preview</a>` : "";
+              const reviewers = pr.requested_reviewers.length > 0
+                ? ` (reviewers: ${pr.requested_reviewers.map((r) => `@${escapeHtml(r.login)}`).join(", ")})`
+                : " <i>(no reviewer assigned)</i>";
+              lines.push(`  \u{2022} #${pr.number} ${escapeHtml(pr.title)}${reviewers}${previewStr}`);
+            }
+            lines.push("");
+          }
+        }
+      } catch (e) {
+        console.error(`[EveningDM] GitHub PR fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    // --- Category claim check — suggest picking a new category if none active ---
+    try {
+      const claimsState = await getCategoryClaims(env.PROJECTS, projectId);
+      const userClaim = claimsState.claims.find(
+        (c) => c.telegramName === member.name || c.githubUsername === member.github
+      );
+      if (userClaim) {
+        hasActiveClaim = true;
+      }
+    } catch { /* best-effort */ }
+  }
+
+  // Today's total tracked time
+  if (totalTodayMinutes > 0) {
+    lines.push(`\u{23F1}\u{FE0F} Today's tracked time: <b>${formatDuration(totalTodayMinutes)}</b>`);
+    lines.push("");
+  }
+
+  // Learnings section — pull from D1 first, fall back to forwarded data (Issue #64)
+  try {
+    const userLearnings = await getTodayUserLearnings(env.DB, String(member.telegram_id));
+    if (userLearnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+      for (const l of userLearnings.slice(0, 5)) {
+        const scopeIcon = l.scope === "team" ? "\u{1F465}" : "\u{1F512}";
+        lines.push(`  \u{2022} ${scopeIcon} ${escapeHtml(l.content)}`);
+      }
+      lines.push("");
+    } else if (learnings && learnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+      for (const learning of learnings.slice(0, 5)) {
+        lines.push(`  \u{2022} ${escapeHtml(learning)}`);
+      }
+      lines.push("");
+    } else {
+      lines.push("\u{1F4DA} <i>No learnings captured today.</i>");
+      lines.push("");
+    }
+  } catch {
+    // Fallback to the old behavior if D1 query fails
+    if (learnings && learnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Today's learnings:</b>");
+      for (const learning of learnings.slice(0, 5)) {
+        lines.push(`  \u{2022} ${escapeHtml(learning)}`);
+      }
+      lines.push("");
+    } else {
+      lines.push("\u{1F4DA} <i>No learnings captured today.</i>");
+      lines.push("");
+    }
+  }
+
+  // Category suggestion if user has no active claim
+  if (!hasActiveClaim) {
+    lines.push("\u{1F4A1} <b>Tip:</b> You don't have an active category \u{2014} consider picking one tomorrow with /grab!");
+    lines.push("");
+  }
+
+  // Encouragement
+  lines.push("\u{1F31F} Great work today \u{2014} rest well and recharge!");
+
+  const botToken = projects.length > 0 ? projects[0].config.botToken : "";
+  if (!botToken) return;
+
+  await sendDM(botToken, prefs.dm_chat_id, lines.join("\n"));
+
+  // Set dedup key (24h TTL)
+  await env.PROJECTS.put(dedupKey, "1", { expirationTtl: 86400 });
+}
+
+/**
+ * Send the group evening message to the login channel.
+ * Shows: today's completed work, who went offline, open work remaining,
+ * preview links waiting for review, and team performance stats.
+ *
+ * Replaces the simple `sendEveningSummary` with a much richer overview.
+ */
+async function sendGroupEveningMessage(env: Env): Promise<void> {
+  const projects = await getProjectList(env);
+  const members = await getTeamMembers(env.PROJECTS);
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  const lines: string[] = [
+    "\u{1F319} <b>Evening Summary</b>",
+    "\u{2500}".repeat(25),
+    "",
+  ];
+
+  for (const { id: projectId, config: project } of projects) {
+    lines.push(`\u{1F4C1} <b>${escapeHtml(projectId)}</b>`);
+    const token = getGitHubToken(env, project);
+
+    // --- Who went offline today (sessions that ended today) ---
+    try {
+      const offlineUsers = await env.DB.prepare(
+        `SELECT DISTINCT user_id FROM sessions
+         WHERE date(ended_at) = ?
+         ORDER BY user_id`
+      ).bind(todayStr).all<{ user_id: string }>();
+
+      if (offlineUsers.results && offlineUsers.results.length > 0) {
+        const offlineNames = offlineUsers.results.map((u) => {
+          const color = getUserColorByName(members, u.user_id);
+          return `${color} ${escapeHtml(u.user_id)}`;
+        });
+        lines.push(`  \u{1F534} Wrapped up: ${offlineNames.join(", ")}`);
+      }
+    } catch (e) {
+      console.error(`[EveningGroup] Offline users query failed for ${projectId}:`, e);
+    }
+
+    // --- Today's completed work (closed issues) ---
+    try {
+      const closedEvents = await env.DB.prepare(
+        `SELECT actor, target, metadata FROM events
+         WHERE repo = ? AND event_type = 'issues.closed'
+         AND date(created_at) = date('now')
+         ORDER BY created_at DESC LIMIT 30`
+      ).bind(project.githubRepo)
+        .all<{ actor: string; target: string; metadata: string | null }>();
+
+      if (closedEvents.results && closedEvents.results.length > 0) {
+        lines.push("");
+        lines.push(`  \u{2705} <b>Completed today:</b>`);
+        for (const ev of closedEvents.results) {
+          const color = getUserColorByName(members, ev.actor);
+          const issueNum = ev.target ? `#${escapeHtml(ev.target)}` : "";
+          let title = "";
+          if (ev.metadata) {
+            try {
+              const meta = JSON.parse(ev.metadata);
+              if (meta.title) title = ` ${escapeHtml(String(meta.title))}`;
+            } catch { /* best-effort */ }
+          }
+          lines.push(`    ${color} ${issueNum}${title} (${escapeHtml(ev.actor)})`);
+        }
+      }
+    } catch (e) {
+      console.error(`[EveningGroup] Completed work query failed for ${projectId}:`, e);
+    }
+
+    // --- Still open: assigned issues ---
+    if (token) {
+      try {
+        const openRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/issues?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (openRes.ok) {
+          const issues = await openRes.json() as Array<{
+            number: number; title: string; pull_request?: unknown;
+            assignee?: { login: string } | null;
+          }>;
+          const realIssues = issues.filter((i) => !i.pull_request && i.assignee);
+          if (realIssues.length > 0) {
+            lines.push("");
+            lines.push(`  \u{1F4CB} <b>Still open:</b>`);
+            for (const issue of realIssues.slice(0, 10)) {
+              const color = getUserColorByName(members, issue.assignee!.login);
+              lines.push(`    ${color} #${issue.number} ${escapeHtml(issue.title)} (@${escapeHtml(issue.assignee!.login)})`);
+            }
+            if (realIssues.length > 10) {
+              lines.push(`    <i>...and ${realIssues.length - 10} more</i>`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[EveningGroup] Open issues fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    // --- Preview links waiting for review ---
+    if (token) {
+      try {
+        const prRes = await fetch(
+          `https://api.github.com/repos/${project.githubRepo}/pulls?state=open&per_page=50`,
+          { headers: { "User-Agent": "CortexBot", Authorization: `Bearer ${token}` } }
+        );
+        if (prRes.ok) {
+          const prs = await prRes.json() as Array<{
+            number: number; title: string; user: { login: string };
+            requested_reviewers: Array<{ login: string }>;
+          }>;
+          const needsReview = prs.filter((pr) => pr.requested_reviewers.length > 0);
+          if (needsReview.length > 0) {
+            lines.push("");
+            lines.push(`  \u{1F50D} <b>Preview links waiting for review:</b>`);
+            for (const pr of needsReview) {
+              const previewUrl = await getPreviewUrl(env.PROJECTS, projectId, pr.number);
+              const previewStr = previewUrl ? ` \u{2014} <a href="${escapeHtml(previewUrl)}">Preview</a>` : "";
+              const reviewers = pr.requested_reviewers.map((r) => `@${escapeHtml(r.login)}`).join(", ");
+              lines.push(`    \u{2022} #${pr.number} ${escapeHtml(pr.title)} \u{2192} ${reviewers}${previewStr}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[EveningGroup] PR review fetch failed for ${projectId}:`, e);
+      }
+    }
+
+    lines.push("");
+  }
+
+  // --- Today's team performance ---
+  try {
+    const stats = await getTodayStats(env.DB);
+    const workHours = await getWorkHoursToday(env.DB);
+
+    lines.push("\u{1F4CA} <b>Today's Team Performance:</b>");
+    lines.push(`  \u{1F4DD} Issues: ${stats.issues_opened} opened, ${stats.issues_closed} closed`);
+    lines.push(`  \u{1F500} PRs: ${stats.prs_merged} merged, ${stats.prs_open} opened`);
+    lines.push(`  \u{1F4C8} Total events: ${stats.total_events}`);
+
+    if (workHours.length > 0) {
+      lines.push("");
+      lines.push("  <b>Work Hours:</b>");
+      for (const w of workHours) {
+        const color = getUserColorByName(members, w.user_id);
+        lines.push(`  ${color} ${escapeHtml(w.user_id)}: ${formatDuration(w.total_minutes)}`);
+      }
+    }
+  } catch (e) {
+    console.error("[EveningGroup] Today stats failed:", e);
+  }
+
+  // --- Team learnings from D1 (Issue #64) ---
+  lines.push("");
+  try {
+    const allTeamLearnings: Array<{ content: string; user_id: string }> = [];
+    for (const p of projects) {
+      const pLearnings = await getTodayTeamLearnings(env.DB, p.id);
+      allTeamLearnings.push(...pLearnings);
+    }
+
+    if (allTeamLearnings.length > 0) {
+      lines.push("\u{1F4DA} <b>Team learnings today:</b>");
+      for (const l of allTeamLearnings.slice(0, 10)) {
+        const memberName = members.find((m) => String(m.telegram_id) === l.user_id)?.name || l.user_id;
+        lines.push(`  \u{2022} ${escapeHtml(memberName)}: ${escapeHtml(l.content)}`);
+      }
+    } else {
+      lines.push("\u{1F4DA} <i>No team learnings captured today.</i>");
+    }
+  } catch {
+    lines.push("\u{1F4DA} <i>Team learnings: error loading</i>");
+  }
+
+  await sendToLoginChannel(env, lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Evening digest — orchestrator (calls group + private DMs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send evening notifications: group summary + private DMs to all registered members.
+ * Called from the cron scheduler at 16:00 UTC (replacing the old simple sendEveningSummary).
+ * Also callable from session end hooks for individual DMs.
+ */
+async function sendEveningDigest(env: Env): Promise<void> {
+  // 1. Send the group evening message
+  try {
+    await sendGroupEveningMessage(env);
+  } catch (e) {
+    console.error("[EveningDigest] Group message failed:", e);
+  }
+
+  // 2. Send private evening DMs to all registered members (with dedup)
+  try {
+    const projects = await getProjectList(env);
+    const members = await getTeamMembers(env.PROJECTS);
+
+    for (const member of members) {
+      try {
+        await sendPrivateEveningDM(env, member, projects, members);
+      } catch (e) {
+        console.error(`[EveningDigest] DM failed for ${member.name}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error("[EveningDigest] Private DMs failed:", e);
+  }
 }

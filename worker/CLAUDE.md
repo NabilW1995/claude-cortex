@@ -27,3 +27,6 @@ Cloudflare Worker serving as the Telegram bot backend for team coordination.
 - D1 bindings are defined in wrangler.toml, not in code
 - KV namespace bindings also in wrangler.toml
 - Bot token is in environment variables, never hardcode
+- NEVER use `cd worker` — always use subshells: `(cd worker && npx tsc --noEmit)` or absolute paths
+- If you must change directory, ALWAYS use `cd worker && npx tsc --noEmit && cd ..` to return
+- Breaking this rule causes ALL hooks in the project to fail (they use relative paths from project root)
