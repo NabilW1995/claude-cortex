@@ -3825,6 +3825,77 @@ async function setPreviewUrl(
 }
 
 /**
+ * Look up the branch name for a Vercel deployment by PR number.
+ * Vercel webhooks include the PR ID but not the branch — we fetch it from GitHub.
+ * Returns the branch name, or null if lookup fails.
+ */
+async function resolveVercelBranch(
+  project: ProjectConfig,
+  prNumber: number
+): Promise<string | null> {
+  if (!project.githubToken) return null;
+  try {
+    const res = await githubRequest(
+      "GET",
+      `/repos/${project.githubRepo}/pulls/${prNumber}`,
+      project.githubToken
+    );
+    if (!res.ok) return null;
+    const pr = (await res.json()) as { head: { ref: string } };
+    return pr.head.ref;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send a deployment status DM (building/failed) to the branch owner.
+ * Finds the PR author via GitHub, then maps to a team member for the DM.
+ */
+async function notifyBranchOwner(
+  env: Env,
+  project: ProjectConfig,
+  branch: string,
+  status: "building" | "failed",
+  platform: string
+): Promise<void> {
+  // Try to find the branch owner by matching team members' active branches
+  const members = await getTeamMembers(env.PROJECTS);
+  if (!project.githubToken) return;
+
+  // Look up open PRs to find who owns this branch
+  try {
+    const res = await githubRequest(
+      "GET",
+      `/repos/${project.githubRepo}/pulls?state=open&head=${encodeURIComponent(`${project.githubRepo.split("/")[0]}:${branch}`)}&per_page=1`,
+      project.githubToken
+    );
+    if (!res.ok) return;
+
+    const prs = (await res.json()) as Array<{ user: { login: string } }>;
+    if (prs.length === 0) return;
+
+    const prAuthorGithub = prs[0].user.login;
+    const ownerMember = members.find((m) => m.github === prAuthorGithub);
+    if (!ownerMember) return;
+
+    const prefs = await getUserPreferences(env.PROJECTS, ownerMember.telegram_id);
+    if (!prefs.dm_chat_id) return;
+
+    const dnd = await isUserDND(env.PROJECTS, ownerMember.telegram_id);
+    if (dnd) return;
+
+    const lang = await getUserLanguage(env.PROJECTS, ownerMember.telegram_id);
+    const i18nKey = status === "building" ? "deploy.building" : "deploy.failed";
+    const text = t(lang, i18nKey, { platform, branch });
+
+    await sendDM(project.botToken, prefs.dm_chat_id, text);
+  } catch {
+    // Best-effort notification — don't break the webhook response
+  }
+}
+
+/**
  * Create a Pull Request on GitHub for the given branch.
  * Returns the PR number and URL on success, null on failure.
  */
@@ -9838,6 +9909,22 @@ function matchRoute(
     return { handler: "coolify", projectId: coolifyMatch[1] };
   }
 
+  // Vercel deployment webhook: POST /vercel/:projectId
+  const vercelMatch = pathname.match(
+    /^\/vercel\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (vercelMatch && method === "POST") {
+    return { handler: "vercel", projectId: vercelMatch[1] };
+  }
+
+  // Netlify deployment webhook: POST /netlify/:projectId
+  const netlifyMatch = pathname.match(
+    /^\/netlify\/([a-zA-Z0-9_-]+)\/?$/
+  );
+  if (netlifyMatch && method === "POST") {
+    return { handler: "netlify", projectId: netlifyMatch[1] };
+  }
+
   return null;
 }
 
@@ -9932,6 +10019,9 @@ export {
   submitPRReview,
   sendPullReminder,
   sendPreviewNotifications,
+  // Deploy webhook helpers (Vercel, Netlify)
+  resolveVercelBranch,
+  notifyBranchOwner,
   // Conflict detector helpers (Issue #58)
   saveChangedFiles,
   getChangedFiles,
@@ -10185,6 +10275,273 @@ export default {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("Coolify handler error:", msg);
           return new Response(`Coolify handler error: ${msg}`, { status: 500 });
+        }
+      }
+
+      case "vercel": {
+        // Vercel sends deployment webhooks when a preview builds/deploys/fails.
+        // We extract the preview URL and status, store in KV, then DM the team.
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
+        try {
+          const vercelBody = (await request.json()) as {
+            type?: string;
+            payload?: {
+              deployment?: {
+                url?: string;
+                meta?: { githubPrId?: string };
+              };
+              name?: string;
+            };
+          };
+
+          const deploymentType = vercelBody.type;
+          const rawDeployUrl = vercelBody.payload?.deployment?.url;
+          const prIdStr = vercelBody.payload?.deployment?.meta?.githubPrId;
+          const vercelProjectId = route.projectId!;
+
+          // Resolve the project for bot token and GitHub access
+          const vercelProject = await getProject(env.PROJECTS, vercelProjectId, env);
+
+          if (deploymentType === "deployment.created") {
+            // Optional: notify branch owner that the build started
+            if (vercelProject && prIdStr) {
+              const branch = await resolveVercelBranch(vercelProject, Number(prIdStr));
+              if (branch) {
+                await notifyBranchOwner(env, vercelProject, branch, "building", "Vercel");
+              }
+            }
+            return Response.json({ ok: true, status: "building" });
+          }
+
+          if (deploymentType === "deployment.error") {
+            // Notify the branch owner about the failure
+            if (vercelProject && prIdStr) {
+              const branch = await resolveVercelBranch(vercelProject, Number(prIdStr));
+              if (branch) {
+                await notifyBranchOwner(env, vercelProject, branch, "failed", "Vercel");
+              }
+            }
+            await logEvent(env.DB, vercelProject?.githubRepo ?? vercelProjectId, "preview.failed", "vercel", prIdStr ?? "unknown");
+            return Response.json({ ok: true, status: "error" });
+          }
+
+          if (deploymentType === "deployment.ready") {
+            if (!rawDeployUrl || !prIdStr) {
+              return new Response("Missing deployment url or githubPrId in payload", { status: 400 });
+            }
+
+            // Vercel URLs may not include the protocol
+            const fullUrl = rawDeployUrl.startsWith("http") ? rawDeployUrl : `https://${rawDeployUrl}`;
+            const deployUrl = sanitizeUrl(fullUrl);
+            if (!deployUrl) {
+              return new Response("Invalid preview URL scheme", { status: 400 });
+            }
+
+            const prNum = Number(prIdStr);
+            if (Number.isNaN(prNum) || prNum <= 0) {
+              return new Response("Invalid PR number", { status: 400 });
+            }
+
+            // Store the preview URL in KV (7-day TTL)
+            await setPreviewUrl(env.PROJECTS, vercelProjectId, prNum, deployUrl);
+
+            if (vercelProject) {
+              // Look up PR title for a nicer notification
+              let prTitle = `PR #${prNum}`;
+              let prUrl = "";
+              if (vercelProject.githubToken) {
+                try {
+                  const prRes = await githubRequest(
+                    "GET",
+                    `/repos/${vercelProject.githubRepo}/pulls/${prNum}`,
+                    vercelProject.githubToken
+                  );
+                  if (prRes.ok) {
+                    const prData = (await prRes.json()) as { title: string; html_url: string };
+                    prTitle = prData.title;
+                    prUrl = prData.html_url;
+                  }
+                } catch {
+                  // Best-effort title lookup
+                }
+              }
+
+              // DM all team members with preview link and review buttons
+              const members = await getTeamMembers(env.PROJECTS);
+              for (const member of members) {
+                const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+                if (dnd) continue;
+
+                const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+                if (!prefs.dm_chat_id) continue;
+                if (!prefs.previews && !prefs.pr_reviews) continue;
+
+                const prUrlLine = prUrl
+                  ? `\n\u{1F517} <a href="${prUrl}">View PR</a>`
+                  : "";
+
+                const lang = await getUserLanguage(env.PROJECTS, member.telegram_id);
+                const text =
+                  t(lang, "deploy.ready", { platform: "Vercel", url: deployUrl, branch: prTitle }) +
+                  prUrlLine + "\n\nPlease review:";
+
+                const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+                  inline_keyboard: [
+                    [
+                      { text: "\u{2705} Approve", callback_data: `review_approve:${prNum}` },
+                      { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNum}` },
+                    ],
+                    [
+                      { text: "\u{1F310} Preview", url: deployUrl },
+                    ],
+                  ],
+                };
+
+                const status = await sendDM(vercelProject.botToken, prefs.dm_chat_id, text, reviewKb);
+                if (status === "blocked") {
+                  prefs.dm_chat_id = null;
+                  await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+                }
+              }
+
+              await logEvent(env.DB, vercelProject.githubRepo, "preview.deployed", "vercel", String(prNum), { url: deployUrl });
+            }
+
+            return Response.json({ ok: true, stored: `preview:${vercelProjectId}:${prNum}` });
+          }
+
+          // Unknown deployment type — acknowledge without error
+          return Response.json({ ok: true, status: "ignored", type: deploymentType });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Vercel handler error:", msg);
+          return new Response(`Vercel handler error: ${msg}`, { status: 500 });
+        }
+      }
+
+      case "netlify": {
+        // Netlify sends deploy notification webhooks with state changes.
+        // We extract the preview URL and status, store in KV, then DM the team.
+        if (!verifyBotSecret(request, env)) return new Response("Unauthorized", { status: 401 });
+        try {
+          const netlifyBody = (await request.json()) as {
+            state?: string;
+            deploy_ssl_url?: string;
+            context?: string;
+            review_id?: number;
+            branch?: string;
+            name?: string;
+          };
+
+          const state = netlifyBody.state;
+          const netlifyProjectId = route.projectId!;
+          const netlifyProject = await getProject(env.PROJECTS, netlifyProjectId, env);
+
+          if (state === "building") {
+            // Optional: notify branch owner that the build started
+            const branch = netlifyBody.branch ?? "unknown";
+            if (netlifyProject) {
+              await notifyBranchOwner(env, netlifyProject, branch, "building", "Netlify");
+            }
+            return Response.json({ ok: true, status: "building" });
+          }
+
+          if (state === "error") {
+            const branch = netlifyBody.branch ?? "unknown";
+            if (netlifyProject) {
+              await notifyBranchOwner(env, netlifyProject, branch, "failed", "Netlify");
+            }
+            await logEvent(env.DB, netlifyProject?.githubRepo ?? netlifyProjectId, "preview.failed", "netlify", netlifyBody.review_id ? String(netlifyBody.review_id) : "unknown");
+            return Response.json({ ok: true, status: "error" });
+          }
+
+          if (state === "ready") {
+            const rawDeployUrl = netlifyBody.deploy_ssl_url;
+            const prNum = netlifyBody.review_id;
+
+            if (!rawDeployUrl || !prNum) {
+              return new Response("Missing deploy_ssl_url or review_id", { status: 400 });
+            }
+
+            const deployUrl = sanitizeUrl(rawDeployUrl);
+            if (!deployUrl) {
+              return new Response("Invalid preview URL scheme", { status: 400 });
+            }
+
+            // Store the preview URL in KV (7-day TTL)
+            await setPreviewUrl(env.PROJECTS, netlifyProjectId, prNum, deployUrl);
+
+            if (netlifyProject) {
+              // Look up PR title for a nicer notification
+              let prTitle = `PR #${prNum}`;
+              let prUrl = "";
+              if (netlifyProject.githubToken) {
+                try {
+                  const prRes = await githubRequest(
+                    "GET",
+                    `/repos/${netlifyProject.githubRepo}/pulls/${prNum}`,
+                    netlifyProject.githubToken
+                  );
+                  if (prRes.ok) {
+                    const prData = (await prRes.json()) as { title: string; html_url: string };
+                    prTitle = prData.title;
+                    prUrl = prData.html_url;
+                  }
+                } catch {
+                  // Best-effort title lookup
+                }
+              }
+
+              // DM all team members with preview link and review buttons
+              const members = await getTeamMembers(env.PROJECTS);
+              for (const member of members) {
+                const dnd = await isUserDND(env.PROJECTS, member.telegram_id);
+                if (dnd) continue;
+
+                const prefs = await getUserPreferences(env.PROJECTS, member.telegram_id);
+                if (!prefs.dm_chat_id) continue;
+                if (!prefs.previews && !prefs.pr_reviews) continue;
+
+                const prUrlLine = prUrl
+                  ? `\n\u{1F517} <a href="${prUrl}">View PR</a>`
+                  : "";
+
+                const lang = await getUserLanguage(env.PROJECTS, member.telegram_id);
+                const text =
+                  t(lang, "deploy.ready", { platform: "Netlify", url: deployUrl, branch: prTitle }) +
+                  prUrlLine + "\n\nPlease review:";
+
+                const reviewKb: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } = {
+                  inline_keyboard: [
+                    [
+                      { text: "\u{2705} Approve", callback_data: `review_approve:${prNum}` },
+                      { text: "\u{270F}\u{FE0F} Request Changes", callback_data: `review_changes:${prNum}` },
+                    ],
+                    [
+                      { text: "\u{1F310} Preview", url: deployUrl },
+                    ],
+                  ],
+                };
+
+                const status = await sendDM(netlifyProject.botToken, prefs.dm_chat_id, text, reviewKb);
+                if (status === "blocked") {
+                  prefs.dm_chat_id = null;
+                  await saveUserPreferences(env.PROJECTS, member.telegram_id, prefs);
+                }
+              }
+
+              await logEvent(env.DB, netlifyProject.githubRepo, "preview.deployed", "netlify", String(prNum), { url: deployUrl });
+            }
+
+            return Response.json({ ok: true, stored: `preview:${netlifyProjectId}:${prNum}` });
+          }
+
+          // Unknown state — acknowledge without error
+          return Response.json({ ok: true, status: "ignored", state });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("Netlify handler error:", msg);
+          return new Response(`Netlify handler error: ${msg}`, { status: 500 });
         }
       }
 

@@ -214,6 +214,11 @@ const en: Record<string, string> = {
   "ci.status_cancelled": "\u{23F3} CI cancelled",
   "ci.rerun_success": "\u{2705} Workflow re-triggered!",
   "ci.rerun_failed": "Failed to re-run: {status}",
+
+  // Deploy webhooks (Vercel, Netlify, Coolify)
+  "deploy.building": "\u{1F528} <b>{platform}</b> is building preview for <code>{branch}</code>...",
+  "deploy.ready": "\u{1F680} <b>{platform} Preview Ready!</b>\n\n\u{1F517} <a href=\"{url}\">Open Preview</a>\nBranch: <code>{branch}</code>",
+  "deploy.failed": "\u{274C} <b>{platform} Deploy Failed</b>\n\nBranch: <code>{branch}</code>\nCheck the {platform} dashboard for details.",
 };
 
 const de: Record<string, string> = {
@@ -411,6 +416,11 @@ const de: Record<string, string> = {
   "ci.status_cancelled": "\u{23F3} CI abgebrochen",
   "ci.rerun_success": "\u{2705} Workflow neu gestartet!",
   "ci.rerun_failed": "Fehler beim Neustarten: {status}",
+
+  // Deploy webhooks (Vercel, Netlify, Coolify)
+  "deploy.building": "\u{1F528} <b>{platform}</b> baut Preview f\u00fcr <code>{branch}</code>...",
+  "deploy.ready": "\u{1F680} <b>{platform} Preview bereit!</b>\n\n\u{1F517} <a href=\"{url}\">Preview \u00f6ffnen</a>\nBranch: <code>{branch}</code>",
+  "deploy.failed": "\u{274C} <b>{platform} Deploy fehlgeschlagen</b>\n\nBranch: <code>{branch}</code>\nPr\u00fcfe das {platform}-Dashboard f\u00fcr Details.",
 };
 
 // ---------------------------------------------------------------------------
